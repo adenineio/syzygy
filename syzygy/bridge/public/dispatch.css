@@ -1,0 +1,178 @@
+/* Dispatch tab. Only what this tab introduces — .panel, .phead, .btn, .pill
+   and .empty come from app.css and are reused as-is. */
+
+#view-dispatch { flex-direction: column; gap: 10px; padding: 12px; overflow: auto; }
+
+.dsection { display: flex; flex-direction: column; gap: 6px; }
+
+.drow {
+  display: grid;
+  grid-template-columns: 18px 92px 1fr auto;
+  gap: 10px; align-items: center;
+  padding: 7px 10px;
+  border: 1px solid var(--edge);
+  background: var(--panel);
+  border-radius: var(--r-control);
+}
+.drow:hover { border-color: var(--edge-hi); }
+
+.dstate {
+  font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  padding: 2px 6px; border: 1px solid var(--edge); color: var(--grey);
+  border-radius: var(--r-control);
+}
+.dstate.queued      { color: var(--amber); border-color: #4a3a1d; }
+.dstate.dispatched  { color: var(--cyan);   border-color: var(--edge-hi); }
+.dstate.planned     { color: var(--green);  border-color: #1b4438; }
+.dstate.failed      { color: var(--red-hot); border-color: #451d2a; }
+
+.dtitle { color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dslug  { color: var(--grey); font-size: 11px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .drow, .dstate { transition: none !important; animation: none !important; }
+}
+
+.dform  { display: flex; flex-direction: column; gap: 6px; }
+.dinput {
+  background: var(--surface); color: var(--fg);
+  border: 1px solid var(--edge-hi); padding: 6px 8px;
+  font: inherit; font-size: 12px; width: 100%;
+  border-radius: var(--r-input);
+}
+.dinput:focus { outline: none; border-color: var(--cyan); }
+.dta { resize: vertical; }
+
+.dwrap { display: flex; flex-direction: column; }
+.dmid  { min-width: 0; }
+.dsub  { display: flex; gap: 6px; align-items: center; margin-top: 3px; }
+.dchip {
+  font-size: 10px; padding: 1px 5px;
+  border: 1px solid var(--edge); color: var(--grey);
+  border-radius: var(--r-control);
+}
+.dchip.on { color: var(--cyan); border-color: var(--edge-hi); }
+.dacts { display: flex; gap: 4px; }
+
+.deditor {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 10px; border: 1px solid var(--edge); border-top: 0;
+  background: var(--surface);
+  border-radius: var(--r-surface);
+}
+.dlabel { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--grey); }
+
+.drow.grow { grid-template-columns: 1fr auto; }
+
+/* Dispatch tab: projects-at-a-glance drilldown. A glance row is clickable to
+   reveal its efforts and backlog; .dclick is the affordance, .dcaret the
+   disclosure triangle (mirrors projects.js's .plancaret). */
+.drow.dclick { cursor: pointer; }
+.drow.dclick:hover { border-color: var(--edge-hi); }
+.dcaret { display: inline-block; width: 10px; font-size: 10px; opacity: .6; }
+
+.dexpand {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 10px 10px 24px; border: 1px solid var(--edge); border-top: 0;
+  background: var(--surface);
+  border-radius: var(--r-surface);
+}
+.dexsect {
+  font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--grey); margin-top: 4px;
+}
+.dexsect:first-child { margin-top: 0; }
+.drow.dexeffort, .drow.dexbacklog {
+  display: flex; flex-direction: column; align-items: stretch; gap: 2px;
+  grid-template-columns: none; padding: 5px 8px;
+}
+.dexefforthead { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+.dexprogress { color: var(--grey); font-size: 11px; white-space: nowrap; }
+.dcurrent { color: var(--cyan); }
+.dclaimed { color: var(--grey); }
+.drow.dexbacklog { flex-direction: row; justify-content: space-between; align-items: center; }
+
+/* .panel (app.css) sets `display: flex` unconditionally, which -- author
+   styles always beat the UA default [hidden] rule, regardless of specificity
+   -- leaves the thread panel visible even with the `hidden` attribute set.
+   Same fix app.css already applies to `.modal[hidden]`. Verified by
+   inspecting computed style in a real browser: `display: flex` despite
+   `hidden` being true on the element. */
+#d-threadpanel[hidden] { display: none; }
+
+.dthread { max-height: 46vh; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.dturn   { display: grid; grid-template-columns: 56px 1fr; gap: 8px; align-items: start; }
+.dwho    { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--grey); padding-top: 2px; }
+.dturn.user .dwho { color: var(--cyan); }
+.dtext   { white-space: pre-wrap; color: var(--fg); }
+.dstreaming { color: var(--grey); }
+
+/* The scoping conversation was resumed in a terminal, which forks it: turns
+   here no longer reach that process. A standing notice, not a toast -- the
+   state persists and the toast would not. */
+.dforked {
+  margin: 6px 0 0; padding: 6px 8px;
+  border-left: 2px solid var(--amber, #fbbf24);
+  color: var(--amber, #fbbf24); font-size: 12px;
+}
+.drowbtns { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.dcmd {
+  font-size: 11px; color: var(--cyan); cursor: pointer;
+  border: 1px solid var(--edge); padding: 3px 6px; background: var(--surface);
+  border-radius: var(--r-control);
+}
+.dcmd:hover { border-color: var(--cyan); }
+
+@media (prefers-reduced-motion: reduce) { .dstreaming { animation: none !important; } }
+
+.dnotice {
+  border: 1px solid var(--edge); border-left: 3px solid var(--amber);
+  background: var(--panel); color: var(--text);
+  padding: 7px 10px; font-size: 11px; line-height: 1.5;
+  border-radius: var(--r-surface);
+}
+
+.dcard {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 9px 11px; margin-bottom: 6px;
+  border: 1px solid var(--edge); border-left-width: 3px; background: var(--panel);
+  border-radius: var(--r-surface);
+}
+.dcardhead { display: flex; gap: 10px; align-items: center; }
+.dcard.working      { border-left-color: var(--cyan); }
+.dcard.blocked      { border-left-color: var(--red-hot); }
+.dcard.plan-ready   { border-left-color: var(--green); }
+.dcard.no-plan      { border-left-color: var(--amber); }
+.dcard.implementing { border-left-color: var(--purple); }
+.dstate.blocked     { color: var(--red-hot); border-color: #451d2a; }
+.dstate.plan-ready  { color: var(--green);   border-color: #1b4438; }
+.dstate.no-plan     { color: var(--amber);   border-color: #4a3a1d; }
+.derr { color: var(--red-hot); }
+.phead .spacer { flex: 1; }
+
+/* The project badges: a wrapped row above the project input. A badge is a
+   whole project, so it is wide enough to read a repo name at a glance. */
+.dbadges { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 6px; }
+.dbadge {
+  font: inherit; font-size: 11px; line-height: 1;
+  padding: 5px 9px; border-radius: var(--r-pill); cursor: pointer;
+  color: var(--fg); background: var(--panel2, rgba(255,255,255,.04));
+  border: 1px solid var(--line, rgba(255,255,255,.14));
+}
+.dbadge:hover { border-color: var(--accent, #6cf); }
+/* A project with a session open in it right now. The dot, not a colour swap:
+   the row still has to read in a theme where the accent IS the text colour. */
+.dbadge.live::before {
+  content: ''; display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--ok, #6c6); margin-right: 5px; vertical-align: middle;
+}
+.dbadges-empty { font-size: 11px; opacity: .6; margin-bottom: 6px; }
+/* DEVIATION from the plan: named .dpickrow/.doption rather than .drow/.dpick,
+   which this file already uses for the queue's grid row and its selection
+   checkbox respectively. Reusing those names would not break anything today
+   (grid ignores a flex-basis, and the extra padding/border/background just
+   boxes the row), but it is a real class collision waiting to bite the next
+   edit to either rule. */
+.dpickrow { display: flex; gap: 6px; flex-wrap: wrap; }
+.doption { flex: 1 1 120px; min-width: 0; }
+.dnote { font-size: 11px; opacity: .7; margin: 2px 0 4px; }

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "forge",
+  "version": "0.1.0",
+  "description": "Runtime skill acquisition: mint a repeated sequence of tool calls into one named, deterministic tool that persists per project across sessions, plus exact offload tools (json_query, regex_test, text_diff). Zero model calls.",
+  "author": {
+    "name": "adenineio",
+    "url": "https://github.com/adenineio"
+  },
+  "keywords": [
+    "tools",
+    "function-hooks",
+    "automation",
+    "determinism",
+    "memory"
+  ],
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/adenineio/syzygy"
+}

@@ -1,0 +1,304 @@
+{
+  "t": 1789184014739,
+  "sessions": [
+    {
+      "series": [
+        {
+          "t": 1789184011787,
+          "tokens": 0,
+          "spend": 0.4
+        },
+        {
+          "t": 1789184012796,
+          "tokens": 0,
+          "spend": 0.4
+        },
+        {
+          "t": 1789184013798,
+          "tokens": 0,
+          "spend": 0.4
+        }
+      ],
+      "stats": {
+        "ctx": 40000,
+        "tools": 10,
+        "spend": 0.4,
+        "outTok": 1800,
+        "ctxLimit": 1000000,
+        "guardrails": 0
+      },
+      "agents": [],
+      "files": {},
+      "status": "idle",
+      "id": "fake-00-4uldp2",
+      "name": "orbital-parser",
+      "model": "opus 5",
+      "branch": "main",
+      "tmux": "szg-0",
+      "startedAt": 1789184011742,
+      "seenAt": 1789184013801,
+      "idleSince": 1789184011775,
+      "needs": "",
+      "lastAnswer": "",
+      "lastAnswerAt": 0,
+      "working": false,
+      "progressFp": "40000:10:400",
+      "progressAt": 1789184011787
+    },
+    {
+      "series": [
+        {
+          "t": 1789184011787,
+          "tokens": 0,
+          "spend": 0.75
+        },
+        {
+          "t": 1789184013800,
+          "tokens": 0,
+          "spend": 0.75
+        },
+        {
+          "t": 1789184013802,
+          "tokens": 0,
+          "spend": 0.75
+        }
+      ],
+      "stats": {
+        "ctx": 61000,
+        "tools": 17,
+        "spend": 0.75,
+        "outTok": 3060,
+        "ctxLimit": 1000000,
+        "guardrails": 0
+      },
+      "agents": [],
+      "files": {},
+      "status": "idle",
+      "id": "fake-01-gtzqdb",
+      "name": "alpha-pass",
+      "model": "sonnet 5",
+      "branch": "feat/thing-1",
+      "tmux": "",
+      "startedAt": 1789184011779,
+      "seenAt": 1789184013802,
+      "idleSince": 1789184011780,
+      "needs": "SYNTHETIC \u2014 continue?",
+      "lastAnswer": "",
+      "lastAnswerAt": 0,
+      "working": false,
+      "progressFp": "61000:17:750",
+      "progressAt": 1789184011788
+    },
+    {
+      "series": [
+        {
+          "t": 1789184011788,
+          "tokens": 0,
+          "spend": 1.1
+        },
+        {
+          "t": 1789184013802,
+          "tokens": 0,
+          "spend": 1.1
+        },
+        {
+          "t": 1789184013802,
+          "tokens": 0,
+          "spend": 1.1
+        }
+      ],
+      "stats": {
+        "ctx": 82000,
+        "tools": 24,
+        "spend": 1.1,
+        "outTok": 4320,
+        "ctxLimit": 1000000,
+        "guardrails": 0
+      },
+      "agents": [],
+      "files": {},
+      "status": "idle",
+      "id": "fake-02-ieoa6s",
+      "name": "beta-pass",
+      "model": "haiku 4.5",
+      "branch": "feat/thing-2",
+      "tmux": "szg-2",
+      "startedAt": 1789184011782,
+      "seenAt": 1789184013803,
+      "idleSince": 1789184011784,
+      "needs": "",
+      "lastAnswer": "",
+      "lastAnswerAt": 0,
+      "working": false,
+      "progressFp": "82000:24:1100",
+      "progressAt": 1789184011789
+    },
+    {
+      "series": [
+        {
+          "t": 1789184011791,
+          "tokens": 0,
+          "spend": 1.4499999999999997
+        },
+        {
+          "t": 1789184013803,
+          "tokens": 0,
+          "spend": 1.4499999999999997
+        },
+        {
+          "t": 1789184013804,
+          "tokens": 0,
+          "spend": 1.4499999999999997
+        }
+      ],
+      "stats": {
+        "ctx": 103000,
+        "tools": 31,
+        "spend": 1.4499999999999997,
+        "outTok": 5580,
+        "ctxLimit": 200000,
+        "guardrails": 0
+      },
+      "agents": [],
+      "files": {},
+      "status": "idle",
+      "id": "fake-03-81ihru",
+      "name": "tessellate",
+      "model": "opus 5",
+      "branch": "main",
+      "tmux": "",
+      "startedAt": 1789184011784,
+      "seenAt": 1789184013804,
+      "idleSince": 1789184011785,
+      "needs": "",
+      "lastAnswer": "",
+      "lastAnswerAt": 0,
+      "working": false,
+      "progressFp": "103000:31:1450",
+      "progressAt": 1789184011792
+    },
+    {
+      "series": [
+        {
+          "t": 1789184011793,
+          "tokens": 0,
+          "spend": 1.7999999999999998
+        },
+        {
+          "t": 1789184013804,
+          "tokens": 0,
+          "spend": 1.7999999999999998
+        },
+        {
+          "t": 1789184013804,
+          "tokens": 0,
+          "spend": 1.7999999999999998
+        }
+      ],
+      "stats": {
+        "ctx": 124000,
+        "tools": 38,
+        "spend": 1.7999999999999998,
+        "outTok": 6840,
+        "ctxLimit": 1000000,
+        "guardrails": 0
+      },
+      "agents": [],
+      "files": {},
+      "status": "idle",
+      "id": "fake-04-rpu169",
+      "name": "cache-audit",
+      "model": "sonnet 5",
+      "branch": "feat/thing-4",
+      "tmux": "szg-4",
+      "startedAt": 1789184011785,
+      "seenAt": 1789184013805,
+      "idleSince": 1789184011786,
+      "needs": "",
+      "lastAnswer": "",
+      "lastAnswerAt": 0,
+      "working": false,
+      "progressFp": "124000:38:1800",
+      "progressAt": 1789184011794
+    }
+  ],
+  "events": [],
+  "questions": [],
+  "approvals": [],
+  "links": [],
+  "projects": [],
+  "canvas": {
+    "nodes": {},
+    "spawnedBy": [],
+    "recents": [],
+    "live": 0,
+    "home": "/home/dev/project"
+  },
+  "dispatch": {
+    "requests": []
+  },
+  "dispatchOptions": {
+    "models": [
+      "fable",
+      "opus",
+      "sonnet",
+      "haiku"
+    ],
+    "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "source": "help"
+  },
+  "usage": {
+    "fiveHour": null,
+    "sevenDay": null,
+    "observedAt": null,
+    "stale": true
+  },
+  "usageHistory": [],
+  "afterReset": {
+    "queue": []
+  },
+  "steering": {
+    "custom": []
+  },
+  "voice": {
+    "enabled": false,
+    "env": {
+      "present": false,
+      "bytes": 0,
+      "installing": false,
+      "progress": 0,
+      "error": null
+    },
+    "model": {
+      "name": "large-v3-turbo.pt",
+      "present": false,
+      "bytes": 0,
+      "expectedBytes": 1617941637,
+      "downloading": false,
+      "progress": 0,
+      "error": null
+    },
+    "worker": {
+      "up": false,
+      "device": null,
+      "error": null
+    },
+    "ready": false,
+    "engine": "openai-whisper",
+    "device": null,
+    "modifier": "Control",
+    "maxSeconds": 120,
+    "maxBytes": 6291456,
+    "chunkMs": 2500
+  },
+  "viewers": 0,
+  "auth": {
+    "enabled": false
+  }
+}

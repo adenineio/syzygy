@@ -1,0 +1,49 @@
+/* Syzygy — voice input: field styles only. The settings section ("Voice
+   input" inside #settingspop) is styled in app.css alongside the rest of the
+   settings popover — this file carries the mic
+   button, its listening state, the provisional-text state, and the
+   listening outline on the field it is attached to, nothing else.
+
+   No animation lives here: an animation gets described and agreed before it
+   ships, and neither has happened for this feature — every state below is a
+   flat colour change, not a pulse. */
+
+/* The button's parent gains this by classList.add (never className=, which
+   would wipe .gone out from under MCX.show elsewhere in the pane) so the
+   button — itself position:absolute — has something to anchor to.
+   position:relative with no offsets is a visual no-op on its own; the
+   accepted risk is the stacking context it opens. */
+.mcv-host { position: relative; }
+
+/* left/top are set from the FIELD's own box by
+   voice.js's positionButton (MCVM.micRect), not fixed here — the button
+   used to sit at right:6px/bottom:6px of `.mcv-host`, which is the field's
+   PARENT, so for a field inside a larger form it landed at the form's
+   corner rather than the field's. */
+.mcv-mic {
+  position: absolute; z-index: 2;
+  width: 22px; height: 22px; padding: 0; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-family: inherit; cursor: pointer;
+  color: var(--dim); background: var(--surface); border: 1px solid var(--edge-hi);
+  /* A button, not a fixed pill: it follows the corner-style token like every
+     other control (app.css), so it is square under sharp, gently rounded
+     under soft, and only a true circle -- 999px on a 22x22 box -- under
+     space, alongside the rest of that style's pill buttons. */
+  border-radius: var(--r-control);
+}
+.mcv-mic:hover { color: var(--accent); border-color: var(--accent-deep); }
+/* Listening, from either trigger (click or held Control). A flat colour
+   swap, deliberately not a pulse -- see the file header. */
+.mcv-mic.on { color: var(--bg); background: var(--red-hot); border-color: var(--red-hot); }
+
+/* The field itself, while it is the one being dictated into. */
+.mcv-listening { outline: 2px solid var(--red-hot); outline-offset: -1px; }
+
+/*  a <textarea> holds a plain string and cannot style a
+   substring (no ::selection, no Highlight API, no markup), so "this text is
+   still provisional, live transcription may still replace it" is a class on
+   the FIELD rather than coloured text. Layered with .mcv-listening (which
+   marks "currently recording") via box-shadow rather than outline, so both
+   can be visible together without one silently overriding the other. */
+.mcv-provisional { box-shadow: inset 0 0 0 2px var(--red-hot); }

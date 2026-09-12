@@ -1,0 +1,146 @@
+/* Syzygy -- the session canvas. Same ground and chrome as the switchboard's
+   cards (app.css .card), but a node is absolutely positioned and fixed-size:
+   canvas-layout.js's NODE_W/NODE_H are the layout's units and these rules
+   must match them. Angular, flat, no glow -- the deck's rules. */
+
+/* `display` on a view is only ever set under .on (docs/FEATURES.md, the
+   telemetry merge bug: an ID selector outranks .view:not(.on)). */
+#view-canvas.on { display: flex; padding: 12px; }
+.cpanel { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.cpanel .phead .spacer { flex: 1; }
+.clive { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); margin-right: 10px; }
+.clive.busy { color: var(--amber); }
+
+/* The same banner the Dispatch tab carries, restated here rather than reusing
+   .dnotice: that class lives in a file another session owns. */
+.cnotice {
+  border: 1px solid var(--edge); border-left: 3px solid var(--amber);
+  background: var(--panel); color: var(--text);
+  padding: 7px 10px; font-size: 11px; line-height: 1.5;
+  border-radius: var(--r-surface);
+}
+.cnotice b { color: var(--amber-hot); }
+
+/* The count on the tab itself: visible from every view, by requirement. */
+.tabn {
+  display: inline-block; min-width: 14px; margin-left: 5px; padding: 0 4px;
+  font-size: 9px; letter-spacing: 0; text-align: center;
+  color: var(--grey); border: 1px solid var(--edge);
+}
+.tabn.busy { color: var(--bg); background: var(--amber); border-color: var(--amber); }
+
+/* The stage scrolls; .cnodes is the content box, sized by canvas.js to the
+   furthest node so the scroller can reach it. The wire overlay covers the
+   same content box and is drawn in its coordinates. */
+.cstage { position: relative; flex: 1; min-height: 0; overflow: auto; background: var(--surface); }
+.cnodes { position: relative; min-width: 100%; min-height: 100%; }
+.cwires { position: absolute; left: 0; top: 0; pointer-events: none; }
+.cempty { position: absolute; left: 16px; top: 16px; }
+
+.cnode {
+  position: absolute; width: 232px; height: 126px; box-sizing: border-box;
+  padding: 9px 11px 8px; cursor: grab;
+  border: 1px solid var(--edge); background: var(--panel);
+  border-radius: var(--r-surface);
+  /* A node is a drag source held by setPointerCapture; keep the browser's
+     own selection and scroll gestures out of it (app.css .card says why). */
+  user-select: none; -webkit-user-select: none; touch-action: none;
+}
+/* Corner-style tokens are declared in app.css but the cascade is global, so
+   they resolve here too; this file just restates the sharp-only chamfer the
+   way it already restates `.card.colored::after` below -- app.css belongs to
+   another session and this file must not depend on it keeping the rule. */
+:root[data-corners="sharp"] .cnode {
+  border-radius: 0;
+  clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
+}
+.cnode:hover { border-color: var(--cyan-deep); }
+.cnode.working { box-shadow: inset 2px 0 0 var(--amber); }
+.cnode.dragging { opacity: .82; cursor: grabbing; z-index: 3; }
+.cnode.wiring { border-color: var(--cyan); }
+.cnode.target { border-color: var(--cyan); background: rgba(111,195,223,.10); }
+.cnode.spawned .cname::before { content: '◈ '; color: var(--cyan); }
+
+/* Waiting on you. After the hover, wiring and target rules so it keeps
+   saying so under the pointer; the two gesture-in-flight colours are handed
+   back explicitly, since feedback for a gesture outranks a standing state.
+   Same reasoning and same amber as the switchboard card. */
+/* No outer glow. One (`0 0 18px -6px var(--amber-hot)`) would be clipped to
+   invisible by the chamfer above and then appear from nowhere the moment
+   soft/space turned that chamfer off -- and it is not wanted in either state.
+   `.card.needs` in app.css carries no glow for the same reason. */
+.cnode.needs { border-color: var(--amber); box-shadow: inset 2px 0 0 var(--amber-hot); }
+.cnode.needs:hover { border-color: var(--amber-hot); }
+.cnode.needs.wiring, .cnode.needs.target { border-color: var(--cyan); }
+.cneed {
+  margin-left: 4px; color: var(--amber-hot); font-size: 8px;
+  letter-spacing: .1em; text-transform: uppercase; white-space: nowrap;
+  animation: cneedpulse 2.4s ease-in-out infinite;
+}
+@keyframes cneedpulse { 0%, 100% { opacity: .5 } 50% { opacity: 1 } }
+@media (prefers-reduced-motion: reduce) { .cneed { animation: none; opacity: .95 } }
+
+/* Simply stopped. No border rule and no hue: the node keeps its ordinary
+   outline and gains one dim ring, so it reads as "nothing to report" rather
+   than as a third state competing with amber. Shown and hidden by MCX.show,
+   which is why there is no `display` here -- `.gone` carries that. */
+.cstop { margin-left: 4px; color: var(--grey); font-size: 8px; }
+.cnode.stopped .cbadge { color: var(--dim); }
+
+.crow1 { display: flex; align-items: center; gap: 6px; }
+.cname { font-weight: 700; font-size: 12px; color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cbadge { margin-left: auto; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--grey); white-space: nowrap; }
+.cnode.working .cbadge { color: var(--amber); }
+.cmeta { margin-top: 3px; font-size: 10px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ccwd  { margin-top: 2px; font-size: 10px; color: var(--grey); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.cbtns { position: absolute; left: 11px; bottom: 8px; display: flex; gap: 6px; }
+.cbtns .btn { padding: 3px 8px; font-size: 9.5px; cursor: pointer; }
+.cgrip { position: absolute; right: 8px; bottom: 7px; font-size: 8.5px; color: var(--grey); letter-spacing: .1em; cursor: crosshair; padding: 2px 4px; }
+.cnode:hover .cgrip { color: var(--cyan); }
+
+/* The spawn form: a small panel at the click point. */
+.cspawn {
+  position: absolute; z-index: 5; width: 340px; padding: 10px;
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--surface); border: 1px solid var(--edge-hi);
+  border-radius: var(--r-surface);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, .6);
+}
+:root[data-corners="sharp"] .cspawn {
+  border-radius: 0;
+  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+}
+.cspawn[hidden] { display: none; }
+.cslabel { font-size: 9px; letter-spacing: .18em; text-transform: uppercase; color: var(--cyan); }
+.csrow { display: flex; gap: 6px; }
+.csrow .dinput { flex: 1; }
+/* The form's own keyboard line, like the link dialog's .mnote. app.css's
+   `.hint` is a panel footer -- it carries a top border and 12px of padding
+   that read wrong inside a 340px popover -- so only its <kbd> look is borrowed. */
+.cshint { font-size: 9.5px; color: var(--grey); letter-spacing: .04em; }
+.cshint kbd { background: var(--panel); border: 1px solid var(--edge-hi); padding: 1px 4px; color: var(--dim); }
+
+/* Optional elements are built once and hidden here, never added and removed
+   (reconcile.js). Duplicated from projects.css on purpose: that file belongs
+   to another session and this tab must not depend on it keeping the rule. */
+.gone { display: none !important; }
+
+/* A session's own outline colour (cards.mjs), restated from app.css's
+   `.card.colored::after` -- that file belongs to another session and this
+   one must not depend on it keeping the selector, same as `.gone` above.
+   Same reason it is a `::after` and not `outline`/an outer `box-shadow`:
+   under sharp, `.cnode` carries the identical clip-path chamfer, which clips
+   both, and `.cnode.working`/`.cnode.needs` already own the `box-shadow`
+   property outright. The pseudo is its own box with its own `box-shadow`, so
+   it can never be overwritten by or overwrite theirs. Its own corners follow
+   `.cnode`'s own --r-surface/clip-path split, immediately below. */
+.cnode.colored::after {
+  content: '';
+  position: absolute; inset: 0; pointer-events: none;
+  border-radius: var(--r-surface);
+  box-shadow: inset 0 0 0 2px var(--card-color);
+}
+:root[data-corners="sharp"] .cnode.colored::after {
+  border-radius: 0;
+  clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
+}

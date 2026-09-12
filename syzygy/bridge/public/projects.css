@@ -1,0 +1,82 @@
+/* Projects view. Palette variables come from app.css. */
+
+/* Fill the tab. `.view.on` is a row-flex container, so a lone child without
+   flex:1 shrink-wraps to its content and stays that way once populated.
+   Mirrors what #view-board does for the switchboard. */
+#view-projects { flex: 1; flex-direction: column; }
+.panel.projects { flex: 1; min-height: 0; }
+
+.projlist { display: flex; flex-direction: column; gap: 18px; padding: 12px 14px; overflow-y: auto; }
+.project { border: 1px solid var(--edge); border-radius: var(--r-surface); padding: 10px 12px; }
+.projhead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.projname { font-weight: 600; letter-spacing: .04em; }
+.projpath, .wtpath { opacity: .55; font-size: 11px; font-family: ui-monospace, monospace; }
+.projwt, .projroll { font-size: 11px; opacity: .75; }
+
+.wtree { border-left: 2px solid var(--edge); margin: 8px 0 8px 6px; padding-left: 10px; }
+.wtree.main { border-left-color: var(--cyan); }
+.wthead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.wtbadge { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; opacity: .7;
+           border: 1px solid currentColor; border-radius: var(--r-control); padding: 0 4px; }
+.wtbranch { font-family: ui-monospace, monospace; font-size: 12px; }
+
+.schip { font: inherit; font-size: 11px; cursor: pointer; border-radius: var(--r-pill);
+         border: 1px solid var(--edge); background: transparent; color: inherit; padding: 1px 8px; }
+.schip.working { border-color: var(--amber); color: var(--amber); }
+
+.plan { margin: 6px 0 10px; }
+/* The head is the disclosure control: a plan is collapsed to its current step
+   until clicked. Whole-row target, so it is hard to miss. */
+.planhead { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; cursor: pointer; }
+.planhead:hover .planname { color: var(--cyan-hot); }
+.plancaret { font-size: 10px; opacity: .6; width: 9px; }
+.planname { font-weight: 600; font-size: 12px; }
+.plancount, .planowner { font-size: 11px; opacity: .7; font-family: ui-monospace, monospace; }
+/* A ghost plan should look absent, not merely carry a chip. */
+.plan.absent .planname { opacity: .5; text-decoration: line-through; }
+/* Stands in for the current step when a collapsed plan has none. */
+.plannote { font-size: 11px; opacity: .5; padding-left: 10px; font-style: italic; }
+
+.titem { display: flex; align-items: baseline; gap: 7px; font-size: 12px; padding: 1px 0 1px 10px; }
+.tbox { font-family: ui-monospace, monospace; opacity: .65; }
+.ttext { flex: 0 1 auto; }
+.titem.absent { opacity: .45; text-decoration: line-through; }
+.thist { font-size: 10px; opacity: .55; }
+.skipped { font-size: 11px; opacity: .6; padding-left: 10px; }
+/* A cap is a fact about the display, not about the project -- say so loudly
+   enough that a missing worktree reads as a cap and not as an absence. */
+.overcap { font-size: 11px; color: var(--amber); opacity: .85; padding: 4px 0 0 10px; }
+
+/* TASKS.md is all headings and no checkboxes, so a backlog otherwise renders
+   as a column of empty boxes. Give sections their own weight. */
+.titem.section .tbox { display: none; }
+.titem.section .ttext { font-weight: 600; color: var(--text); }
+
+.tdiff { font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+         border-radius: var(--r-control); padding: 0 4px; border: 1px solid currentColor; }
+.tdiff.only-here { color: var(--purple); }    /* relic purple: rare, exists only here */
+.tdiff.done-here { color: var(--green); }     /* success */
+.tdiff.removed   { color: var(--red-hot); }   /* gone */
+.tdiff.behind    { color: var(--amber); }     /* wants attention */
+
+/* The current item is the one being worked on. */
+.titem.current { position: relative; }
+.titem.current .ttext { color: var(--cyan-hot); }
+.titem.current::before {
+  content: ''; position: absolute; left: 0; top: 50%; width: 4px; height: 4px;
+  margin-top: -2px; border-radius: 50%; background: var(--cyan-hot);
+  animation: mcp-pulse 1.6s ease-in-out infinite;
+}
+@keyframes mcp-pulse { 0%,100% { opacity: .25; transform: scale(1) } 50% { opacity: 1; transform: scale(1.9) } }
+@media (prefers-reduced-motion: reduce) {
+  .titem.current::before { animation: none; opacity: 1; }
+}
+
+/* Optional chips are built once and hidden here, never added and removed --
+   see reconcile.js.
+   NOT the `hidden` attribute. Not because it would fail today -- none of these
+   chips declares a `display`, so it would work -- but because it would fail
+   the moment one of them gets one. A bordered pill wants `inline-flex`, and
+   `[hidden]`'s UA `display:none` loses to any rule that sets display, silently
+   and with no failing test. KEEP THIS RULE IF YOU RESTYLE THIS FILE. */
+.gone { display: none !important; }

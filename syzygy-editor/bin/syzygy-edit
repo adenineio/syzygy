@@ -1,0 +1,255 @@
+#!/bin/sh
+# syzygy-edit -- open a file in the editor pane: a tmux split beneath the
+# session's own pane, running the user's editor.
+#
+# The pane closes itself when the editor exits, because a pane running a
+# COMMAND (rather than a shell) ends with that command. `:wq` and the pane is
+# gone -- no --close needed for the normal case.
+#
+# Usage:
+#   syzygy-edit [options] [--] <path>   open <path> in the editor pane
+#   syzygy-edit --close                 close this window's editor pane
+#
+# Options:
+#   --pane <id>       the session's pane to split beneath (default $TMUX_PANE)
+#   --session <id>    fallback when --pane and $TMUX_PANE are both unknown:
+#                      look for the pane a `claude attach <id>` (or its
+#                      8-char short id) is running from, and split beneath
+#                      THAT instead. This is the case for a `claude --bg`
+#                      session -- its own process has neither TMUX nor
+#                      TMUX_PANE -- so its user is watching
+#                      through a SEPARATE `claude attach` process, itself in a
+#                      tmux pane, found here instead of the session's own.
+#   --editor <cmd>    the editor (see the precedence below)
+#   --split below|right   which way to split            (default below)
+#   --size <n%|n>     the split's size                  (default 40%)
+#   --line <n>        put the cursor on that line
+#   --new             stack a new editor pane instead of reusing the one open
+#   --dry-run         print the tmux command and exit 0, changing nothing
+#
+# Editor precedence: $SYZYGY_EDITOR, then --editor, then $VISUAL, then $EDITOR,
+# then nvim, then vi. --editor sits under $SYZYGY_EDITOR because it carries the
+# config file's choice, which is a preference; the environment variable is the
+# user saying so right now.
+#
+# Reusing the pane when one is already open. `tmux send-keys` of an `:e <path>`
+# is editor-specific, so it is used ONLY for the vi family (vi, vim, nvim,
+# view), where it is also SAFE: `:e` on a modified buffer stops with E37 and
+# loses nothing. For any other editor the pane is replaced -- killed and split
+# again -- because stacking panes shrinks the session's own pane away after two
+# or three files: there is ONE reserved editor pane. `--new`
+# stacks instead, for the case where two files really are wanted side by side.
+#
+# The window option @szg_editor records the pane, exactly as pane-v2's
+# syzygy-pane.sh records @syzygy_pane, so a second run and --close can find it.
+
+set -eu
+
+OPT='@szg_editor'
+DEFAULT_SIZE='40%'
+
+pane=''
+session=''
+editor_arg=''
+split='below'
+size="$DEFAULT_SIZE"
+line=''
+dry=0
+close=0
+newpane=0
+path=''
+
+die() { echo "syzygy-edit: $*" >&2; exit 1; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pane)   [ $# -ge 2 ] || die "--pane needs a value"; pane=$2; shift 2 ;;
+    --session) [ $# -ge 2 ] || die "--session needs a value"; session=$2; shift 2 ;;
+    --editor) [ $# -ge 2 ] || die "--editor needs a value"; editor_arg=$2; shift 2 ;;
+    --split)  [ $# -ge 2 ] || die "--split needs a value"; split=$2; shift 2 ;;
+    --size)   [ $# -ge 2 ] || die "--size needs a value"; size=$2; shift 2 ;;
+    --line)   [ $# -ge 2 ] || die "--line needs a value"; line=$2; shift 2 ;;
+    --dry-run) dry=1; shift ;;
+    --close)  close=1; shift ;;
+    --new)    newpane=1; shift ;;
+    --) shift; [ $# -ge 1 ] || die "no path after --"; path=$1; shift; break ;;
+    -*) die "unknown option $1" ;;
+    *)  path=$1; shift ;;
+  esac
+done
+
+case "$split" in below|right) ;; *) die "--split takes below or right" ;; esac
+case "$size" in ''|*[!0-9%]*) die "--size takes a number of cells or a percentage" ;; esac
+case "$line" in ''|*[!0-9]*) [ -z "$line" ] || die "--line takes a line number" ;; esac
+
+# A path carrying a newline or any other control character is refused outright.
+# It is never a real filename here, and the reuse path below feeds the path to
+# `tmux send-keys -l ":e $path"` -- literal KEYSTROKES into a running vi -- so a
+# newline in it would press Enter and turn the remainder into editor commands.
+# Refusing is the whole remedy; a `--dry-run` would have printed it either way.
+case "$path" in *[[:cntrl:]]*) die "path carries a control character" ;; esac
+
+# --- the editor ---------------------------------------------------------------
+pick_editor() {
+  for c in "${SYZYGY_EDITOR:-}" "$editor_arg" "${VISUAL:-}" "${EDITOR:-}" nvim vi; do
+    [ -n "$c" ] || continue
+    # A configured editor may carry arguments ("code -w"); probe its first word.
+    first=${c%% *}
+    if command -v "$first" >/dev/null 2>&1; then echo "$c"; return 0; fi
+  done
+  echo vi
+}
+editor=$(pick_editor)
+base=$(basename "${editor%% *}")
+
+is_vi() {
+  case "$1" in vi|vim|nvim|view|vimr|nvim-qt) return 0 ;; *) return 1 ;; esac
+}
+
+# --- tmux helpers -------------------------------------------------------------
+pane_exists() {
+  tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx "$1"
+}
+existing_pane() {
+  tmux show-options -wqv -t "$origin" "$OPT" 2>/dev/null || true
+}
+
+# The `--session` fallback: find the pane a `claude attach <id>` (or its
+# 8-char short id, the form canvas.mjs's attachArgv spells) is running from.
+# `tmux` talks to the running server over its socket regardless of whether
+# the CALLING process has $TMUX set, so this works from a `claude --bg`
+# session's own daemon child too -- the case this exists for.
+#
+# Several attaches of the same session match several panes; a repeat attach
+# always `new-window`s (attachArgv), so the LAST match in list-panes -a's
+# per-session window order is the closest this 3-field listing gets to "most
+# recently active" without a client listing to ask instead.
+attach_pane_for() {
+  sid=$1
+  short=$(printf '%s' "$sid" | cut -c1-8)
+  tab=$(printf '\t')
+  listing=$(tmux list-panes -a -F "#{pane_id}${tab}#{pane_start_command}${tab}#{pane_current_command}" 2>/dev/null) || true
+  match=''
+  while IFS="$tab" read -r pid cmd _current; do
+    [ -n "$pid" ] || continue
+    prev=''
+    for tok in $cmd; do
+      if [ "$prev" = attach ] && { [ "$tok" = "$short" ] || [ "$tok" = "$sid" ]; }; then
+        match=$pid
+      fi
+      prev=$tok
+    done
+  done <<EOF
+$listing
+EOF
+  printf '%s' "$match"
+}
+
+# --- --close ------------------------------------------------------------------
+if [ "$close" -eq 1 ]; then
+  [ -n "${TMUX:-}" ] || die "not inside tmux"
+  origin=${pane:-${TMUX_PANE:-}}
+  [ -n "$origin" ] || die "no pane: pass --pane or run inside tmux"
+  old=$(existing_pane)
+  if [ -n "$old" ] && pane_exists "$old"; then
+    tmux kill-pane -t "$old"
+    tmux set-option -wu -t "$origin" "$OPT" 2>/dev/null || true
+    echo "closed"
+  else
+    echo "no editor pane"
+  fi
+  exit 0
+fi
+
+[ -n "$path" ] || die "usage: syzygy-edit [options] <path>"
+
+# A leading ~/ is expanded HERE, defensively. The pane below is opened by
+# argv (tmux split-window ... -- $editor $path), never through a shell, so
+# nothing else ever expands a literal ~ -- it would open as a same-named
+# RELATIVE file instead of the file the caller meant. The hooks module
+# already expands ~ before it gets here; this covers a hand run too.
+case "$path" in
+  "~/"*) path="$HOME/${path#\~/}" ;;
+esac
+
+# The editor's own "go to line" argument. `+N` is understood by the vi family,
+# emacs and nano alike; anything else gets the file on its own rather than an
+# argument it would treat as a filename.
+lineargs=''
+if [ -n "$line" ]; then
+  case "$base" in vi|vim|nvim|view|emacs|emacsclient|nano|micro|kak) lineargs="+$line" ;; esac
+fi
+
+origin=${pane:-${TMUX_PANE:-}}
+
+# No --pane and no $TMUX_PANE: the case for a `claude --bg` session, whose own
+# process has neither. If the caller told us the session id,
+# look for the `claude attach <id>` pane instead -- this works even though
+# *this* process is not itself inside tmux, because tmux talks to the server
+# over its socket regardless of the caller's own $TMUX.
+if [ -z "$origin" ] && [ -n "$session" ] && command -v tmux >/dev/null 2>&1; then
+  origin=$(attach_pane_for "$session")
+fi
+
+# The command, as one printable line. Built for --dry-run and for the
+# no-pane message, so both say exactly what would have happened.
+dirflag='-v'
+[ "$split" = right ] && dirflag='-h'
+if [ -n "$lineargs" ]; then
+  cmdline="tmux split-window $dirflag -l $size -t ${origin:-<no pane>} -c $PWD -- $editor $lineargs $path"
+else
+  cmdline="tmux split-window $dirflag -l $size -t ${origin:-<no pane>} -c $PWD -- $editor $path"
+fi
+
+if [ "$dry" -eq 1 ]; then
+  echo "$cmdline"
+  exit 0
+fi
+
+if [ -z "$origin" ]; then
+  echo "$cmdline"
+  if [ -n "$session" ]; then
+    # We know WHO but found no terminal watching: say so, and how to fix it,
+    # rather than the flatly wrong "not inside tmux" (this process, the
+    # session's own daemon child, was never going to be inside tmux).
+    echo "syzygy-edit: no tmux pane is attached to this session; run \`claude attach $session\` in a tmux pane, then try again" >&2
+    exit 2
+  fi
+  if [ -z "${TMUX:-}" ]; then
+    echo "syzygy-edit: not inside tmux; nothing opened" >&2
+    exit 2
+  fi
+  die "no pane: pass --pane or run inside tmux"
+fi
+command -v tmux >/dev/null 2>&1 || die "tmux is not installed"
+pane_exists "$origin" || die "pane $origin is not a live tmux pane"
+
+# --- reuse, replace, or stack -------------------------------------------------
+old=$(existing_pane)
+if [ -n "$old" ] && pane_exists "$old" && [ "$newpane" -eq 0 ]; then
+  if is_vi "$base"; then
+    # Safe on a modified buffer: nvim answers E37 and changes nothing.
+    tmux send-keys -t "$old" Escape
+    tmux send-keys -t "$old" -l ":e $path"
+    tmux send-keys -t "$old" Enter
+    if [ -n "$line" ]; then
+      tmux send-keys -t "$old" -l ":$line"
+      tmux send-keys -t "$old" Enter
+    fi
+    tmux select-pane -t "$old"
+    echo "reused $old"
+    exit 0
+  fi
+  tmux kill-pane -t "$old"
+fi
+
+# --- split --------------------------------------------------------------------
+if [ -n "$lineargs" ]; then
+  new=$(tmux split-window "$dirflag" -l "$size" -t "$origin" -c "$PWD" \
+          -P -F '#{pane_id}' -- "$editor" "$lineargs" "$path")
+else
+  new=$(tmux split-window "$dirflag" -l "$size" -t "$origin" -c "$PWD" \
+          -P -F '#{pane_id}' -- "$editor" "$path")
+fi
+tmux set-option -w -t "$origin" "$OPT" "$new"
+echo "opened $new"

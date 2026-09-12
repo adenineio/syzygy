@@ -1,0 +1,1385 @@
+/* Syzygy — GRID.
+   A dark, near-monochrome deck with one accent, not a cyberpunk terminal.
+   Three rules, in order:
+
+     1. The ground is very dark and barely teal. Almost every pixel is one of
+        the five --bg/--surface/--panel/--edge/--edge-hi steps; they carry a
+        blue-teal cast rather than being neutral grey, and nothing else on the
+        page is allowed to be that bright a field.
+     2. Teal is an ACCENT, not a surface. It is Tron-Legacy ice-cyan --
+        blue-leaning, ~195° -- never a green-leaning mint.
+     3. Numbers are near-white. Big values read as data, not as decoration;
+        teal is the frame around them, not the thing itself.
+
+   There is no yellow. One hue doing interaction, working, warning, titles and
+   chart fill at once is a hue that means nothing, so those jobs are split:
+   interaction is teal, attention is --amber, and titles sit on the ground. --amber is the deliberate Tron counterpoint (Clu's orange, not a
+   highlighter) and should stay rare enough to mean something.
+
+   Angular, not rounded. Flat, not glassy. */
+
+:root {
+  /* ONE HUE DRIVES EVERYTHING.
+     Every ground step, every accent tone and every text weight below is the
+     same hue at a different saturation and lightness -- which is not a trick,
+     it is what the hand-picked teal palette already was. Feeding each of those
+     hand-picked colours through hsl() reproduced them to within a percent, so
+     the palette became a function of --hue, and a theme is that one number.
+     The practical consequence: every theme is EXACTLY as dark as every other,
+     because the lightness figures never move. Only the hue does. */
+  --hue: 196;           /* teal — the default. See [data-theme] below. */
+
+  /* The ground, darkest first. The page itself is all but black; what keeps
+     the deck from reading as a void is the SEPARATION above it, not the page's
+     own lightness. An earlier try at this darkness read as "too dark" only
+     because a bad edit had dropped the panel chrome entirely. */
+  --bg:      hsl(var(--hue) 40% 0.4%);   /* the page. Nothing sits below this. */
+  --surface: hsl(var(--hue) 70% 1.6%);   /* panel background */
+  --panel:   hsl(var(--hue) 58% 4%);     /* raised panel / selection row */
+  --edge:    hsl(var(--hue) 45% 9%);     /* hairline */
+  --edge-hi: hsl(var(--hue) 46% 16%);    /* default frame */
+
+  /* The rail is one continuous surface, not a stack of panels. A flat tint,
+     NOT a gradient: a lit falloff down the column read as a highlight someone
+     forgot to remove, and at this ground it was the brightest thing on the
+     page. The separation is the tint plus the divider, nothing else. */
+  --rail:    hsl(var(--hue) 75% 2%);
+
+  /* The accent family. Hue-neutral names, because under [data-theme="red"]
+     a token called --cyan would be a lie. */
+  --accent:      hsl(var(--hue) 60% 65%);   /* the primary accent */
+  --accent-hot:  hsl(var(--hue) 100% 83%);  /* focus, links, the live end of a wire */
+  --accent-deep: hsl(var(--hue) 53% 40%);   /* structural — rails, bars, wire tails */
+  --accent-dim:  hsl(var(--hue) 26% 43%);   /* de-emphasised labels */
+
+  /* Text, tinted by the same hue so it sits on the ground rather than over it. */
+  --white: hsl(var(--hue) 45% 94%);   /* numbers and names live here */
+  --text:  hsl(var(--hue) 26% 77%);   /* body text */
+  --dim:   hsl(var(--hue) 16% 50%);
+  --grey:  hsl(var(--hue) 17% 31%);   /* disabled / ciphertext */
+
+  /* SEMANTIC colours, which do NOT follow the theme: these mean a thing, and
+     a thing that means "error" cannot change colour because you picked a
+     different skin. Note the collision this buys -- under the red theme the
+     accent and --red-hot are neighbours, and under orange the accent and
+     --amber are. They stay distinguishable by saturation, but attention is
+     quieter on those two themes than on the other three. */
+  --amber:     #e0973c; /* attention: working, warnings, the scrub head */
+  --amber-hot: #f4b45c;
+  --red:       #a8213f; /* danger chrome */
+  --red-hot:   #ff5670; /* errors */
+  --purple:    #a883e6; /* rare — subagents, relic */
+  --green:     #45c9a0; /* success, sparingly */
+
+  /* Aliases. The deck was written against --cyan/--teal-dim when teal was the
+     only option; these keep every one of those rules working. Not for new
+     code: reach for --accent. --yellow is a second layer of the same idea,
+     mapping an old name onto --amber. */
+  --cyan:      var(--accent);
+  --cyan-hot:  var(--accent-hot);
+  --cyan-deep: var(--accent-deep);
+  --teal-dim:  var(--accent-dim);
+  --yellow:     var(--amber);
+  --yellow-hot: var(--amber-hot);
+
+  /* Both of these were referenced but never defined, so the scrollbars and the
+     dispatch inputs rendered with an invalid value and inherited instead. */
+  --frame: var(--edge-hi);
+  --fg:    var(--text);
+
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: var(--mono);   /* the whole deck is monospace; it is a terminal */
+}
+
+/* The themes. One number each -- see --hue above for why that is enough.
+   Kept deliberately short: these are skins, not a theming system. */
+:root[data-theme="teal"]   { --hue: 196; }
+:root[data-theme="red"]    { --hue: 356; }
+:root[data-theme="orange"] { --hue: 28; }
+:root[data-theme="purple"] { --hue: 276; }
+:root[data-theme="green"]  { --hue: 152; }
+
+/* ------------------------------------------------------------- corners --
+   Three corner styles, chosen by [data-corners] on <html> and persisted per
+   browser (app.js's CORNERS_KEY, mirroring THEME_KEY). Four tokens; three
+   vary by style, --r-pill never does -- something that is already a pill
+   today (.schip, .dbadge) stays one in every style, the same way a dot stays
+   round: dots keep their literal 50% rather than taking a token at all.
+
+   DEFAULT IS SOFT: the values live on bare :root, so a page carrying no
+   attribute yet -- the state on first paint, before app.js's early
+   applyCorners() call lands -- already renders soft rather than the old
+   sharp/chamfered look. [data-corners="sharp"] and ="space" override.
+
+   A polygon clip-path cannot round, and a clip-path is what has been
+   clipping both `.panel`'s and `.card`'s own outer box-shadow/outline this
+   whole time -- see `.card.colored::after` and `.card.needs` below -- so the
+   chamfer itself is switched OFF under soft and space, not merely resized to
+   0, and every rule that carries it restores it only under
+   [data-corners="sharp"]. */
+:root {
+  --r-surface: 6px;   /* panels, cards, modals, popovers, notices */
+  --r-control: 4px;   /* buttons, tabs, chips, small labelled boxes */
+  --r-input:   6px;   /* text fields and textareas */
+  --r-pill:    999px; /* chrome that is already a pill: never varies */
+}
+:root[data-corners="sharp"] {
+  --r-surface: 0;
+  --r-control: 0;
+  --r-input:   0;
+}
+:root[data-corners="space"] {
+  --r-surface: 14px;
+  --r-control: var(--r-pill);
+  --r-input:   var(--r-pill);
+}
+
+* { box-sizing: border-box; }
+html { height: 100%; }
+body {
+  margin: 0; min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  -webkit-font-smoothing: antialiased;
+}
+.num { font-variant-numeric: tabular-nums; }
+
+/* The chamfered corner was the deck's signature shape under sharp; soft and
+   space round instead, since a clip-path cannot. Unused in markup today, but
+   kept in step like every other chamfer rule below. */
+.chamfer { border-radius: var(--r-surface); }
+:root[data-corners="sharp"] .chamfer {
+  border-radius: 0;
+  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+}
+
+/* ---------------------------------------------------------------- backdrop */
+/* There isn't one, deliberately. Anything animating continuously back there
+   sits behind panels that cover nearly the whole viewport, so the only place
+   it shows is the gutters, where motion in the corner of the eye reads as a
+   glitch rather than as depth. The ground is flat --bg, set on body. Same
+   reasoning as .scanlines below: noise, not information. */
+.scanlines, .sweep, .vignette { display: none; }
+
+/* ------------------------------------------------------------------ shell */
+#app { position: relative; z-index: 3; min-height: 100vh; display: flex; flex-direction: column; min-width: 0; overflow-x: hidden; }
+html, body { overflow-x: hidden; }
+
+/* On a desktop window the deck is a fixed frame: the app is exactly the
+   viewport, and each panel scrolls inside itself. This also gives the grid a
+   DEFINITE height — without it the `fr` rows have nothing to resolve against
+   and fall back to content height, which made the page grow to several
+   screens. Below the breakpoint the layout stacks and the page scrolls. */
+@media (min-width: 1301px) and (min-height: 620px) {
+  html, body { height: 100%; overflow-y: auto; }
+  #app { height: 100vh; min-height: 0; }
+  .view.on { min-height: 0; }
+  .grid { min-height: 0; }
+  .replaywrap { min-height: 0; }
+}
+
+.topbar {
+  display: flex; align-items: center; gap: 12px; flex: 0 0 auto;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--edge-hi);
+  background: var(--surface);
+}
+/* A solid block, which is the one place on this page a solid accent is right:
+   as its own full-height section it reads as a logotype, not as a surface.
+   Everything else on the deck treats the accent as a line or a letterform.
+   --brandbg is declared here rather than used inline because the mark's
+   crescent is carved with it -- see the <svg> in index.html. */
+.brand {
+  --brandbg: var(--accent);
+  display: inline-flex; align-items: center; gap: 9px;
+  font-weight: 700; letter-spacing: .24em; font-size: 14px;
+  color: var(--bg); background: var(--brandbg);
+  /* The mark and the wordmark must not move relative to EACH OTHER; only
+     the section around them is laid out here. A rounded badge floating in
+     the corner, short of the navbar's height, is what this must not be. */
+  padding: 7px 15px 7px 11px;
+  /* The leftmost SECTION of the topbar, not a card floating inside it: full
+     topbar height, flush to the window's top and left edges, its own
+     hairline separating it from the tab strip -- below.
+
+     Height: .topbar has no explicit height (padding + content), so
+     `align-self: stretch` alone only fills its CONTENT box, between the
+     9px top/bottom padding -- not the topbar's own full height. Negative
+     top/bottom margins push .brand's box out past that on both edges, to
+     the topbar's actual border-box extent -- -9px top (matching padding-
+     top; .topbar has no border-top) and -10px bottom (its 9px padding-
+     bottom plus its own 1px border-bottom, folded in so .brand's fill
+     reaches the true bottom edge rather than stopping 1px short of it).
+     This is purely a CROSS-axis adjustment (topbar is a row), so it cannot
+     shift any sibling -- only a MAIN-axis (horizontal) margin could. */
+  align-self: stretch;
+  margin: -9px 0 -10px 0;
+  /* Left: escaping .topbar's 16px padding-left the same way, but a
+     horizontal margin here WOULD shift every sibling after it (the main
+     axis), so this is a RELATIVE offset instead -- .brand still occupies
+     its normal slot in the topbar's flex flow for layout purposes, and
+     only the painted box moves left into what used to be empty padding. */
+  position: relative; left: -16px;
+  /* No border-radius, on any corner, under any corner style (sharp, soft or
+     space alike) -- a deliberate, permanent exception to the --r-surface
+     token every other panel/card takes: a navbar section reads as a
+     section, never as a floating rounded card. */
+  border-radius: 0;
+  /* The divider separating this section from the tab strip. A real border,
+     not a background trick, so `.tab.on`'s and `.tab:focus-visible`'s own
+     accent border (below) never has to fight it for the same pixel. Adds
+     1px to .brand's own width, so the tab strip starts exactly 1px later
+     than it used to -- the one exception to "the topbar's other items keep
+     their positions", and the point of drawing this line at all. */
+  border-right: 1px solid var(--edge-hi);
+}
+/* 21px tall against a 22-unit-tall viewBox puts .ring's 0.96-unit stroke at
+   ~0.92 device px. That is the whole point of it: thin enough to read as a
+   boundary rather than as another body, and it stops being either if the mark
+   is scaled without re-deriving that number.
+   The box is 42px wide but everything rests in its left half, so the right
+   half is clawed back with a negative margin -- `line` is the only variant
+   that needs it, and it opens the margin as it swings the row out. */
+.brand .mark {
+  width: 42px; height: 21px; flex: 0 0 auto; display: block;
+  margin-right: -20px;
+  transition: margin-right 760ms cubic-bezier(.45, 0, .25, 1);
+}
+
+/* Rest is the crescent; hover completes the alignment. Transitions rather than
+   keyframes, because the interesting half of this is the way it runs backwards
+   when the pointer leaves, and a transition gives that for nothing.
+   transform-box is explicit: the translate is in viewBox user units, not px,
+   and it is also what makes transform-origin resolve to the viewBox centre --
+   which is exactly the circles' centre, so .ring contracts concentrically. */
+.brand .mark .far,
+.brand .mark .mid,
+.brand .mark .near,
+.brand .mark .ring { transform-box: view-box; transform-origin: center; }
+.brand .mark .far,
+.brand .mark .mid {
+  transition: transform 620ms cubic-bezier(.3, .12, .2, 1);
+}
+.brand .mark .mid { transform: translate(2.35px, -2.2px); }
+
+/* Exactly one third element exists at a time. `display: none` rather than
+   opacity, so the unused one cannot be caught mid-transition by a theme change
+   or a reduced-motion switch. */
+.brand .mark .ring, .brand .mark .near { display: none; }
+:root[data-mark="eclipse"] .brand .mark .ring,
+:root[data-mark="line"] .brand .mark .near { display: block; }
+
+.brand .mark .ring {
+  opacity: 0; transform: scale(1.22);
+  transition: opacity 260ms linear, transform 360ms cubic-bezier(.2, .7, .3, 1);
+}
+.brand .mark .near {
+  opacity: 0;
+  transition: opacity 240ms linear;
+}
+
+/* `line`: the arrangement swings side-on. Rest is the same crescent -- three
+   bodies stacked along the line of sight -- and hover rotates that line into
+   the picture plane, so what was one overlapping pile becomes three discs in a
+   row. No axis drawn through them; the row IS the alignment.
+
+   It is a projected rotation, not a real one: a body at angle t off the view
+   axis sits at sin(t) of its true separation, so the horizontal spread carries
+   the whole illusion and the eased curve is doing the work of a camera. Sizes
+   are held constant -- perspective would shrink the far body, and at 21px that
+   reads as a wobble rather than as depth.
+
+   The right-hand body is the near one, and it is the ONLY thing here filled in
+   the accent: dark-on-accent everywhere else, accent-with-a-dark-outline here,
+   which is what makes it read as the body closest to you rather than as a hole
+   in the disc. That is also why it needs an outline at all -- accent on accent
+   is invisible. */
+:root[data-mark="line"] .brand .mark .near {
+  fill: var(--brandbg);
+  stroke: currentColor;
+  stroke-width: 0.85;
+  opacity: 0;
+  transition: opacity 200ms linear, transform 760ms cubic-bezier(.45, 0, .25, 1);
+}
+:root[data-mark="line"] .brand:hover .mark {
+  /* Opened just enough for the row: the right-hand body ends at x 40 of 44. */
+  margin-right: -3px;
+}
+:root[data-mark="line"] .brand:hover .mark .far,
+:root[data-mark="line"] .brand:hover .mark .mid,
+:root[data-mark="line"] .brand:hover .mark .near {
+  transition-timing-function: cubic-bezier(.45, 0, .25, 1);
+  transition-duration: 760ms;
+}
+/* .far holds the left end; the other two swing out past it. The gaps are
+   derived from the radii, not eyeballed: .far ends at 20.8, so .mid starts at
+   21.45, and .mid ends at 32.35, so .near starts at 34.7. */
+:root[data-mark="line"] .brand:hover .mark .mid  { transform: translate(14.9px, 0); }
+:root[data-mark="line"] .brand:hover .mark .near { transform: translate(25.5px, 0); opacity: 1; }
+
+/* The third element only arrives once the two bodies are lined up, so its
+   delay is the slide's duration. Leaving reverses that order: it goes first,
+   then the eclipse slides back apart. */
+.brand:hover .mark .mid { transform: translate(0, 0); }
+.brand:hover .mark .ring { opacity: 1; transform: scale(1); transition-delay: 480ms; }
+.brand:hover .mark .near { opacity: 1; transition-delay: 500ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  .brand .mark .mid,
+  .brand .mark .near,
+  .brand .mark .ring { transition: none; }
+}
+.spacer { flex: 1; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; font-size: 10px;
+  border: 1px solid var(--edge); background: var(--panel); color: var(--dim);
+  letter-spacing: .1em; text-transform: uppercase;
+  border-radius: var(--r-control);
+}
+.pill .dot { width: 6px; height: 6px; background: var(--grey); }
+.pill.ok   { color: var(--cyan); border-color: var(--edge-hi); }
+.pill.ok .dot   { background: var(--cyan); }
+.pill.busy { color: var(--amber); border-color: #4a3a1d; }
+.pill.busy .dot { background: var(--amber); animation: blink 1s steps(2) infinite; }
+.pill.down { color: var(--red-hot); border-color: #4a1d2c; }
+.pill.down .dot { background: var(--red-hot); }
+@keyframes blink { 50% { opacity: .25; } }
+
+/* ------------------------------------------------------------------- tabs */
+.tabs { display: flex; gap: 2px; margin-left: 10px; }
+.tab {
+  font: inherit; font-size: 10px; letter-spacing: .16em; text-transform: uppercase; cursor: pointer;
+  padding: 5px 12px; color: var(--dim);
+  background: transparent; border: 1px solid transparent;
+  border-radius: var(--r-control);
+}
+/* Lit from below rather than filled: a solid accent block this size reads as
+   a surface, and teal is only ever an accent here. */
+.tab:hover { color: var(--cyan); background: var(--panel); }
+.tab.on {
+  color: var(--cyan-hot); background: var(--panel); font-weight: 700;
+  /* soft and space (the default): the whole tab takes a 1px accent outline
+     instead of the underline below: the thick coloured bar reads badly under
+     these two styles. `border-color`, not an outer box-shadow, so nothing can
+     clip it; `.tab`'s own resting rule already reserves a 1px transparent
+     border above, so swapping only its colour never changes the tab's hit
+     area. The same outline appears on keyboard focus, not only the active
+     tab -- see `.tab:focus-visible` below. */
+  border-color: var(--cyan);
+}
+/* sharp keeps the shipped underline exactly: a dim border, and the bottom
+   bar as an INSET box-shadow so a real border never has to compete with
+   it. */
+:root[data-corners="sharp"] .tab.on {
+  border-color: var(--edge-hi);
+  box-shadow: inset 0 -2px 0 var(--cyan);
+}
+.tab:focus-visible {
+  border-color: var(--cyan);
+  outline: none;
+}
+/* Sharp never had a bespoke focus treatment; leave the browser's native
+   focus ring rather than inventing one now. */
+:root[data-corners="sharp"] .tab:focus-visible {
+  border-color: transparent;
+  outline: revert;
+}
+/* -------------------------------------------------------------- settings */
+.settings { position: relative; }
+.gearglyph { font-size: 13px; line-height: 1; }
+#gear { padding: 3px 9px; }
+.pop {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 58;
+  padding: 9px 11px 10px; min-width: 132px;
+  background: var(--surface); border: 1px solid var(--edge-hi);
+  border-radius: var(--r-surface);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .7);
+}
+/* .pop is not a .panel, but the same trap applies: set display anywhere
+   unconditionally and [hidden] stops working. */
+.pop[hidden] { display: none; }
+.poplabel {
+  font-size: 9px; letter-spacing: .2em; text-transform: uppercase;
+  color: var(--grey); margin-bottom: 7px;
+}
+.picks { display: flex; gap: 5px; }
+.picks button {
+  font: inherit; font-size: 9px; letter-spacing: .12em; text-transform: uppercase;
+  padding: 4px 8px; cursor: pointer; color: var(--dim);
+  border: 1px solid var(--edge-hi); background: transparent;
+  border-radius: var(--r-control);
+}
+.picks button:hover { color: var(--accent); border-color: var(--accent-deep); }
+.picks button[aria-pressed="true"] {
+  color: var(--bg); background: var(--accent); border-color: var(--accent);
+}
+
+/* Voice input's settings section. Field styles (the mic button, the
+   listening states) live in voice.css instead -- this is the popover only. */
+.voicebox { display: flex; flex-direction: column; gap: 6px; max-width: 220px; }
+.voicerow { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--dim); }
+/* An author `display: flex` on the same selector otherwise beats the
+   browser's own `[hidden]{display:none}` default (they are equal
+   specificity, and author styles always win over user-agent ones) -- found
+   live, checking the settings section against a real relay: the progress
+   rows' `.hidden = true` was doing nothing, and "0%" sat there whether or
+   not anything was actually installing or downloading. */
+.voicerow[hidden] { display: none; }
+.voicerow input[type="checkbox"] { margin: 0; accent-color: var(--accent); }
+.voiceprogress { flex: 1; height: 4px; background: var(--edge-hi); }
+.voiceprogress-bar { height: 100%; background: var(--accent); width: 0%; }
+.voicebox .btn { padding: 4px 8px; font-size: 9px; }
+.voicehint { font-size: 9px; color: var(--grey); line-height: 1.4; }
+.voicehint code { color: var(--dim); }
+/* --------------------------------------------------------- pane password */
+.authbox { display: flex; flex-direction: column; gap: 5px; }
+.authbox input {
+  width: 100%; padding: 5px 8px; font-family: var(--mono); font-size: 11px;
+  background: var(--bg); border: 1px solid var(--edge-hi); color: var(--text); outline: none;
+  border-radius: var(--r-input);
+}
+.authbox input:focus { border-color: var(--cyan); }
+.authbtns { display: flex; gap: 5px; margin-top: 2px; }
+.authbtns .btn { flex: 1; padding: 4px 8px; font-size: 9.5px; }
+.authstatus { font-size: 9.5px; margin-top: 6px; color: var(--grey); max-width: 150px; }
+.authstatus.err { color: var(--red-hot); }
+.authstatus.ok { color: var(--cyan); }
+
+/* ---------------------------------------------------------------- themes */
+.swatches { display: flex; gap: 5px; align-items: center; }
+.swatch {
+  width: 16px; height: 16px; padding: 0; cursor: pointer;
+  border: 1px solid var(--edge-hi); background: var(--sw);
+  border-radius: var(--r-control);
+  /* Its own hue, not the active one: a picker whose options all restyle when
+     you pick one tells you nothing about what you are picking. */
+}
+.swatch:hover { border-color: var(--sw); }
+.swatch[aria-pressed="true"] { border-color: var(--white); box-shadow: 0 0 0 1px var(--sw); }
+
+.pill.tog { cursor: pointer; font-family: inherit; }
+.pill.tog:hover { color: var(--cyan); border-color: var(--cyan-deep); }
+.pill.tog.on { color: var(--bg); background: var(--cyan); border-color: var(--cyan); }
+.pill.tog.on .dot { background: var(--bg); }
+
+/* ------------------------------------------------------------------- grid */
+.view:not(.on) { display: none; }
+.view.on { display: flex; min-width: 0; }
+main.view.on { display: grid; }
+
+/* Control is a narrow left rail and the switchboard filling the rest.
+   The rail is NOT a column of panels in a padded grid -- it is its own
+   surface, flush to the window edge, full height, with one divider between it
+   and the working area. So the grid itself has no gap and no padding, and the
+   board carries its own inset instead. */
+.grid {
+  flex: 1; min-width: 0; gap: 0; padding: 0;
+  grid-template-columns: 340px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+.grid > .board { margin: 8px 12px 12px; }
+/* The rail is one column. The metrics and the two folds take exactly their
+   content; the sphere and the feed split whatever is left, 5:4. min-height:0
+   here is what lets the feed's .pbody actually shrink rather than push the
+   folds off the bottom of the window. */
+.rail {
+  display: flex; flex-direction: column; gap: 14px;
+  min-height: 0; min-width: 0; padding: 12px 0 8px;
+  border-right: 1px solid var(--edge-hi);
+  background: var(--rail);
+}
+/* Nothing inside the rail is a box. The panel chrome -- border, background,
+   chamfer -- is what made five stacked sections read as five containers; here
+   the spacing and the section heads do that work instead, and everything sits
+   on the one ground above. */
+.rail > .panel {
+  flex: 0 0 auto;
+  border: 0; background: transparent; border-radius: 0; clip-path: none;
+}
+.rail .phead { border-bottom: 0; padding: 4px 14px 6px; }
+.rail .pbody { padding: 2px 8px 2px 14px; }
+.rail > .panel.orbpanel { flex: 5 1 0; min-height: 170px; }
+.rail > .panel.feed     { flex: 4 1 0; min-height: 130px; }
+/* Dense rows are a third the height, so the panel does not need the same
+   share of the column to show more of the feed than compact did. 1.4 against
+   the sphere's 5 works out to about half the height compact gets. */
+.rail > .panel.feed.dense { flex: 1.4 1 0; min-height: 80px; }
+.rail > .panel.feed.collapsed { flex: 0 0 auto; min-height: 0; }
+/* An open fold takes its content, but not without limit: a busy inbox would
+   otherwise grow the rail past the window and take the room out of the feed
+   and the sphere above it. Its .pbody already scrolls. */
+.rail > .panel.inbox, .rail > .panel.steerpanel { max-height: 40vh; }
+.rail > .panel[hidden] { display: none; }
+
+@media (max-width: 1100px) {
+  .grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(320px, 1fr); }
+}
+
+/* ------------------------------------------------------------------ panel */
+.panel {
+  position: relative; min-height: 0; min-width: 0; display: flex; flex-direction: column;
+  border: 1px solid var(--edge); background: var(--surface);
+  border-radius: var(--r-surface);
+}
+:root[data-corners="sharp"] .panel {
+  border-radius: 0;
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+}
+/* Higher specificity than the rule above, and declared after it, so a rail
+   panel -- borderless and backgroundless by design -- never regains the
+   chamfer under sharp the way `.rail > .panel` already keeps it clip-path-
+   free under soft and space. */
+:root[data-corners="sharp"] .rail > .panel { clip-path: none; }
+.phead {
+  display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
+  padding: 8px 12px; border-bottom: 1px solid var(--edge);
+  font-size: 9.5px; letter-spacing: .2em; text-transform: uppercase; color: var(--teal-dim);
+}
+.phead .tick { width: 3px; height: 11px; background: var(--cyan); }
+.phead .count { margin-left: auto; color: var(--grey); letter-spacing: .06em; }
+.pbody, .boardstage, .drawer .dbody {
+  scrollbar-width: thin;
+  scrollbar-color: var(--frame) transparent;
+  scrollbar-gutter: stable;
+}
+.pbody { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px; }
+.pbody::-webkit-scrollbar, .boardstage::-webkit-scrollbar, .dbody::-webkit-scrollbar { width: 9px; height: 9px; }
+.pbody::-webkit-scrollbar-thumb, .boardstage::-webkit-scrollbar-thumb, .dbody::-webkit-scrollbar-thumb {
+  background: var(--frame); border: 2px solid var(--surface);
+}
+.pbody::-webkit-scrollbar-thumb:hover { background: var(--teal-dim); }
+.pbody::-webkit-scrollbar-track, .boardstage::-webkit-scrollbar-track { background: rgba(255,255,255,.03); }
+
+/* ----------------------------------------------------------------- metrics */
+/* One line each, in the order you scan them. The old five callout boxes said
+   exactly these things across a full-width row; this is that row folded into
+   the rail, which is why the label is small and the number is not.
+   No rules between them and no rail down the side: a normal row is carried by
+   its own spacing, and only warn/crit draws an edge -- which is what makes an
+   edge mean something when it does appear. */
+.metrics { padding: 0; }
+/* Which of the two things the rows below are: the whole board, or the one
+   session the pointer is over on the switchboard. */
+.mscope {
+  padding: 0 14px 6px; font-size: 9px; letter-spacing: .18em;
+  text-transform: uppercase; color: var(--grey);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mscope.peek { color: var(--cyan-hot); letter-spacing: .1em; text-transform: none; }
+.mrow {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 4px 14px; min-width: 0;
+  border-left: 2px solid transparent;
+}
+.mlabel {
+  flex: 0 0 auto; font-size: 9px; letter-spacing: .18em;
+  text-transform: uppercase; color: var(--grey);
+}
+.mval {
+  margin-left: auto; flex: 0 0 auto;
+  font-size: 14px; font-weight: 600; letter-spacing: -.01em; color: var(--white);
+}
+.msub {
+  flex: 0 1 auto; min-width: 0; font-size: 9.5px; color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mrow canvas { flex: 0 0 auto; align-self: center; opacity: .75; }
+.mrow.warn { border-left-color: var(--amber); }
+.mrow.warn .mval { color: var(--amber); }
+.mrow.crit { border-left-color: var(--red-hot); }
+.mrow.crit .mval { color: var(--red-hot); }
+/* The usage row's notify toggle. Dim and quiet until it is ON --
+   this is an opt-in, not a control anyone needs to notice by default. */
+.notifytog {
+  flex: 0 0 auto; font-size: 10px; line-height: 1; cursor: pointer;
+  background: transparent; border: 0; padding: 0; opacity: .4; filter: grayscale(1);
+}
+.notifytog:hover { opacity: .75; }
+.notifytog.on { opacity: 1; filter: none; }
+/* The after-reset queue's own cards -- same shape as .ask/.appr
+   just below (border, padding, a .from/.q pair), a neutral left border
+   rather than one of their two fixed colours since a queue entry has FOUR
+   states, not one. */
+.aritem { padding: 9px 10px; margin: 0 12px 8px; border: 1px solid var(--edge-hi); border-left: 3px solid var(--edge-hi); background: var(--panel); border-radius: var(--r-surface); }
+.aritem .from { display: flex; align-items: center; gap: 6px; font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: var(--grey); margin-bottom: 4px; }
+.aritem .q { font-size: 11.5px; color: var(--dim); margin-bottom: 7px; overflow-wrap: anywhere; }
+
+/* --------------------------------------------------------------- the folds */
+/* Each rail section's head is its disclosure control, so the whole row is the
+   target. A .phead is a <button> in the rail; these reset the parts a button
+   brings with it and nothing else, so it still lays out exactly like the
+   <div> heads every other panel uses. */
+.phead.fold {
+  font: inherit; font-size: 9.5px; letter-spacing: .2em; text-transform: uppercase;
+  width: 100%; text-align: left; cursor: pointer;
+  background: transparent; border: 0;
+  color: var(--teal-dim);
+}
+.phead.fold:hover { color: var(--cyan); }
+.phead.fold .caret { margin-left: 8px; font-size: 9px; transition: transform .12s; }
+.phead.fold .count { margin-left: auto; }
+.panel.collapsed .phead.fold .caret { transform: rotate(-90deg); }
+.panel.collapsed > .pbody,
+.panel.collapsed > .steer,
+.panel.collapsed > .denser { display: none; }
+/* A fold with something waiting in it says so while it is shut. */
+.panel.collapsed .phead.fold .count { color: var(--cyan); }
+
+/* The feed's second axis: how much of each call to show. It sits at the
+   panel's foot rather than in the head, which already carries the fold. */
+.denser {
+  flex: 0 0 auto; font: inherit; font-size: 9px; letter-spacing: .14em;
+  text-transform: uppercase; cursor: pointer; text-align: left;
+  padding: 5px 14px 0; color: var(--grey);
+  background: transparent; border: 0;
+}
+.denser:hover { color: var(--cyan); }
+.denser::before { content: '\25A4\00a0\00a0'; }
+
+/* ------------------------------------------------------------- switchboard */
+/* The right-hand cell of the control view's grid: the whole window minus the
+   rail, which is as much room as a tab of its own would have given it.
+   .boardstage stays a positioned box so #wires can sit inside it. */
+.board { min-width: 0; min-height: 0; }
+.boardstage { position: relative; flex: 1; min-height: 0; overflow: auto; padding: 12px; }
+/* Sized by its width/height attributes, not stretched with `inset: 0`, so it
+   can cover the whole scrollable content rather than only the visible box.
+   layoutWires() measures the endpoints in the same content coordinates. */
+#wires { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+.cards { position: relative; display: flex; flex-wrap: wrap; gap: 10px; align-content: flex-start; }
+
+/* Grouped by tmux session. Only applied when at least one session reports one;
+   otherwise .cards keeps its flat flex row and none of this exists. The
+   headings are deliberately quieter than the cards -- a filing system, not
+   content -- so they are a hairline rule with a small dim label rather than a
+   panel of their own. */
+.cards.grouped { display: block; }
+.cardgroup + .cardgroup { margin-top: 16px; }
+.grouphead {
+  display: flex; align-items: center; gap: 9px; margin: 0 0 8px;
+  font-size: 9px; letter-spacing: .18em; text-transform: uppercase; color: var(--teal-dim);
+}
+.grouphead .gname { flex: 0 0 auto; }
+.grouphead .gname::before { content: '\25AA '; color: var(--edge-hi); }
+.grouphead::after { content: ''; flex: 1; height: 1px; background: var(--edge); }
+.grouphead .gcount { flex: 0 0 auto; order: 3; color: var(--grey); }
+.groupcards { display: flex; flex-wrap: wrap; gap: 10px; align-content: flex-start; }
+
+.card {
+  position: relative; width: 232px; padding: 10px 11px 9px; cursor: grab;
+  border: 1px solid var(--edge); background: var(--panel);
+  border-radius: var(--r-surface);
+  transition: border-color .12s, background-color .12s;
+  /* The card is a drag source held by setPointerCapture. Without these the
+     browser also starts a native text selection from the same pointerdown and
+     the two gestures fight. Scoped to the card: the rest of the deck stays
+     selectable. `touch-action: none` keeps a touch or trackpad drag from
+     scrolling .boardstage instead of dragging the card. */
+  user-select: none; -webkit-user-select: none; touch-action: none;
+}
+:root[data-corners="sharp"] .card {
+  border-radius: 0;
+  clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
+}
+.card.self   { border-color: var(--edge-hi); box-shadow: inset 2px 0 0 var(--cyan); }
+.card.working{ box-shadow: inset 2px 0 0 var(--amber); }
+/* Hover feedback here must be PAINT ONLY: no lift on hover. A
+   `transform: translateY(-2px)` moves the card's hit area, so near the bottom
+   edge the card slides out from under the pointer, hover ends, the card drops
+   back under the pointer, and hover re-fires -- an endless flicker. Nothing
+   below changes the card's geometry, so the hit area is identical hovered and
+   not.
+   It also keeps `layoutWires()` honest: wire endpoints come from
+   getBoundingClientRect(), which a transform would shift. */
+.card:hover { border-color: var(--cyan-deep); background: linear-gradient(rgba(111,195,223,.06), rgba(111,195,223,.06)), var(--panel); }
+.card:hover .grip { color: var(--cyan); }
+.card.dragsrc { opacity: .5; cursor: grabbing; }
+.card.droptgt { border-color: var(--cyan); background: rgba(111,195,223,.10); }
+
+/* Waiting on you. Placed AFTER the hover and drag rules on purpose: they
+   set border-color too, and a card that wants something should keep saying so
+   under the pointer. The drop-target colour is handed back explicitly below,
+   because feedback for a gesture in flight does outrank a standing state.
+
+   It also has to win over .card.working, and that combination is the NORMAL
+   case rather than an edge one: `working` means a turn is OPEN, and a session
+   parked at a permission prompt never fires turn.complete, so it heartbeats
+   working:true for as long as it waits. */
+/* Live, interactive, outside tmux: the pane cannot raise its window, so the
+   card says so quietly rather than offering a button that would fail. Dim, not
+   struck through or coloured: the SESSION is perfectly healthy, and only the
+   jump is unavailable. */
+.card.nojump .name { opacity: .62 }
+.card.nojump .grip::after { content: ' \00b7 outside tmux'; opacity: .7 }
+
+.card.needs {
+  border-color: var(--amber);
+  box-shadow: inset 2px 0 0 var(--amber-hot);
+}
+.card.needs:hover { border-color: var(--amber-hot); }
+.card.needs.droptgt { border-color: var(--cyan); }
+.card .needflag { display: none; }
+.card.needs .needflag {
+  display: inline; margin-left: 6px; color: var(--amber-hot);
+  font-size: 9px; letter-spacing: .1em; text-transform: uppercase; white-space: nowrap;
+  animation: needpulse 2.4s ease-in-out infinite;
+}
+@keyframes needpulse { 0%, 100% { opacity: .5 } 50% { opacity: 1 } }
+/* A slow pulse is an attention cue, not decoration -- but it is still motion,
+   and someone who has asked for less of it should get a static flag instead. */
+@media (prefers-reduced-motion: reduce) {
+  .card.needs .needflag { animation: none; opacity: .95 }
+}
+
+/* Stopped: a session that is simply sitting there. No hue of its own, no
+   pulse, no border -- amber is spent on "needs you" and a second colour beside
+   it would turn a two-state board into a traffic light nobody can read at a
+   glance. A dim ring in the row, and the existing `idle · 12m` badge says how
+   long. The two classes are mutually exclusive by construction (stoppedOf
+   returns 0 whenever needsOf does not), so they can never both paint. */
+.card .stopflag { display: none; }
+.card.stopped .stopflag { display: inline; margin-left: 6px; color: var(--grey); font-size: 9px; }
+.card.stopped .badge { color: var(--dim); }
+
+/* The drawer's answer to "what does it actually want?" */
+.needbox {
+  border: 1px solid var(--amber); border-left-width: 3px;
+  background: rgba(224,151,60,.08);
+  padding: 8px 10px; margin-bottom: 10px;
+  border-radius: var(--r-surface);
+}
+.needhead { color: var(--amber-hot); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
+.needwhat { color: var(--white); margin-top: 5px; line-height: 1.4; }
+.needsrc { color: var(--dim); font-size: 10px; margin-top: 5px; }
+
+/* What the session last said. Deliberately quiet -- no border colour of its
+   own, because the amber .needbox above it is the thing that should catch the
+   eye when both are present. Capped in height and scrolled rather than left to
+   grow: 2 KB of prose would otherwise push the reply field, the key/value list
+   and every section below it off the drawer. */
+.saidbox { border: 1px solid var(--edge); border-left-width: 3px; background: rgba(255,255,255,.02); padding: 8px 10px; border-radius: var(--r-surface); }
+.said {
+  margin: 0; max-height: 220px; overflow-y: auto;
+  color: var(--white); font: inherit; font-size: 11.5px; line-height: 1.45;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.saidage { color: var(--dim); font-size: 10px; margin-top: 6px; }
+
+/* Which task file actually counts, shown only when the answer is surprising --
+   a root file outranking docs/. Informational, so it borrows no warning hue. */
+.taskflag {
+  border-left: 2px solid var(--teal-dim); background: rgba(255,255,255,.02);
+  padding: 6px 9px; margin-bottom: 8px; color: var(--dim); font-size: 10.5px; line-height: 1.45;
+  border-radius: var(--r-surface);
+}
+
+.card .row1 { display: flex; align-items: center; gap: 6px; }
+.card .name { font-weight: 700; font-size: 12px; color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card .badge { margin-left: auto; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--grey); }
+.card .meta { margin-top: 2px; font-size: 10px; color: var(--dim); display: flex; gap: 8px; flex-wrap: wrap; }
+.card .bar { margin-top: 7px; height: 3px; background: var(--edge); overflow: hidden; }
+.card .bar i { display: block; height: 100%; background: var(--cyan); transition: width .5s ease; }
+.card .stats { margin-top: 6px; display: flex; gap: 10px; font-size: 10px; color: var(--dim); }
+.card .stats b { color: var(--cyan); font-weight: 700; }
+.card .spark { margin-top: 6px; display: block; width: 100%; height: 24px; flex: 0 0 auto; }
+.card .grip { position: absolute; right: 8px; bottom: 7px; font-size: 8.5px; color: var(--grey); letter-spacing: .1em; }
+
+/* The presence dot: this session's colour in the orb, so a band in the sphere
+   can be matched to a card. Bottom-left, inset past the 9px clip-path bevel
+   and clear of .grip on the right.
+
+   These four tokens ARE the orb's per-session accents -- the same names
+   swarm.js reads. Keeping the colour
+   here, selected by data-state, is what stops the two drifting: neither side
+   holds a literal, so a theme edit moves both or neither. Do not turn these
+   into hex values. */
+.card .statedot {
+  position: absolute; left: 10px; bottom: 8px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent-hot);   /* idle, and the fallback for an unknown state */
+  opacity: .85;
+}
+.card .statedot[data-state="working"] { background: var(--amber); }
+.card .statedot[data-state="waiting"] { background: var(--amber-hot); }
+.card .statedot[data-state="error"]   { background: var(--red-hot); }
+.card .statedot[data-state="idle"]    { background: var(--accent-hot); opacity: .55; }
+
+/* Subagent count, on the bottom edge beside the state dot and clear of .grip.
+   Lit while any subagent is still running, dim once they have all stopped --
+   the count is worth seeing either way, since "this session spawned eight
+   agents" explains a spend figure long after they finish. */
+.card .agentchip {
+  position: absolute; left: 22px; bottom: 6px;
+  font-size: 8.5px; letter-spacing: .1em; color: var(--grey);
+}
+.card .agentchip[data-live="1"] { color: var(--accent-hot); }
+
+.hint { padding: 8px 12px; font-size: 10px; color: var(--grey); border-top: 1px solid var(--edge); letter-spacing: .04em; }
+.hint kbd { background: var(--panel); border: 1px solid var(--edge-hi); padding: 1px 5px; color: var(--dim); }
+
+/* --------------------------------------------------------------------- orb */
+.orbstage { position: relative; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 4px; overflow: hidden; }
+#swarm { width: 100%; max-width: min(280px, 100%); max-height: 100%; aspect-ratio: 1; }
+#swarm { display: block; }
+#swarm[hidden] { display: none; }
+/* The presence-mode switcher. Same corner-control idiom as .btn and
+   .chip elsewhere in this file — angular, uppercase, --dim/--edge-hi at
+   rest, flips to filled --cyan on hover/interaction. Unobtrusive at rest
+   (opacity .55) since it sits over the swarm itself. */
+#swarm-mode {
+  position: absolute; right: 6px; bottom: 6px;
+  font: inherit; font-size: 9px; letter-spacing: .18em; text-transform: uppercase;
+  white-space: nowrap; cursor: pointer;
+  padding: 2px 7px; color: var(--dim);
+  border: 1px solid var(--edge-hi); background: var(--panel);
+  opacity: .55; transition: opacity .15s, color .15s, background .15s, border-color .15s;
+}
+#swarm-mode:hover { opacity: 1; color: var(--bg); background: var(--cyan); border-color: var(--cyan); }
+#swarm-mode[hidden] { display: none; }
+.orbstate { text-align: center; padding: 0 12px 8px; flex: 0 0 auto; }
+.orbstate .mood { font-size: 9.5px; letter-spacing: .24em; text-transform: uppercase; color: var(--teal-dim); }
+/* Hidden by default the mood word (IDLE / BLOCKED / STUCK) is
+   derived from the recent event feed, not from Syzygy, and sitting between
+   the sphere and the ask field it read as a status for the conversation --
+   misleading, and distracting to sit under. recomputeMood still writes it,
+   so nothing else changes and un-hiding is one line. */
+.orbstate .mood { display: none; }
+.orbstate .line {
+  margin-top: 4px; font-size: 11.5px; color: var(--text); line-height: 1.4;
+  /* Three lines at most in the rail, then ellipsis: a long status used to
+     grow the panel and take the room out of the feed below it. */
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
+/* Orchestrator agent. The blurb REPLACES .line by default --
+   hidden here, and un-hidden only on hover or while a card is pinned, via
+   .has-blurb/.orb-pinned on .orbpanel (app.js's renderBlurb/openDrawer/
+   closeDrawer). narrate() itself is untouched; only which of the two lines
+   is visible changes. */
+/* The hide is UNCONDITIONAL, not gated on .has-blurb. Gating it would mean
+   that with no blurb yet (an empty one, or a blurb turn that failed) the
+   panel falls back to showing the focused session's narration -- "working —
+   synthetic session 1" alternating with "idle" -- in the very slot that was
+   just cleared. That fallback is the problem, so there is no fallback.
+   narrate() is untouched and the line still reveals on a pinned card, so it
+   stays reachable; hidden is only the default. */
+.orbstate .line { display: none; }
+/* NO hover reveal. The ask field lives inside .orbpanel, so hovering to type
+   is unavoidable -- the narration came back exactly while the chat was in
+   use, which is the one moment it is least wanted. It survives
+   only on a pinned card, which keeps narrate() reachable and makes seeing it
+   a deliberate act rather than a side effect of typing. */
+.orbpanel.orb-pinned .orbstate .line { display: -webkit-box; }
+.orbstate .blurbline {
+  display: none; margin-top: 4px; align-items: baseline; justify-content: center;
+  gap: 6px; font-size: 11.5px; color: var(--text); line-height: 1.4;
+}
+.orbpanel.has-blurb .orbstate .blurbline { display: flex; }
+/* The blurb does NOT hide on hover. Swapping it for the per-session
+   narration would leave the line blank, because that narration is
+   pinned-only. The blurb is the board summary this feature exists to show, so
+   it stays put while you reach for the field. It yields on a PINNED card,
+   where the narration deliberately takes the slot. */
+.orbpanel.has-blurb.orb-pinned .orbstate .blurbline { display: none; }
+.orbstate .blurbtext { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.orbstate .blurbage { font-size: 9.5px; color: var(--grey); flex: 0 0 auto; }
+.orbstate .blurbrefresh {
+  flex: 0 0 auto; font: inherit; font-size: 11px; line-height: 1; color: var(--dim);
+  background: transparent; border: none; cursor: pointer; padding: 0 2px;
+  transition: color .15s, opacity .15s;
+}
+.orbstate .blurbrefresh:hover { color: var(--cyan); }
+.orbstate .blurbrefresh.busy { opacity: .4; cursor: wait; pointer-events: none; }
+
+/* The ask field. opacity 0 until the panel is hovered, the field itself is
+   focused, or it holds text -- `:has()` on the WRAPPER so a
+   voice.js mic button injected as a sibling (voice.js stamps this wrapper
+   `.mcv-host`, never #orb-ask itself) fades in and out with the field. */
+.orbstate .orbask { margin-top: 6px; position: relative; opacity: 0; transition: opacity .15s ease; }
+.orbpanel:hover .orbstate .orbask,
+.orbstate .orbask:focus-within,
+.orbstate .orbask:has(#orb-ask:not(:placeholder-shown)) { opacity: 1; }
+#orb-ask {
+  width: 100%; box-sizing: border-box; font: inherit; font-size: 11px;
+  background: var(--panel); border: 1px solid var(--edge-hi); color: var(--white);
+  padding: 5px 8px; outline: none;
+  border-radius: var(--r-input);
+}
+#orb-ask:focus { border-color: var(--cyan); }
+#orb-ask::placeholder { color: var(--grey); }
+
+/* the bar of controls above the transcript -- × (a VIEW toggle,
+   app.js's #orb-transcript-close) and "new conversation" (a real action,
+   POST /api/orchestrator/clear via #orb-transcript-new). Shares the
+   transcript's own gone/visible state (app.js's renderOrchTranscript). */
+.orbstate .orbtranscriptbar {
+  margin-top: 8px; display: flex; align-items: center; justify-content: space-between;
+  gap: 6px;
+}
+.orbtranscript-new {
+  font: inherit; font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--dim); background: transparent; border: none; cursor: pointer; padding: 2px 0;
+  transition: color .15s;
+}
+.orbtranscript-new:hover { color: var(--cyan); }
+.orbtranscript-close {
+  flex: 0 0 auto; font: inherit; font-size: 13px; line-height: 1; color: var(--dim);
+  background: transparent; border: none; cursor: pointer; padding: 0 2px;
+  transition: color .15s;
+}
+.orbtranscript-close:hover { color: var(--red-hot); }
+
+/* The transcript: a capped scroll of turn cards, MCX-reconciled by turn id
+   keyed on the server's turn id (app.js's renderOrchTranscript). Each card
+   holds its own question, answer and any proposed-action buttons; nothing
+   in here is an <input>, so voice.js's discovery never looks inside it. */
+.orbstate .orbtranscript { margin-top: 4px; max-height: 160px; overflow-y: auto; text-align: left; }
+.orchturn { padding: 6px 0; border-top: 1px solid var(--edge); font-size: 10.5px; }
+.orchturn:first-child { border-top: none; }
+.orchturn .orchq { color: var(--dim); font-style: italic; }
+.orchturn .orcha { margin-top: 3px; color: var(--text); line-height: 1.4; white-space: pre-wrap; }
+/* the failure reason is its OWN element now, distinctly styled --
+   never the whole bubble's colour, so a turn that streamed a real, partial
+   answer before erroring keeps showing that answer in its normal colour,
+   with only the reason it stopped in red underneath. */
+.orchturn .orcherr { margin-top: 3px; color: var(--red-hot); line-height: 1.4; white-space: pre-wrap; }
+/* A queued turn is waiting, not failed — dim, never the error red. */
+.orchturn.queued .orcherr { color: var(--dim); font-style: italic; }
+.orchturn .orchacts { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 5px; }
+.orchact {
+  font: inherit; font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--dim); background: var(--panel); border: 1px solid var(--edge-hi);
+  padding: 3px 7px; cursor: pointer;
+  border-radius: var(--r-control);
+}
+.orchact:hover { color: var(--bg); background: var(--cyan); border-color: var(--cyan); }
+.orchact.applied { color: var(--teal-dim); cursor: default; opacity: .7; }
+/* In flight: greyed the instant it is pressed, before the request goes
+   out. A spawn costs money and takes seconds; a button that still looks
+   pressable is what produced three sessions from one intent. */
+.orchact:disabled { opacity: .45; cursor: default; }
+.orchact:disabled:hover { color: var(--text-dim); background: var(--panel); border-color: var(--edge-hi); }
+.orchact.applied:hover { color: var(--teal-dim); background: var(--panel); border-color: var(--edge-hi); }
+
+/* -------------------------------------------------------------------- feed */
+.ev { display: flex; gap: 9px; align-items: flex-start; padding: 5px 7px; border-left: 2px solid var(--edge-hi); }
+.ev + .ev { margin-top: 2px; }
+.ev:hover { background: var(--panel); }
+.ev .ts { font-size: 10px; color: var(--grey); flex: 0 0 50px; padding-top: 1px; }
+/* Two densities, both tighter than the feed was at full width. `compact`
+   (the default) drops the detail line; `dense` drops the clock and the timing
+   too, leaving one line of text per call. */
+/* `detail` shows the two-line form; `compact` folds the same text onto the
+   name's line; `dense` drops it. .ev .inline and .ev .detail are the same
+   string in two shapes -- exactly one of them is ever visible. */
+.ev .inline {
+  min-width: 0; flex: 0 1 auto; color: var(--grey); font-size: 10px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ev .title > b { flex: 0 0 auto; }
+.feed.detail .ev .inline { display: none; }
+.feed.compact .ev .detail { display: none; }
+.feed.dense .ev { padding: 1px 7px; gap: 6px; }
+.feed.dense .ev .ts,
+.feed.dense .ev .detail,
+.feed.dense .ev .inline { display: none; }
+.feed.dense .ev .title { font-size: 10.5px; }
+
+/* Which session the call came from, on the right edge of the row. The feed is
+   the whole board's, so without this a row does not say who did it. It wins
+   the right edge outright; `ms` keeps it only in the roomiest density, and
+   below that the duration is the less useful of the two. */
+/* A real column: the last child of .ev, fixed width, right-aligned, so the
+   names line up down the whole feed. Compact is the density where the detail
+   text competes for the same row, so the column is narrower there. */
+.ev .who {
+  flex: 0 0 84px; text-align: right; padding-top: 2px;
+  font-size: 9px; letter-spacing: .06em; color: var(--cyan-deep);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.feed.detail .ev .who,
+.feed.dense .ev .who { flex-basis: 112px; }
+.feed.compact .ev .ms, .feed.dense .ev .ms { display: none; }
+.ev .body { flex: 1; min-width: 0; }
+.ev .title { font-size: 11.5px; display: flex; align-items: center; gap: 6px; color: var(--text); }
+.ev .title b { font-weight: 700; color: var(--white); }
+.ev .detail { font-size: 10px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev .ms { font-size: 9.5px; color: var(--grey); }
+/* An ordinary call draws no edge at all. The rail down the side of a feed row
+   is a status channel, not decoration, so it is invisible until the status is
+   worth seeing. */
+.ev.ok   { border-left-color: transparent; }
+.ev.turn { border-left-color: var(--cyan); }
+.ev.agent{ border-left-color: var(--purple); }
+.ev.deny { border-left-color: var(--amber); background: rgba(224,151,60,.06); }
+.ev.err  { border-left-color: var(--red-hot); background: rgba(255,86,112,.06); }
+.chip { font-size: 8.5px; letter-spacing: .1em; text-transform: uppercase; padding: 1px 5px; border: 1px solid var(--edge-hi); color: var(--dim); border-radius: var(--r-control); }
+.chip.deny { color: var(--bg); background: var(--amber); border-color: var(--amber); }
+.chip.err  { color: var(--bg); background: var(--red-hot); border-color: var(--red-hot); }
+
+/* ------------------------------------------------------------------ charts */
+/* Two columns: the curves and the file heat on the left, the event log and
+   its scrubber on the right. Both answer the same question -- what happened
+   over the run -- so they share one tab.
+
+   `display` lives on the .on rule and NOWHERE else. An ID selector beats
+   `.view:not(.on) { display: none }` on specificity, so a bare
+   `#view-telemetry { display: grid }` left this tab painted over every other
+   view -- the charts and the replay log showed up on Control. Same trap
+   dispatch.css documents for `#d-threadpanel[hidden]`: never set `display`
+   on a view except under `.on`. */
+#view-telemetry.on {
+  min-height: 0; gap: 8px; padding: 8px 12px 12px;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+#view-telemetry .charts { min-height: 0; }
+/* The usage panel is a third grid child in a two-column grid, so it
+   needs an explicit span or it would land under just the left column,
+   leaving the right half of its row empty beside the replay log's column. */
+#usage-panel { grid-column: 1 / -1; }
+@media (max-width: 1100px) {
+  #view-telemetry.on { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; }
+}
+.chartrow { padding: 8px 10px; }
+.caption { display: flex; justify-content: space-between; font-size: 9px; letter-spacing: .18em; text-transform: uppercase; color: var(--grey); margin-bottom: 5px; }
+.chartrow canvas { width: 100%; height: 88px; display: block; }
+.heat { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 10px 10px; }
+.heatcell {
+  padding: 3px 7px; font-size: 10px; cursor: pointer;
+  border: 1px solid var(--edge-hi); color: var(--dim); background: var(--panel);
+  border-radius: var(--r-control);
+}
+.heatcell:hover { color: var(--bg); background: var(--cyan); border-color: var(--cyan); }
+.heatcell .n { margin-left: 5px; color: var(--grey); }
+.heatcell:hover .n { color: var(--bg); }
+
+/* ------------------------------------------------------------------- inbox */
+.ask, .appr { padding: 9px 10px; margin-bottom: 8px; border: 1px solid var(--edge-hi); background: var(--panel); border-radius: var(--r-surface); }
+.ask { border-left: 3px solid var(--purple); }
+.appr { border-left: 3px solid var(--amber); }
+.ask .q, .appr .q { font-size: 12px; margin-bottom: 7px; line-height: 1.45; color: var(--white); }
+.ask .from, .appr .from { font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: var(--grey); margin-bottom: 4px; }
+.ask input {
+  width: 100%; padding: 6px 9px; font-family: var(--mono); font-size: 12px;
+  background: var(--bg); border: 1px solid var(--edge-hi); color: var(--text); outline: none;
+  border-radius: var(--r-input);
+}
+.ask input:focus { border-color: var(--cyan); }
+.opts { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 6px; }
+
+.btn {
+  font: inherit; font-size: 10.5px; letter-spacing: .08em; cursor: pointer; text-transform: uppercase;
+  padding: 5px 11px; color: var(--dim);
+  border: 1px solid var(--edge-hi); background: transparent;
+  border-radius: var(--r-control);
+  transition: none;
+}
+.btn:hover  { color: var(--bg); background: var(--cyan); border-color: var(--cyan); }
+.btn:active { background: var(--cyan-hot); }
+.btn.go {
+  color: var(--cyan-hot); border-color: var(--cyan-deep);
+  background: linear-gradient(rgba(111,195,223,.07), rgba(111,195,223,.07));
+}
+.btn.go:hover { color: var(--bg); background: var(--cyan); border-color: var(--cyan); }
+.btn.no  { color: var(--red-hot); }
+.btn.no:hover { color: var(--bg); background: var(--red-hot); border-color: var(--red-hot); }
+.btn.key { color: var(--cyan); }
+
+.steer {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 4px;
+  padding: 6px 14px 0; overflow-y: auto; min-height: 0; flex: 0 1 auto;
+}
+.empty { color: var(--grey); font-size: 11px; text-align: center; padding: 20px 10px; letter-spacing: .05em; }
+
+/* An armed steering button is the one the pointer is now carrying. */
+.steer .btn.on {
+  color: var(--bg); background: var(--cyan); border-color: var(--cyan);
+}
+/* A custom button is one you made, so it reads slightly warmer than a
+   built-in. The + affordance is quieter than either: it is furniture. */
+.steer .btn.custom { border-color: var(--edge-hi); }
+.steer .btn.steeradd { color: var(--dim); border-style: dashed; }
+.steer .btn.steeradd:hover { color: var(--fg); }
+.steernote {
+  flex: 0 0 auto; padding: 4px 14px 0; font-size: 9.5px; color: var(--grey);
+  letter-spacing: .06em; line-height: 1.5;
+}
+.steernote kbd {
+  background: var(--panel); border: 1px solid var(--edge-hi); padding: 0 4px;
+  color: var(--dim); font-size: 9px;
+}
+.panel.collapsed > .steernote { display: none; }
+
+/* ------------------------------------------------------------ armed mode */
+/* While a command is armed the switchboard is a target list, not a board: the
+   cards say so with the cursor and with a lit edge, and a marked card holds
+   that edge after the pointer leaves. */
+body.armed .card { cursor: crosshair; }
+body.armed .card:hover {
+  border-color: var(--cyan); background: linear-gradient(rgba(111,195,223,.10), rgba(111,195,223,.10)), var(--panel);
+}
+body.armed .card.marked {
+  border-color: var(--cyan-hot);
+  box-shadow: inset 0 0 0 1px var(--cyan-deep);
+  background: linear-gradient(rgba(169,232,255,.09), rgba(169,232,255,.09)), var(--panel);
+}
+body.armed .card.marked::after {
+  content: '\2713'; position: absolute; right: 8px; top: 6px;
+  font-size: 11px; color: var(--cyan-hot);
+}
+
+/* ---------------------------------------------------------------- tooltip */
+/* The deck's own, not the OS's. Two weights: a headline naming the thing, and
+   body text saying what it counts or what it will do. Positioned by app.js,
+   which is also what keeps it inside the window. */
+.tip {
+  position: fixed; z-index: 59; pointer-events: none;
+  max-width: 320px; padding: 8px 11px;
+  background: var(--surface); border: 1px solid var(--edge-hi);
+  border-left: 2px solid var(--accent);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .72);
+  font-size: 10.5px; line-height: 1.5; color: var(--text);
+  opacity: 0; transition: opacity .1s;
+  border-radius: var(--r-surface);
+}
+.tip.show { opacity: 1; }
+.tip[hidden] { display: none; }
+.tip .tiphead {
+  font-size: 9px; letter-spacing: .18em; text-transform: uppercase;
+  color: var(--accent); margin-bottom: 4px;
+}
+.tip .tipline + .tipline { margin-top: 3px; }
+.tip .tipline { white-space: pre-wrap; }
+
+/* The mode line. Bottom of the window, above the toast, and only on screen
+   when there is something true to say. */
+.modeline {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 55;
+  padding: 7px 16px; font-size: 10.5px; letter-spacing: .04em;
+  color: var(--text); background: var(--panel);
+  border-top: 1px solid var(--cyan-deep);
+  pointer-events: none;
+}
+.modeline[hidden] { display: none; }
+.modeline b { color: var(--cyan-hot); font-weight: 700; }
+.modeline kbd {
+  background: var(--surface); border: 1px solid var(--edge-hi); padding: 0 5px;
+  color: var(--cyan); font-size: 9.5px;
+}
+
+/* ---------------------------------------------------------------- replay */
+/* The right-hand column of the Telemetry tab; it has no view of its own. */
+.replaywrap { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.replaywrap .panel { min-height: 0; }
+.scrub { flex: 0 0 auto; }
+.scrub { border: 1px solid var(--edge); background: var(--surface); padding: 10px 12px; }
+.scrubhead { display: flex; align-items: center; gap: 10px; font-size: 10.5px; color: var(--dim); margin-bottom: 8px; }
+#scrubber { width: 100%; appearance: none; height: 3px; background: var(--edge); outline: none; }
+#scrubber::-webkit-slider-thumb {
+  appearance: none; width: 12px; height: 18px; cursor: pointer;
+  background: var(--cyan); border: none;
+}
+#timeline { width: 100%; height: 70px; display: block; margin-top: 6px; }
+
+/* --------------------------------------------------------------- overlays */
+/* The wire you are dragging is drawn here, in viewport coordinates, on a layer
+   of its own above #app and below the drawer. It cannot be drawn inside the
+   board: .boardstage scrolls (`overflow: auto`) and .panel around it carries a
+   clip-path, and neither clip can be escaped from within -- an SVG's own
+   `overflow: visible` does not help -- so the wire was cut off the moment the
+   pointer left the cards' box. Persistent wires stay in #wires, inside the
+   stage, where they belong: they track cards, and they should be clipped and
+   scrolled with them. */
+/* The in-flight drag wire's canvas. `inset: 0` does NOT stretch a replaced
+   element -- an <svg> or a <canvas> keeps its 300x150 intrinsic size and every
+   client coordinate drawn into it lands off the box. So this pins the corner
+   only, and app.js sets both the CSS size and the backing-store attributes
+   (scaled by devicePixelRatio) every frame. `pointer-events: none` is
+   load-bearing: document.elementFromPoint() must see the card under the
+   cursor, not this overlay, or a drag can never find its drop target. */
+#dragwire { position: fixed; left: 0; top: 0; z-index: 35; pointer-events: none; }
+
+/* ----------------------------------------------------------- link dialog */
+/* Landing a drag opens this over a dimmed board and nothing is sent until it
+   is answered. Angular and flat like the rest of the deck: a panel, not a card
+   that floats. */
+.modal {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(4, 6, 12, .74);
+}
+.modal[hidden] { display: none; }
+.mpanel {
+  width: min(540px, 92vw);
+  background: var(--surface); border: 1px solid var(--edge-hi);
+  border-radius: var(--r-surface);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .62);
+}
+:root[data-corners="sharp"] .mpanel {
+  border-radius: 0;
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+}
+.mhead {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 12px; border-bottom: 1px solid var(--edge);
+  font-size: 12.5px; color: var(--white);
+}
+.mhead .tick { width: 3px; height: 14px; background: var(--cyan); }
+.mbody { padding: 12px; }
+.mroute { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; font-size: 12px; margin-bottom: 12px; }
+/* Reads as the wire does: the dim end is where the brief comes from, the lit
+   end is where it lands. */
+.mroute .rfrom  { color: var(--cyan-deep); font-weight: 700; }
+.mroute .rto    { color: var(--cyan-hot); font-weight: 700; }
+.mroute .rarrow { color: var(--teal-dim); }
+.mlabel {
+  display: block; margin-bottom: 5px;
+  font-size: 9px; letter-spacing: .18em; text-transform: uppercase; color: var(--teal-dim);
+}
+.mpanel textarea {
+  display: block; width: 100%; box-sizing: border-box; resize: vertical;
+  padding: 8px 9px; font: inherit; font-size: 12px; line-height: 1.45;
+  background: var(--bg); border: 1px solid var(--edge); color: var(--text);
+  border-radius: var(--r-input);
+}
+.mpanel textarea:focus { outline: none; border-color: var(--cyan); }
+.mpanel textarea::placeholder { color: var(--grey); }
+/* The honest small print: a connection is one message, not a wire that stays
+   open. It belongs on screen, not in a tooltip. */
+.mfoot { display: flex; align-items: flex-end; gap: 14px; margin-top: 11px; }
+.mfoot .mnote { flex: 1; font-size: 9.5px; line-height: 1.6; color: var(--grey); }
+.mfoot .mnote kbd { background: var(--panel); border: 1px solid var(--edge-hi); padding: 0 4px; color: var(--dim); }
+.mfoot .btn { flex: 0 0 auto; }
+
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 92vw); z-index: 40;
+  background: var(--surface); border-left: 1px solid var(--edge-hi);
+  transform: translateX(100%); transition: transform .18s ease;
+  display: flex; flex-direction: column;
+}
+.drawer.open { transform: none; }
+.drawer .dhead { padding: 12px 14px; border-bottom: 1px solid var(--edge); display: flex; align-items: center; gap: 9px; }
+.drawer .dbody { flex: 1; overflow: auto; padding: 14px; }
+.kv { display: grid; grid-template-columns: 92px 1fr; gap: 5px 10px; font-size: 11.5px; margin-bottom: 14px; }
+.kv dt { color: var(--grey); font-size: 9.5px; letter-spacing: .14em; text-transform: uppercase; padding-top: 2px; }
+.kv dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+.sect { font-size: 9.5px; letter-spacing: .18em; text-transform: uppercase; color: var(--teal-dim); margin: 14px 0 7px; border-bottom: 1px solid var(--edge); padding-bottom: 4px; }
+
+/* The TODOs section header: the same .sect label, plus the this-session /
+   whole-project toggle and its count, sharing one border-bottom rather than
+   each drawing its own. */
+.secthead { display: flex; align-items: baseline; gap: 8px; margin: 14px 0 7px; border-bottom: 1px solid var(--edge); padding-bottom: 4px; }
+.secthead .sect { margin: 0; border: none; padding: 0; flex: 0 0 auto; }
+.secthead .todoscope { flex: 0 0 auto; padding: 1px 8px; font-size: 9.5px; letter-spacing: .06em; text-transform: none; }
+.todocount { flex: 1 1 auto; text-align: right; color: var(--grey); font-size: 9.5px; letter-spacing: .04em; }
+.tdnote { color: var(--grey); font-size: 10.5px; font-style: italic; padding: 2px 2px 8px; }
+
+/* Rename. The field stands exactly where the title did, so the head does not
+   reflow when it opens and the eye stays on the name. */
+.dtitleedit {
+  background: var(--bg); color: var(--white); border: 1px solid var(--cyan);
+  padding: 3px 6px; font: inherit; font-size: 13px; font-weight: 700;
+  width: 190px; max-width: 52%;
+  border-radius: var(--r-input);
+}
+.dtitleedit:focus { outline: none; }
+.btn.dpencil { padding: 2px 7px; line-height: 1.5; }
+.drenamehint {
+  padding: 7px 14px; border-bottom: 1px solid var(--edge);
+  background: rgba(111,195,223,.06); color: var(--dim); font-size: 10.5px; line-height: 1.45;
+}
+.drenamehint b { color: var(--cyan); font-weight: 700; }
+
+/* The reply field, pinned under the scrolling body rather than inside it, so
+   it is reachable however far down the drawer is scrolled. */
+.drawer .dreply { border-top: 1px solid var(--edge); padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 7px; }
+.drawer .dreply textarea {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 44px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--edge-hi);
+  padding: 7px 8px; font: inherit; font-size: 11.5px; line-height: 1.4;
+  border-radius: var(--r-input);
+}
+.drawer .dreply textarea:focus { outline: none; border-color: var(--cyan); }
+.dreplyrow { display: flex; align-items: center; gap: 9px; }
+.dreplyhint { color: var(--grey); font-size: 9.5px; letter-spacing: .08em; margin-right: auto; }
+
+.toast {
+  position: fixed; left: 50%; bottom: 46px; transform: translate(-50%, 10px); z-index: 60;
+  padding: 8px 16px; font-size: 11px; letter-spacing: .06em;
+  border: 1px solid var(--cyan-deep); background: var(--surface); color: var(--text);
+  opacity: 0; transition: opacity .16s, transform .16s;
+  pointer-events: none;   /* invisible and out of the way when it is not up */
+  border-radius: var(--r-surface);
+}
+.toast.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; cursor: pointer; }
+/* A standing notice rather than a receipt: it wraps, it holds longer, and it
+   wears the deck's warning rail. An ordinary toast is teal-edged and quiet, so
+   here the amber IS the difference -- it is the only thing on screen that
+   colour means. */
+.toast.warn {
+  max-width: min(560px, 92vw); text-align: left; line-height: 1.55; letter-spacing: .02em;
+  border-color: #4a3a1d; border-left: 3px solid var(--amber); color: var(--amber-hot);
+  background: linear-gradient(rgba(224,151,60,.07), rgba(224,151,60,.07)), var(--surface);
+}
+
+/* MCX.show()'s primitive, and it belongs HERE rather than in a view's own
+   stylesheet. `projects.css` and `canvas.css` each define their own copy;
+   both are identical and harmless today only because every stylesheet is
+   loaded unconditionally. A future view that adopts MCX without knowing to
+   declare it would get an MCX.show() that silently does nothing -- the exact
+   failure class the reconciler work spent the day removing. Defined once, here,
+   so adopting MCX cannot come with a hidden prerequisite. */
+.gone { display: none !important; }
+
+/* ---------------------------------------------------------- card colour --
+   A session's own outline colour, picked in the drawer (cards.mjs).
+
+   NOT `outline`, and not a plain outer `box-shadow` either: under sharp,
+   `.card` carries a clip-path chamfer (the deck's signature bevel), and
+   clip-path clips both of those -- it is the reason `.card.needs`'s own
+   `0 0 20px -6px` amber glow never actually rendered, which is why that
+   declaration was deleted outright (corner-style pass) rather
+   than fixed: the glow is not wanted, rendering or not. An INSET
+   box-shadow survives the clip (`.card.needs`'s `inset 2px 0 0` does
+   render), but `.card.working`, `.card.needs` and `.card.self` each already
+   own the `box-shadow` property outright -- a fourth rule setting it too
+   would replace theirs, not add to them, for whichever one loses the
+   cascade.
+
+   So the ring is a separate box: a `::after` the same size and shape as the
+   card, absolutely positioned over it and painting its own inset box-shadow
+   on its own `box-shadow` property -- genuinely independent of `.card`'s, so
+   it can never be overwritten by or overwrite .self/.working/.needs, and
+   reads as sitting OUTSIDE all three regardless of which are also active.
+   Its own corners follow the same --r-surface/clip-path split as `.card`
+   itself (below); under sharp it takes the identical clip-path polygon, or
+   the chamfer reappears as four small square corners poking past it, and
+   under soft/space an inset box-shadow already follows border-radius on its
+   own, so no clip-path is needed there at all. `.colored` is the gate;
+   `--card-color` is set on the node by fillCard (app.js). canvas.css
+   restates this for `.cnode`, same as its `.gone` and `.needs`/`.stopped`
+   rules -- that file belongs to another session and must not depend on this
+   one keeping the selector. */
+.card.colored::after {
+  content: '';
+  position: absolute; inset: 0; pointer-events: none;
+  border-radius: var(--r-surface);
+  box-shadow: inset 0 0 0 2px var(--card-color);
+}
+:root[data-corners="sharp"] .card.colored::after {
+  border-radius: 0;
+  clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
+}
+
+/* The drawer's picker: presets, then a native colour input, then clear. */
+.cswatches { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-bottom: 8px; }
+.cpickrow { display: flex; align-items: center; gap: 8px; }
+.cpickrow input[type="color"] {
+  width: 28px; height: 22px; padding: 0; border: 1px solid var(--edge-hi);
+  background: var(--panel); cursor: pointer;
+}

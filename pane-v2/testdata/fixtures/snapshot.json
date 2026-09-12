@@ -1,0 +1,1521 @@
+{
+ "t": 1735689600000,
+ "sessions": [
+  {
+   "series": [
+    {
+     "t": 1735689528232,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689529433,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689530633,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689531835,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689533036,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689534238,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689535439,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689536640,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689537841,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689539042,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689540243,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689541444,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689542645,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689543846,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689545051,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689546252,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689547453,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689548654,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689549854,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689551055,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689552255,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689553456,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689554657,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689555860,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689557060,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689558261,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689559462,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689560663,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689561863,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689563068,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689564269,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689565470,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689566670,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689567875,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689569071,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689570272,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689571473,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689572674,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689573875,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689575077,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689576278,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689577479,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689578679,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689579880,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689581081,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689582282,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689583483,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689584684,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689585885,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689587086,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689588288,
+     "tokens": 1777,
+     "spend": 100.5483045,
+     "ctx": 831399
+    },
+    {
+     "t": 1735689589488,
+     "tokens": 2069,
+     "spend": 100.999818,
+     "ctx": 832457
+    },
+    {
+     "t": 1735689590689,
+     "tokens": 2069,
+     "spend": 100.999818,
+     "ctx": 832457
+    },
+    {
+     "t": 1735689591889,
+     "tokens": 2069,
+     "spend": 100.999818,
+     "ctx": 832457
+    },
+    {
+     "t": 1735689593091,
+     "tokens": 2069,
+     "spend": 100.999818,
+     "ctx": 832457
+    },
+    {
+     "t": 1735689594292,
+     "tokens": 2069,
+     "spend": 100.999818,
+     "ctx": 832457
+    },
+    {
+     "t": 1735689595493,
+     "tokens": 2069,
+     "spend": 100.999818,
+     "ctx": 832457
+    },
+    {
+     "t": 1735689596694,
+     "tokens": 2069,
+     "spend": 100.999818,
+     "ctx": 832457
+    },
+    {
+     "t": 1735689597895,
+     "tokens": 2069,
+     "spend": 100.999818,
+     "ctx": 832457
+    },
+    {
+     "t": 1735689599096,
+     "tokens": 2069,
+     "spend": 100.999818,
+     "ctx": 832457
+    }
+   ],
+   "stats": {
+    "ctx": 832457,
+    "ctxLimit": 1000000,
+    "spend": 100.999818,
+    "tools": 306,
+    "guardrails": 3,
+    "errors": 0,
+    "diff": {
+     "added": 0,
+     "removed": 0
+    }
+   },
+   "agents": [
+    {
+     "id": "a853429192e5adcf5",
+     "description": "Draft the ledger report header",
+     "type": "general-purpose",
+     "status": "running"
+    },
+    {
+     "id": "ad485fd33363fb698",
+     "description": "Add the totals column",
+     "type": "general-purpose",
+     "status": "running"
+    }
+   ],
+   "files": {},
+   "status": "Waiting for response; turn limit is 93 seconds.",
+   "id": "00000000-0000-4000-8000-000000000002",
+   "name": "demo-project",
+   "agentName": "demo-project-07",
+   "cwd": "/home/dev/demo",
+   "repo": null,
+   "branch": null,
+   "model": "opus 5",
+   "pid": "72641",
+   "startedAt": 1735655616160,
+   "seenAt": 1735689599629,
+   "working": true
+  },
+  {
+   "series": [
+    {
+     "t": 1735689528816,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689530017,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689531218,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689532418,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689533621,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689534821,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689536022,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689537224,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689538425,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689539626,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689540827,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689542028,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689543229,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689544434,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689545635,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689546836,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689548036,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689549237,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689550438,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689551639,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689552840,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689554046,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689555247,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689556450,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689557651,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689558851,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689560053,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689561254,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689562454,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689563655,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689564856,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689566057,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689567257,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689568458,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689569659,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689570860,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689572061,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689573262,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689574463,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689575666,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689576866,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689578068,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689579269,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689580469,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689581670,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689582871,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689584072,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689585272,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689586475,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689587675,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689588876,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689590077,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689591277,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689592478,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689593679,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689594882,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689596084,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689597285,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689598486,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689599687,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    }
+   ],
+   "stats": {
+    "ctx": 0,
+    "ctxLimit": 200000,
+    "spend": 0,
+    "tools": 0,
+    "guardrails": 0,
+    "errors": 0,
+    "diff": {
+     "added": 0,
+     "removed": 0
+    }
+   },
+   "agents": [],
+   "files": {},
+   "status": "Idle.",
+   "id": "00000000-0000-4000-8000-000000000003",
+   "name": "demo-companion",
+   "agentName": "main",
+   "cwd": "/home/dev/demo",
+   "repo": null,
+   "branch": null,
+   "model": "opus 5",
+   "pid": "34422",
+   "startedAt": 1735687245489,
+   "seenAt": 1735689599967,
+   "working": false
+  },
+  {
+   "series": [
+    {
+     "t": 1735689533268,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689534468,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689535668,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689536869,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689538070,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689539271,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689540472,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689541672,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689542872,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689544073,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689545274,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689546475,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689547676,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689548877,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689550078,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689551278,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689552479,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689553680,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689554881,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689556082,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689557283,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689558484,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689559684,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689560885,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689562086,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689563287,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689564487,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689565688,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689566889,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689568090,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689569291,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689570492,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689571693,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689572893,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689574094,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689575295,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689576496,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689577697,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689578898,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689580099,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689581300,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689582501,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689583702,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689584903,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689586104,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689587305,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    },
+    {
+     "t": 1735689588529,
+     "tokens": 0,
+     "spend": 0,
+     "ctx": 0
+    }
+   ],
+   "stats": {
+    "ctx": 0,
+    "ctxLimit": 200000,
+    "spend": 0,
+    "tools": 0,
+    "guardrails": 0,
+    "errors": 0,
+    "diff": {
+     "added": 0,
+     "removed": 0
+    }
+   },
+   "agents": [],
+   "files": {},
+   "status": "Idle.",
+   "id": "00000000-0000-4000-8000-000000000004",
+   "name": "probe-run",
+   "agentName": "probe-run-46",
+   "cwd": "/tmp/demo-scratch/00000000-0000-4000-8000-000000000002/scratchpad/probe-run",
+   "repo": null,
+   "branch": null,
+   "model": "fable 5.1",
+   "pid": "48788",
+   "startedAt": 1735689531712,
+   "seenAt": 1735689588822,
+   "working": false
+  }
+ ],
+ "events": [
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && go build ./... 2>&1 | head -40; echo \"EXIT=$?\"; go vet ./... 2>&1 | head ",
+   "status": "ok",
+   "ms": 2966,
+   "t": 1735689332942,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "hsln4j2l"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "set -e\ncd /home/dev/demo/tally\ncat > internal/report/header.go <<'GOEOF'\npackage report\n\nimport (\n\t\"strings",
+   "status": "ok",
+   "ms": 1995,
+   "t": 1735689349177,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "h7s4qi3u"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cat > /home/dev/demo/tally/cmd/tally/main.go <<'EOF'\n// Command tally sums a ledger and prints",
+   "status": "ok",
+   "ms": 2358,
+   "t": 1735689371806,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "60lpsx5n"
+  },
+  {
+   "kind": "turn",
+   "label": "turn started",
+   "t": 1735689376740,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "p56rqocz"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && go test ./internal/store -run TestAppend -count=1 2>&1 | tail -20",
+   "status": "ok",
+   "ms": 3565,
+   "t": 1735689378944,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "xbn7typz"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && gofmt -l . ; echo \"---\"; go vet ./internal/... 2>&1 | head -20",
+   "status": "ok",
+   "ms": 2736,
+   "t": 1735689385790,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "pa60baxb"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && sed -n \"1,60p\" internal/report/header.go",
+   "status": "ok",
+   "ms": 2084,
+   "t": 1735689396855,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "qxpjuwi9"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo; T=docs/ledger-format.md\necho \"=== record fields ===\"; sed -n \"",
+   "status": "ok",
+   "ms": 2488,
+   "t": 1735689397407,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "y3v3mht8"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && echo \"=== whoami with --account prefix ===\"; ./bin/tally --whoami --acco",
+   "status": "ok",
+   "ms": 5884,
+   "t": 1735689397924,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "c98tyamj"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "set -e cd /home/dev/demo/pane-v2 cat > internal/ui/footer.go <<'GOEOF' package ui import ( \"fmt\" \"g",
+   "status": "ok",
+   "ms": 1991,
+   "t": 1735689418813,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "hsyyrbao"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && go test ./... -count=1 2>&1 | tail -30",
+   "status": "ok",
+   "ms": 5131,
+   "t": 1735689428561,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "ypo24ywo"
+  },
+  {
+   "kind": "turn",
+   "label": "tests passed",
+   "detail": "S=/tmp/demo-scratch/00000000-0000-4000-8000-000000000002/scratchpad",
+   "t": 1735689428978,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "tzhwm7t9"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "S=/tmp/demo-scratch/00000000-0000-4000-8000-000000000002/scratchpad\nrm -rf $S/",
+   "status": "ok",
+   "ms": 3433,
+   "t": 1735689428978,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "fuwjf0yc"
+  },
+  {
+   "kind": "note",
+   "label": "session joined the board",
+   "detail": "/tmp/demo-scratch/00000000-0000-4000-8000-000000000002/scratchpad/probe-run",
+   "internal": true,
+   "t": 1735689442383,
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "id": "70locc9t"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && sed -n \"1,80p\" internal/report/totals.go",
+   "status": "ok",
+   "ms": 9682,
+   "t": 1735689443911,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "l8xmi72s"
+  },
+  {
+   "kind": "turn",
+   "label": "turn started",
+   "t": 1735689444157,
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "id": "zrrvvd6b"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "set -e\ncd /home/dev/demo/tally\ncat > internal/report/empty.go <<'GOEOF'\npackage report\n\nimport (\n\t\"fmt\" ",
+   "status": "ok",
+   "ms": 1906,
+   "t": 1735689450284,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "k6w3aali"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && go test ./internal/report -run TestTotals -count=1 2>&1 | tail -20",
+   "status": "ok",
+   "ms": 3458,
+   "t": 1735689464887,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "wg7j4tae"
+  },
+  {
+   "kind": "turn",
+   "label": "turn answer",
+   "detail": "33s",
+   "t": 1735689476965,
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "id": "694qcacy"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && gofmt -w internal/report && go build ./... && echo FMT+BUILD OK",
+   "status": "ok",
+   "ms": 2430,
+   "t": 1735689476865,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "hxkgaku3"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "S=/tmp/demo-scratch/00000000-0000-4000-8000-000000000002/scratchpad\ncd $S/prob",
+   "status": "ok",
+   "ms": 40706,
+   "t": 1735689478533,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "gqz6k6pj"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && go build ./... && echo \"BUILD OK\" && go vet ./... && echo \"VET OK\"",
+   "status": "ok",
+   "ms": 2299,
+   "t": 1735689485193,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "3f0gscki"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "S=/tmp/demo-scratch/00000000-0000-4000-8000-000000000002/scratchpad\necho \"=== ",
+   "status": "ok",
+   "ms": 2842,
+   "t": 1735689492003,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "laflpnzg"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cat > /home/dev/demo/tally/tally.sh <<'LAUNCHER'\n#!/bin/sh\n# tally.sh - run the report over a ledger",
+   "status": "ok",
+   "ms": 1979,
+   "t": 1735689497190,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "ny4hyuxa"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && go doc ./internal/report Totals 2>&1 | head -30",
+   "status": "ok",
+   "ms": 2450,
+   "t": 1735689497952,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "gi30lwct"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && tmux kill-session -t demotest 2>/dev/null; tmux new-session -d -s demotes",
+   "status": "ok",
+   "ms": 3777,
+   "t": 1735689506838,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "k34mgykl"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "F=$(find ~/.cache/tally -name \"00000000-0000-4000-8000-000000000001.jsonl\" | head -1)\nwc -l \"$F\"",
+   "status": "ok",
+   "ms": 2469,
+   "t": 1735689508440,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "vyjd8oho"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && sleep 1.5 && echo \"=== geometry ===\"; tmux list-panes -t demotest:main ",
+   "status": "error",
+   "ms": 3493,
+   "t": 1735689513671,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "gn4966co"
+  },
+  {
+   "kind": "tool",
+   "label": "Write",
+   "detail": "/home/dev/demo/tally/cmd/tallyd/main.go",
+   "status": "ok",
+   "ms": 111,
+   "t": 1735689520156,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "bn6j2u5i"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "tmux -V; tmux display-message -p -t demotest:main '#{pane_active}'; echo \"--- capture %1 ---\"; tmu",
+   "status": "ok",
+   "ms": 1854,
+   "t": 1735689529449,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "3tb8yu1u"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && go test ./... -count=1 -race 2>&1 | tail -30",
+   "status": "ok",
+   "ms": 3694,
+   "t": 1735689532314,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "06g0n1uu"
+  },
+  {
+   "kind": "note",
+   "label": "session joined the board",
+   "detail": "/tmp/demo-scratch/00000000-0000-4000-8000-000000000002/scratchpad/probe-run",
+   "internal": true,
+   "t": 1735689532056,
+   "sessionId": "00000000-0000-4000-8000-000000000004",
+   "id": "z5029v0b"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && mkdir -p bin && go build -o bin/tallyd ./cmd/tallyd && ./bin/tally",
+   "status": "ok",
+   "ms": 2930,
+   "t": 1735689538967,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "m9jvxh47"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && tmux split-window -h -d -l 20 -t %0 -s 'bg=#0a0f14,fg=#c9f7f2' -S 'fg=#f3",
+   "status": "ok",
+   "ms": 2222,
+   "t": 1735689541608,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "tfvh9i96"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && go run ./cmd/tally --ledger testdata/small.ledger --format table | head",
+   "status": "ok",
+   "ms": 4127,
+   "t": 1735689560601,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "xs1lvlo3"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && sh -n tally.sh && echo \"SHELL SYNTAX OK\"",
+   "status": "ok",
+   "ms": 4605,
+   "t": 1735689574736,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "6yygn3qc"
+  },
+  {
+   "kind": "tool",
+   "label": "Write",
+   "detail": "/home/dev/demo/tally/tally.sh",
+   "status": "ok",
+   "ms": 67,
+   "t": 1735689577507,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "6t11nhxa"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "S=/tmp/demo-scratch/00000000-0000-4000-8000-000000000002/scratchpad\nrm -f $S/p",
+   "status": "ok",
+   "ms": 62005,
+   "t": 1735689588320,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "40qk6zjz"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "ps -o pid=,ppid=,command= -p 72641 34422 2>/dev/null; echo \"--- parents ---\"; for p in 72641 34422; ",
+   "status": "ok",
+   "ms": 2661,
+   "t": 1735689589227,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "hh2gm4fz"
+  },
+  {
+   "kind": "tool",
+   "label": "Bash",
+   "detail": "cd /home/dev/demo/tally && export TMUX=$(tmux display-message -p -t demotest:main '#{socket_path},",
+   "status": "ok",
+   "ms": 2619,
+   "t": 1735689598559,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "id": "uu9xm9pl"
+  },
+  {
+   "id": "ev-internal",
+   "t": 1735689600000,
+   "sessionId": "00000000-0000-4000-8000-000000000002",
+   "kind": "note",
+   "label": "steered from the pane",
+   "detail": "INTERNAL-SENTINEL-MUST-NOT-RENDER",
+   "internal": true
+  }
+ ],
+ "questions": [],
+ "approvals": [],
+ "links": [
+  {
+   "id": "lw5zg6iv",
+   "t": 1735687408598,
+   "from": "00000000-0000-4000-8000-000000000002",
+   "to": "00000000-0000-4000-8000-000000000003",
+   "kind": "brief"
+  }
+ ],
+ "viewers": 1
+}

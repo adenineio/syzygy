@@ -1,0 +1,14 @@
+Syzygy
+Copyright 2026 adenineio
+
+This product includes software developed by third parties, under their own
+licences, which are preserved in the files themselves:
+
+- three.js (https://threejs.org), Copyright 2010-2026 Three.js Authors,
+  MIT licence. A pinned, tree-shaken bundle is vendored at
+  syzygy/bridge/public/vendor/three.slim.min.js; the SPDX identifier and the
+  copyright line from the upstream build are kept in it verbatim. README.md
+  says how it is built and what it contains.
+
+Everything else in this repository is licensed under the Apache License,
+Version 2.0. See LICENSE.

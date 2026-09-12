@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Syzygy</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<!--
+  Self-contained, deliberately: inline CSS, inline JS, no external
+  asset but the favicon -- the one thing a browser requests on its own
+  initiative rather than because this page's markup asks for it, which is
+  why auth.mjs's gate() allow-lists exactly that one path. Everything else
+  here needs no allowlist because the page asks for nothing else.
+  Serves BOTH /setup and /login -- relay.mjs injects which mode this is
+  through window.SZG_AUTH_MODE below, via a replacer FUNCTION (never a
+  replacement string: String.replace() treats some characters in the
+  REPLACEMENT as special, which has corrupted a file here before).
+-->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #050608; color: #c7d0d6;
+    font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 16px;
+  }
+  .card {
+    width: 100%; max-width: 320px; padding: 22px 22px 18px;
+    background: #0a0d10; border: 1px solid #1c2530;
+    box-shadow: 0 12px 34px rgba(0, 0, 0, .7);
+    /* Hard-coded to the pane's soft default (app.css --r-surface: 6px) --
+       this page is self-contained and
+       cannot read app.css's corner-style custom properties or its
+       [data-corners] toggle. It always renders soft, regardless of what the
+       pane itself is set to. */
+    border-radius: 6px;
+  }
+  .brand { font-size: 11px; letter-spacing: .3em; text-transform: uppercase; color: #6fc3df; margin-bottom: 14px; }
+  h1 { font-size: 15px; margin: 0 0 14px; color: #e8edf0; font-weight: 600; }
+  label { display: block; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: #6b7680; margin: 12px 0 5px; }
+  input {
+    width: 100%; padding: 8px 10px; font: inherit; font-size: 13px;
+    background: #050608; border: 1px solid #1c2530; color: #c7d0d6; outline: none;
+    /* Hard-coded to the pane's soft default (--r-input: 6px) -- see .card. */
+    border-radius: 6px;
+  }
+  input:focus { border-color: #6fc3df; }
+  button {
+    width: 100%; margin-top: 16px; padding: 9px 10px; font: inherit; font-size: 11px;
+    letter-spacing: .08em; text-transform: uppercase; cursor: pointer;
+    background: #6fc3df; border: 1px solid #6fc3df; color: #050608; font-weight: 700;
+    /* Hard-coded to the pane's soft default (--r-control: 4px) -- see .card. */
+    border-radius: 4px;
+  }
+  button:hover { background: #8ad2e8; border-color: #8ad2e8; }
+  button:active { background: #56a9c5; }
+  .msg { min-height: 16px; margin-top: 12px; font-size: 11.5px; color: #6b7680; }
+  .msg.err { color: #ff5670; }
+  .msg.ok { color: #6fc3df; }
+  .foot { margin-top: 18px; padding-top: 14px; border-top: 1px solid #1c2530; font-size: 10.5px; color: #4a5560; line-height: 1.6; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="brand">Syzygy</div>
+  <h1 id="title">&nbsp;</h1>
+
+  <form id="setupForm" hidden autocomplete="off">
+    <label for="setupPw">New password</label>
+    <input id="setupPw" name="password" type="password" autocomplete="new-password" minlength="8" required>
+    <label for="setupConfirm">Confirm password</label>
+    <input id="setupConfirm" name="confirm" type="password" autocomplete="new-password" minlength="8" required>
+    <button type="submit">Set password</button>
+  </form>
+
+  <form id="loginForm" hidden autocomplete="off">
+    <label for="loginPw">Password</label>
+    <input id="loginPw" name="password" type="password" autocomplete="current-password" required autofocus>
+    <button type="submit">Log in</button>
+  </form>
+
+  <div class="msg" id="msg"></div>
+
+  <div class="foot">
+    Forgotten the password? Delete <code>auth.json</code> in the Syzygy
+    data directory, restart the relay, and set a new one here. There is no
+    other way back in.
+  </div>
+</div>
+
+<script>window.SZG_AUTH_MODE = "__SZG_AUTH_MODE__";</script>
+<script>
+(function () {
+  'use strict'
+  var mode = window.SZG_AUTH_MODE === 'setup' ? 'setup' : 'login'
+  var setupForm = document.getElementById('setupForm')
+  var loginForm = document.getElementById('loginForm')
+  var title = document.getElementById('title')
+  var msg = document.getElementById('msg')
+
+  var say = function (text, kind) {
+    msg.textContent = text
+    msg.className = 'msg' + (kind ? ' ' + kind : '')
+  }
+
+  if (mode === 'setup') {
+    title.textContent = 'Set a password'
+    setupForm.hidden = false
+  } else {
+    title.textContent = 'Enter password'
+    loginForm.hidden = false
+  }
+
+  if (setupForm) {
+    setupForm.addEventListener('submit', function (e) {
+      e.preventDefault()
+      var password = setupForm.password.value
+      var confirm = setupForm.confirm.value
+      if (password.length < 8) { say('Password must be at least 8 characters.', 'err'); return }
+      if (password !== confirm) { say('Passwords do not match.', 'err'); return }
+      say('Setting password…')
+      fetch('/api/auth/setup', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ password: password, confirm: confirm }),
+      }).then(function (r) {
+        if (r.ok) { location.href = '/'; return }
+        say('Could not set the password. Try again.', 'err')
+      }).catch(function () { say('Could not reach the relay. Try again.', 'err') })
+    })
+  }
+
+  if (loginForm) {
+    loginForm.addEventListener('submit', function (e) {
+      e.preventDefault()
+      var password = loginForm.password.value
+      say('Logging in…')
+      fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ password: password }),
+      }).then(function (r) {
+        if (r.ok) { location.href = '/'; return }
+        if (r.status === 429) { say('Too many attempts. Wait a minute and try again.', 'err'); return }
+        say('Incorrect password.', 'err')
+      }).catch(function () { say('Could not reach the relay. Try again.', 'err') })
+    })
+  }
+})()
+</script>
+</body>
+</html>

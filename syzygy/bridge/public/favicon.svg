@@ -1,0 +1,20 @@
+<!-- The Syzygy mark AT REST -- "a moon mid-eclipse" -- cropped from the
+     brand chip's resting geometry in index.html (.brand .mark: .far r=8.8,
+     .mid r=5.45 translated (2.35, -2.2) from a shared centre), scaled 2.9091x
+     (64 / 22, the mark's own left-square crop) and re-centred so the far
+     disc is full-bleed in this square; the hover-only .ring/.near elements
+     are never part of the resting state, so they are not drawn here.
+     Colours resolved from app.css's default :root (teal, --hue: 196), since
+     a favicon cannot read CSS variables:
+       --accent hsl(196 60% 65%) -> #70bfdb  (the chip fill; also .mid, the
+                                               eclipsing body -- same colour
+                                               as the chip on purpose)
+       --bg     hsl(196 40% 0.4%) -> #010101 (.brand's `color`, i.e.
+                                               currentColor -- the dark body,
+                                               .far)
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" fill="#70bfdb"/>
+  <circle cx="32" cy="32" r="25.6" fill="#010101"/>
+  <circle cx="38.84" cy="25.6" r="15.85" fill="#70bfdb"/>
+</svg>

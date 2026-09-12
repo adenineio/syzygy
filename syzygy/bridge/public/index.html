@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Syzygy</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/projects.css">
+<link rel="stylesheet" href="/dispatch.css">
+<link rel="stylesheet" href="/canvas.css">
+<link rel="stylesheet" href="/voice.css">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <!-- AN ECLIPSE AT REST, A SYZYGY ON HOVER.
+         Colour polarity first, because it is the thing that is easy to get
+         backwards: the chip is filled with the accent, so inside this svg
+         `currentColor` is the DARK one and `--brandbg` is the accent.
+           .far  — the dark disc, the body being covered
+           .mid  — the accent disc covering it. At rest it sits offset, so what
+                   you see is a dark crescent: a moon, mid-eclipse.
+         Every variant rests on that crescent and differs only in what hover
+         does with it; see [data-mark] in app.css.
+           .ring — a hairline closes around the aligned pair. The default.
+           .near — a third body, the right-hand one of the row (`line`).
+         The viewBox is 44 wide but everything rests inside its left 22 units,
+         centred on (12, 11). That right-hand half is empty except in `line`,
+         which swings the arrangement side-on into it -- and .brand .mark
+         carries a negative right margin that opens up to let it. -->
+    <div class="brand" id="brand">
+      <svg class="mark" viewBox="0 0 44 22" aria-hidden="true" focusable="false">
+        <circle class="far"  cx="12" cy="11" r="8.8"  fill="currentColor"/>
+        <circle class="mid"  cx="12" cy="11" r="5.45" fill="var(--brandbg)"/>
+        <circle class="ring" cx="12" cy="11" r="10.25"
+                fill="none" stroke="currentColor" stroke-width="0.96"/>
+        <circle class="near" cx="12" cy="11" r="2.4"  fill="currentColor"/>
+      </svg>
+      <span>SYZYGY</span>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button class="tab on" data-view="control">Control</button>
+      <button class="tab" data-view="telemetry">Telemetry</button>
+      <button class="tab" data-view="projects">Projects</button>
+      <button class="tab" data-view="dispatch">Dispatch</button>
+      <button class="tab" data-view="canvas">Canvas <span class="tabn" id="c-canvas-tab"
+        data-tip="Auto-mode sessions live&#10;How many sessions started from the canvas are still running. --permission-mode auto fails quietly, so this number is not allowed to.">0</span></button>
+    </nav>
+    <div class="spacer"></div>
+    <!-- Settings. The theme picker lives inside rather than in the topbar: five
+         permanent swatches is a lot of chrome for something you touch once. -->
+    <div class="settings">
+      <button class="pill tog" id="gear" type="button" aria-expanded="false" aria-label="Settings"
+              data-tip="Settings&#10;Accent colour for the whole deck. Remembered per browser.">
+        <span class="gearglyph">&#9881;</span>
+      </button>
+      <div class="pop" id="settingspop" hidden>
+        <div class="poplabel">Accent</div>
+        <div class="swatches" id="swatches" role="group" aria-label="Accent colour"></div>
+        <div class="poplabel" style="margin-top:11px">Logo</div>
+        <div class="picks" id="marks" role="group" aria-label="Logo mark"></div>
+        <div class="poplabel" style="margin-top:11px">Corners</div>
+        <div class="picks" id="corners" role="group" aria-label="Corner style"></div>
+
+        <!-- Voice input. Self-contained: everything it needs lives inside this
+             block, so a relay predating the feature (no `voice` key at all)
+             leaves it showing its own honest "not found"
+             state rather than something that looks broken. #settingspop keeps
+             its id: the canvas spawn form's esc guard and pane-auth's reset
+             both reach it by bare id.
+
+             Two stages, environment then model, each with its own
+             progress and size (about 750 MB and 1.54 GiB, measured). It
+             names no binary and no package-manager install: there is none. -->
+        <div class="poplabel" style="margin-top:11px">Voice input</div>
+        <div class="voicebox" id="voicebox">
+          <label class="voicerow">
+            <input type="checkbox" id="voice-enable">
+            <span>Enable dictation</span>
+          </label>
+          <div class="voicerow"><span id="voice-envstate">—</span></div>
+          <div class="voicerow" id="voice-envprogressrow" hidden>
+            <div class="voiceprogress"><div class="voiceprogress-bar" id="voice-envprogressbar"></div></div>
+            <span class="num" id="voice-envprogresspct">0%</span>
+          </div>
+          <div class="voicerow">
+            <button type="button" class="btn" id="voice-install">Install environment</button>
+          </div>
+          <div class="voicerow"><span id="voice-modelstate">—</span></div>
+          <div class="voicerow" id="voice-progressrow" hidden>
+            <div class="voiceprogress"><div class="voiceprogress-bar" id="voice-progressbar"></div></div>
+            <span class="num" id="voice-progresspct">0%</span>
+          </div>
+          <div class="voicerow">
+            <button type="button" class="btn" id="voice-download">Download model</button>
+            <button type="button" class="btn no" id="voice-delete">Delete model</button>
+          </div>
+          <div class="voicehint">
+            Runs locally through OpenAI's own <code>openai-whisper</code>, in
+            a private Python environment (about 750 MB) it manages itself,
+            transcribing with OpenAI's large-v3-turbo model (about
+            1.54 GiB) once downloaded. Speech is transcribed locally — no
+            audio ever leaves your computer. Hold <kbd>&#8963;</kbd> in a text
+            field to dictate, or click the mic in a textarea's corner —
+            either way, text appears as you speak and is finalized when you
+            stop.
+          </div>
+        </div>
+        <div class="poplabel" style="margin-top:11px">Spinner</div>
+        <!-- Pins settings.spinner in the global config file, which wins over
+             the band's own live picker (hud.tsx's resolveSpinnerId). The
+             leading option clears the pin -- absence is what lets $.store's
+             live choice (or the picker) govern instead. renderHudSettings()
+             fills the options from `S.hud.spinners`; a relay predating this
+             (no `hud` key at all) leaves the select showing
+             its own honest "not found" option rather than something broken.
+             Reuses .voicebox/.voicehint and dispatch.css's .dinput rather
+             than adding a third copy of the same layout rules. -->
+        <div class="voicebox" id="hudbox">
+          <select class="dinput" id="hud-spinner"><option value="">— not found on this relay —</option></select>
+          <div class="voicehint">
+            Writes to <code>~/.claude/syzygy-hud-hotkeys.json</code> on this
+            machine. Takes effect at the band's next turn boundary in every
+            session — no restart, no <code>/reload-plugins</code>.
+          </div>
+        </div>
+        <div class="poplabel" style="margin-top:11px">Password</div>
+        <!-- Two states, toggled by wireAuthSection() from `S.auth.enabled`
+             (relay.mjs's snapshot, not a new endpoint): the controls below, or
+             one line saying the password is off (SZG_PANE_PASSWORD_DISABLED) --
+             never both, since a control that cannot work is worse than none. -->
+        <div class="authbox" id="authbox">
+          <input id="authCurrent" type="password" placeholder="Current" autocomplete="current-password">
+          <input id="authNew" type="password" placeholder="New" autocomplete="new-password">
+          <input id="authConfirm" type="password" placeholder="Confirm" autocomplete="new-password">
+          <div class="authbtns">
+            <button class="btn" id="authChange" type="button">Change</button>
+            <button class="btn no" id="authLogout" type="button">Log out</button>
+          </div>
+        </div>
+        <div class="authstatus" id="authstatus"></div>
+      </div>
+    </div>
+    <div class="pill" id="viewers"><span class="dot"></span><span>1 viewer</span></div>
+    <div class="pill" id="sesscount"><span class="dot"></span><span>0 sessions</span></div>
+    <div class="pill" id="conn"><span class="dot"></span><span>connecting</span></div>
+    <div class="pill num" id="clock">--:--:--</div>
+  </header>
+
+  <!-- Control: one narrow left rail, and the switchboard filling everything to
+       the right of it. Telemetry has a tab of its own, because its two charts
+       largely restate the metric cards the rail already carries. -->
+  <main class="grid view on" id="view-control">
+    <aside class="rail" id="rail">
+      <!-- Metrics first: they are what you scan, and keeping them pinned to the
+           top edge leaves them where the old callout row used to be. -->
+<!-- These read the WHOLE board by default, not one session: the rail is an
+           overview and the switchboard beside it is the per-session view. The
+           scope line says which of the two you are looking at, and hovering a
+           card on the switchboard swaps every row to that session. -->
+      <section class="panel metrics">
+        <div class="mscope" id="m-scope">all sessions</div>
+        <!-- The account's 5h/7d usage window.
+             Above the context row on purpose: it shares that row's colour
+             scale (65% amber, 85% red) but covers the whole ACCOUNT, not
+             this board, so it belongs above the per-board rows rather than
+             among them. Values and [data-tip] are filled in by app.js's
+             renderUsageRow(), which runs everywhere renderTiles() does. -->
+        <div class="mrow" id="t-usage-5h">
+          <span class="mlabel">5h</span>
+          <!-- Off by default, asked for permission only on click; see
+               app.js's applyUsageNotifyButton()/fireUsageAlert(). -->
+          <button class="notifytog" id="usage-notify" type="button" aria-pressed="false">&#128276;</button>
+          <span class="mval num" id="v-usage-5h">—</span>
+          <span class="msub" id="s-usage-5h">no reading</span>
+        </div>
+        <div class="mrow" id="t-usage-7d">
+          <span class="mlabel">7d</span>
+          <span class="mval num" id="v-usage-7d">—</span>
+          <span class="msub" id="s-usage-7d">no reading</span>
+        </div>
+        <div class="mrow" id="t-context">
+          <span class="mlabel">Context</span>
+          <span class="mval num" id="v-context">—</span>
+          <span class="msub" id="s-context">awaiting a session</span>
+          <canvas id="arc" width="56" height="56" style="width:28px;height:28px"></canvas>
+        </div>
+        <div class="mrow" id="t-tokens">
+          <span class="mlabel">Tokens</span>
+          <span class="mval num" id="v-tokens">0</span>
+          <span class="msub" id="s-tokens">none yet</span>
+          <canvas class="tspark" id="sp-tok" width="160" height="36" style="width:80px;height:18px"></canvas>
+        </div>
+        <div class="mrow" id="t-guard">
+          <span class="mlabel">Guardrails</span>
+          <span class="mval num" id="v-guard">0</span>
+          <span class="msub" id="s-guard">nothing blocked</span>
+        </div>
+      </section>
+
+      <section class="panel orbpanel">
+        <div class="orbstage">
+          <canvas id="swarm" hidden></canvas>
+          <button id="swarm-mode" type="button" hidden
+                  data-tip="Presence look
+Cycles the sphere between iris, streams and shell. Remembered per browser.">iris</button>
+        </div>
+        <div class="orbstate">
+          <div class="mood" id="orb-mood">idle</div>
+          <div class="line" id="orb-line">Waiting for a session to report in.</div>
+          <!-- The blurb: replaces .line above by default, hidden
+               again on hover or while a card is pinned -- app.js's
+               renderBlurb toggles .has-blurb/.orb-pinned on .orbpanel. -->
+          <div class="blurbline gone" id="orb-blurbline">
+            <span class="blurbtext" id="orb-blurbtext"></span>
+            <span class="blurbage gone" id="orb-blurbage"></span>
+            <button class="blurbrefresh" id="orb-blurbrefresh" type="button"
+                    data-tip="Refresh the board summary
+Syzygy summarises the whole board in one line. Click to ask for a fresh one now.">&#8635;</button>
+          </div>
+          <!-- Static markup, never inside the MCX-reconciled transcript below:
+               voice.js discovers every textarea/input under document.body and
+               injects a mic button into the field's PARENT (.orbask here),
+               stamping it .mcv-host -- reconciliation would fight it if the
+               field lived inside #orb-transcript instead. data-voice="full"
+               opts a bare text input into a full mic button rather than the
+               modifier-only (hold-to-dictate) default. -->
+          <div class="orbask">
+            <input id="orb-ask" data-voice="full" type="text" autocomplete="off" spellcheck="false"
+                   placeholder="Ask Syzygy about the board…">
+          </div>
+          <!-- static, outside the MCX-reconciled #orb-transcript below,
+               same reasoning as #orb-ask's own comment above -- these two
+               controls are distinct actions (app.js): × is a VIEW toggle that
+               only hides the transcript, "new conversation" actually drops
+               the resumed server-side session and clears what is shown. Both
+               share the transcript's own gone/visible state. -->
+          <div class="orbtranscriptbar gone" id="orb-transcript-bar">
+            <button class="orbtranscript-new" id="orb-transcript-new" type="button"
+                    data-tip="New conversation
+Drops the current conversation with Syzygy so the next question starts fresh, with no memory of this one.">new conversation</button>
+            <button class="orbtranscript-close" id="orb-transcript-close" type="button"
+                    data-tip="Hide
+Hides this transcript. Your conversation with Syzygy is kept -- ask again to bring it back.">&times;</button>
+          </div>
+          <div class="orbtranscript gone" id="orb-transcript"></div>
+        </div>
+      </section>
+
+      <!-- The rail's three stacked sections. The feed is the only one that
+           flexes. Steering is OPEN by default: it is a set of
+           buttons you press, and a fold in front of them cost a click
+           before every single use. The inbox stays collapsed AND hidden.
+           Every head is a button, so the whole row is the target. -->
+      <section class="panel feed" id="sec-feed">
+        <button class="phead fold" type="button" data-fold="feed" aria-expanded="true">
+          <span class="tick"></span>Tool feed<span class="count" id="c-feed">0</span>
+          <span class="caret">▾</span>
+        </button>
+        <div class="pbody" id="feed"><div class="empty">No activity yet.</div></div>
+        <button class="denser" type="button" id="feed-density"
+                data-tip="Feed density&#10;How much of each call the feed prints. Cycles detail → compact → dense. Remembered per browser.">dense</button>
+      </section>
+
+      <!-- Hidden: drop the `hidden` attribute and the panel is back.
+           #sec-inbox[hidden] in app.css is load-bearing -- .panel sets
+           `display: flex` unconditionally, which beats the UA [hidden] rule. -->
+      <section class="panel inbox collapsed" id="sec-inbox" hidden>
+        <button class="phead fold" type="button" data-fold="inbox" aria-expanded="false">
+          <span class="tick"></span>Human in the loop<span class="count" id="c-inbox">0</span>
+          <span class="caret">▾</span>
+        </button>
+        <div class="pbody" id="inbox"><div class="empty">Nothing is waiting on you.</div></div>
+      </section>
+
+      <!-- Steering is MODAL: a button arms a command, it does not send one.
+           See the arming block in app.js. -->
+      <section class="panel steerpanel" id="sec-steer">
+        <button class="phead fold" type="button" data-fold="steer" aria-expanded="true">
+          <span class="tick"></span>Steering<span class="caret">▾</span>
+        </button>
+        <div class="steer" id="steer"></div>
+        <div class="steernote">A button arms &mdash; then pick a session. Hold <kbd>A</kbd> to send to all.
+          <kbd>+</kbd> registers your own; <kbd>shift</kbd>click one to edit it.</div>
+      </section>
+    </aside>
+
+    <section class="panel board">
+      <div class="phead"><span class="tick"></span>Session switchboard<span class="count" id="c-board">0</span></div>
+      <div class="boardstage">
+        <svg id="wires"></svg>
+        <div class="cards" id="cards"></div>
+      </div>
+      <div class="hint">Drag one card onto another to open a channel over the messaging bus · <kbd>click</kbd> a card for detail · <kbd>esc</kbd> closes</div>
+    </section>
+  </main>
+
+  <!-- Telemetry and Replay answer the same question -- what happened over the
+       run -- so they are two columns of one tab: the curves on the left, the
+       event log and its scrubber on the right. -->
+  <section class="view" id="view-telemetry">
+    <section class="panel charts">
+      <div class="phead"><span class="tick"></span>Telemetry</div>
+      <div class="pbody" style="padding:0">
+        <div class="chartrow">
+          <div class="caption"><span>Token throughput</span><span id="cap-tok">—</span></div>
+          <canvas id="ch-tok" height="150"></canvas>
+        </div>
+        <div class="chartrow">
+          <div class="caption"><span>Cumulative spend</span><span id="cap-cost">—</span></div>
+          <canvas id="ch-cost" height="150"></canvas>
+        </div>
+        <div class="caption" style="padding:0 12px 4px"><span>File heat</span><span id="cap-heat">—</span></div>
+        <div class="heat" id="heat"><div class="empty">No files touched.</div></div>
+      </div>
+    </section>
+    <div class="replaywrap">
+      <div class="panel" style="flex:1;min-height:0">
+        <div class="phead"><span class="tick"></span>Session replay<span class="count" id="c-replay">0</span></div>
+        <div class="pbody" id="replayfeed"><div class="empty">Nothing recorded yet.</div></div>
+      </div>
+      <div class="scrub">
+        <div class="scrubhead">
+          <button class="btn key" id="playbtn">▶ play</button>
+          <span class="num" id="scrubclock">—</span>
+          <span class="spacer" style="flex:1"></span>
+          <span class="num" id="scrubpos">0 / 0</span>
+        </div>
+        <input type="range" id="scrubber" min="0" max="0" value="0">
+        <canvas id="timeline" height="60"></canvas>
+      </div>
+    </div>
+    <!-- The usage window's own panel -- account-wide, not
+         per-session, which is why it is a THIRD row spanning both columns
+         rather than squeezed into .charts beside the per-session curves.
+         app.js's renderUsagePanel() fills the captions and draws the
+         sparklines off S.usageHistory, the relay's changed-readings ring.
+         The after-reset queue lives in #usage-queue below it. -->
+    <section class="panel usagepanel" id="usage-panel">
+      <div class="phead"><span class="tick"></span>Usage window</div>
+      <div class="pbody" style="padding:0">
+        <div class="chartrow">
+          <div class="caption"><span>5-hour</span><span id="cap-usage-5h">—</span></div>
+          <canvas id="ch-usage-5h" height="60"></canvas>
+        </div>
+        <div class="chartrow">
+          <div class="caption"><span>7-day</span><span id="cap-usage-7d">—</span></div>
+          <canvas id="ch-usage-7d" height="60"></canvas>
+        </div>
+        <!-- The after-reset queue: one card per entry, a remove
+             button on each. app.js's renderUsageQueue() owns this list;
+             writes go through POST /api/after-reset(/delete) — see relay.mjs. -->
+        <div class="caption" style="padding:8px 12px 4px"><span>After-reset queue</span><span id="c-usage-queue">0</span></div>
+        <div id="usage-queue"><div class="empty">Nothing queued.</div></div>
+      </div>
+    </section>
+  </section>
+
+  <section class="view" id="view-projects">
+    <section class="panel projects">
+      <div class="phead"><span class="tick"></span>Projects<span class="count" id="c-projects">0</span></div>
+      <div class="projlist" id="projlist"></div>
+      <div class="hint">Task lists are read from disk and shown read-only · <kbd>3</kbd> opens this view</div>
+    </section>
+  </section>
+
+  <section class="view" id="view-dispatch">
+    <div class="dnotice">
+      This tab starts real Claude Code sessions and spends money. The relay's write
+      endpoints are gated only by a token that is served inside this page, so anything
+      that can open this page can dispatch. It listens on 127.0.0.1 only.
+    </div>
+    <section class="panel dsection">
+      <div class="phead"><span class="tick"></span>Projects at a glance</div>
+      <div class="pbody" id="d-glance"></div>
+    </section>
+    <section class="panel dsection">
+      <div class="phead"><span class="tick"></span>New request</div>
+      <div class="pbody dform">
+        <input id="d-req-title" class="dinput" placeholder="title — becomes the branch and session name">
+        <div class="dbadges" id="d-badges"></div>
+        <input id="d-project" class="dinput" placeholder="project root — an absolute path, e.g. /Users/you/code/thing"
+               data-tip="Project root&#10;An absolute directory. It becomes the worktree's parent and a spawned session's working directory, so a bare repo name will not do. Click a badge above to fill it in."></input>
+        <div class="dpickrow">
+          <select id="d-model" class="dinput doption"></select>
+          <input id="d-model-custom" class="dinput doption gone" placeholder="model name">
+          <select id="d-effort" class="dinput doption"></select>
+        </div>
+        <div class="dnote gone" id="d-optnote"></div>
+        <textarea id="d-ask" class="dinput dta" rows="3" placeholder="what you actually want, in your own words"></textarea>
+        <button class="btn go" id="d-add">queue it</button>
+      </div>
+    </section>
+    <section class="panel dsection" id="d-threadpanel" hidden>
+      <div class="phead"><span class="tick"></span>Scoping<span class="count" id="c-thread">—</span></div>
+      <div class="pbody dthread" id="d-thread"></div>
+      <div class="pbody dform">
+        <textarea id="d-say" class="dinput dta" rows="2" placeholder="answer, or push back — one question at a time"></textarea>
+        <div class="drowbtns">
+          <button class="btn go" id="d-send">send</button>
+          <button class="btn" id="d-bank"
+                  data-tip="Write the brief&#10;Turns this conversation into the structured brief a dispatched session is handed.">write the brief</button>
+          <button class="btn" id="d-takeover">take over in tmux</button>
+          <code class="dcmd" id="d-resumecmd"></code>
+        </div>
+      </div>
+    </section>
+    <section class="panel dsection">
+      <div class="phead">
+        <span class="tick"></span>Queue<span class="count" id="c-dispatch">0</span>
+        <span class="spacer"></span>
+        <button class="btn go" id="d-dispatch">dispatch selected</button>
+      </div>
+      <div class="pbody" id="d-queue"></div>
+    </section>
+    <section class="panel dsection">
+      <div class="phead">
+        <span class="tick"></span>Dispatched<span class="count" id="c-cards">0</span>
+        <span class="spacer"></span>
+        <button class="btn go" id="d-implement">tell the ready ones to implement</button>
+      </div>
+      <div class="pbody" id="d-cards"></div>
+    </section>
+  </section>
+
+  <!-- The session canvas. Its own tab, not a change to the switchboard: a
+       freeform board of live sessions, positions persisted by the relay,
+       wires as channels, and a real `claude --bg --permission-mode auto`
+       session started from a right-click. -->
+  <section class="view" id="view-canvas">
+    <section class="panel cpanel">
+      <div class="phead">
+        <span class="tick"></span>Session canvas<span class="count" id="c-canvas">0</span>
+        <span class="spacer"></span>
+        <span class="clive" id="c-canvas-live">0 auto-mode sessions live</span>
+        <button class="btn" id="c-reset" type="button"
+          data-tip="Reset view&#10;Puts every node back in the switchboard's layout. Moves nodes only -- never unlinks a wire, never stops a session.">reset view</button>
+      </div>
+      <div class="cnotice">
+        This tab starts real Claude Code sessions in <b>auto mode</b> and spends money. The
+        relay's write endpoints are gated only by a token served inside this page, so anything
+        that can open this page can spawn. It listens on 127.0.0.1 only. Nothing limits how many
+        sessions you start — the live count above is the only guard.
+      </div>
+      <div class="cstage" id="cstage">
+        <canvas class="cwires" id="cwires"></canvas>
+        <div class="cnodes" id="cnodes"></div>
+        <div class="empty cempty" id="cempty">No sessions have reported in. Start one with the plugin loaded, or right-click here to spawn one.</div>
+        <!-- The spawn form. Positioned where the click landed; NOTHING is
+             started until it is submitted. -->
+        <form class="cspawn" id="cspawn" hidden autocomplete="off">
+          <div class="cslabel">Start a session here</div>
+          <input class="dinput" id="cs-cwd" list="cs-recents" placeholder="directory — absolute path or ~/…, completes as you type" required>
+          <datalist id="cs-recents"></datalist>
+          <input class="dinput" id="cs-name" placeholder="name (defaults to the directory's name)">
+          <textarea class="dinput dta" id="cs-prompt" rows="3" placeholder="kickoff prompt" required></textarea>
+          <div class="csrow">
+            <select class="dinput" id="cs-model">
+              <option value="opus">opus</option><option value="sonnet">sonnet</option>
+              <option value="haiku">haiku</option><option value="fable">fable</option>
+            </select>
+            <select class="dinput" id="cs-effort">
+              <option value="low">low</option><option value="medium">medium</option>
+              <option value="high" selected>high</option><option value="xhigh">xhigh</option><option value="max">max</option>
+            </select>
+          </div>
+          <div class="csrow">
+            <button class="btn go" id="cs-go" type="submit">start · auto mode</button>
+            <button class="btn" id="cs-cancel" type="button">cancel</button>
+          </div>
+          <div class="cshint"><kbd>&#8984;</kbd>/<kbd>ctrl</kbd> + <kbd>enter</kbd> starts &middot; <kbd>esc</kbd> cancels</div>
+        </form>
+      </div>
+      <div class="hint">Drag a node to move it · drag its <b>⠿ wire</b> grip onto another node to open a channel · <kbd>right-click</kbd> or <kbd>⌥</kbd>+click empty canvas to start a session · <kbd>⌘</kbd>/<kbd>ctrl</kbd>+<kbd>enter</kbd> starts it · <kbd>5</kbd> opens this view · <kbd>esc</kbd> closes the form</div>
+    </section>
+  </section>
+</div>
+
+<aside class="drawer" id="drawer">
+  <div class="dhead">
+    <span class="tick" style="width:4px;height:16px;border-radius:var(--r-control);background:var(--cyan);box-shadow:var(--glow-cyan)"></span>
+    <strong id="d-title" style="font-size:13px">Session</strong>
+    <!-- The rename field, in the head beside the title it replaces. Hidden
+         until the pencil is pressed; the plugin runs Claude Code's own
+         /rename, so this is the session's real name, not a label the board
+         keeps to itself. -->
+    <input id="d-titleedit" class="dtitleedit gone" maxlength="60" spellcheck="false"
+           aria-label="Rename this session">
+    <button class="btn dpencil" id="d-rename" title="Rename this session — runs Claude Code's own /rename">✎</button>
+    <span class="spacer" style="flex:1"></span>
+    <button class="btn" id="d-close">close</button>
+  </div>
+  <div class="drenamehint gone" id="d-renamehint">Enter renames the session itself — the same <b>/rename</b> you would type in its terminal. Esc cancels.</div>
+  <div class="dbody" id="d-body"></div>
+  <!-- The reply field. OUTSIDE #d-body deliberately: openDrawer clears that
+       element and rebuilds it on every payload, which would throw away a
+       half-typed reply once a second. Here it is built once, by the markup,
+       and only its value ever changes. -->
+  <form class="dreply" id="d-reply">
+    <textarea id="d-replytext" rows="2" placeholder="Reply to this session…"
+              aria-label="Reply to this session"></textarea>
+    <div class="dreplyrow">
+      <span class="dreplyhint">⌘/ctrl + enter</span>
+      <button class="btn go" type="submit" id="d-replysend">send</button>
+    </div>
+  </form>
+</aside>
+
+<!-- The in-flight drag wire. A sibling of #app, not a child of .boardstage:
+     see #dragwire in app.css for why it cannot live inside the board. A canvas,
+     not an SVG: the wire is simulated per frame (see the drag overlay in
+     app.js). Its buffer is sized in JS from the attributes -- CSS alone would
+     leave it at the 300x150 intrinsic default. -->
+<canvas id="dragwire"></canvas>
+
+<!-- Landing a drag opens this; NOTHING is sent until it is answered. The note
+     written here is interpolated into the briefing the target session receives
+     (relay.mjs /api/link -> sendBrief in hud.tsx), and it is the only chance to
+     say anything in it. See openLinkDialog() in app.js. -->
+<div class="modal" id="linkmodal" hidden>
+  <div class="mpanel" role="dialog" aria-modal="true" aria-labelledby="lm-title">
+    <div class="mhead">
+      <span class="tick"></span>
+      <strong id="lm-title">Open a channel</strong>
+      <span style="flex:1"></span>
+      <button class="btn" id="lm-cancel">cancel</button>
+    </div>
+    <div class="mbody">
+      <div class="mroute">
+        <span class="rfrom" id="lm-from"></span>
+        <span class="rarrow">&#8594;</span>
+        <span class="rto" id="lm-to"></span>
+      </div>
+      <label class="mlabel" for="lm-note">Message</label>
+      <textarea id="lm-note" rows="5"
+        placeholder="What should they know? Leave it blank to send status alone."></textarea>
+      <div class="mfoot">
+        <span class="mnote">One message, sent now &mdash; the sender's status, context and recent
+          activity, plus your note. It is not a persistent channel.<br>
+          <kbd>esc</kbd> cancels &middot; <kbd>&#8984;</kbd>/<kbd>ctrl</kbd> + <kbd>enter</kbd> sends</span>
+        <button class="btn go" id="lm-send">send brief</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- One dialog, two jobs: registering or editing a steering button, and asking
+     for the goal a go-autonomous run needs before it arms. See openSteerForm()
+     in app.js -- the two modes differ only in which fields are shown. -->
+<div class="modal" id="steerform" hidden>
+  <div class="mpanel" role="dialog" aria-modal="true" aria-labelledby="sf-title">
+    <div class="mhead">
+      <span class="tick"></span>
+      <strong id="sf-title">Register a button</strong>
+      <span style="flex:1"></span>
+      <button class="btn" id="sf-cancel">cancel</button>
+    </div>
+    <div class="mbody">
+      <div id="sf-labelrow">
+        <label class="mlabel" for="sf-label">Button name</label>
+        <input id="sf-label" type="text" maxlength="24" placeholder="e.g. rebase">
+      </div>
+      <label class="mlabel" for="sf-prompt" id="sf-promptlabel">Prompt</label>
+      <textarea id="sf-prompt" rows="5" placeholder="What should the session be told?"></textarea>
+      <div class="mfoot">
+        <span class="mnote" id="sf-note">It joins the panel after the built-ins and behaves like them:
+          it arms, and the session you click gets the prompt.<br>
+          <kbd>esc</kbd> cancels &middot; <kbd>&#8984;</kbd>/<kbd>ctrl</kbd> + <kbd>enter</kbd> saves</span>
+        <button class="btn no" id="sf-delete">delete</button>
+        <button class="btn go" id="sf-save">save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- The mode line. It says what the CURRENT modifiers plus the current
+     pointer position will actually do, and it is the only place that says it,
+     so it has to be right rather than decorative. See renderModeline() in
+     app.js: every branch there corresponds to a reachable state. -->
+<!-- The deck's own tooltip. One element, driven by [data-tip] anywhere on the
+     page; see the tip block in app.js. Native title= is not used: it renders in
+     the OS's chrome, arrives on the OS's schedule, and cannot carry the two
+     weights this needs. -->
+<div class="tip" id="tip" hidden></div>
+
+<div class="modeline" id="modeline" hidden></div>
+
+<div class="toast" id="toast"></div>
+
+<script>window.SZG_TOKEN = "__SZG_TOKEN__";</script>
+<script type="importmap">
+{ "imports": { "three": "/vendor/three.slim.min.js" } }
+</script>
+<script src="/reconcile.js"></script>
+<script src="/voice-math.js"></script>
+<script src="/voice.js"></script>
+<script src="/canvas-layout.js"></script>
+<script src="/replay.js"></script>
+<script src="/projects.js"></script>
+<script src="/dispatch-badges.js"></script>
+<script src="/dispatch.js"></script>
+<script src="/canvas.js"></script>
+<script src="/app.js"></script>
+<script type="module" src="/swarm.js"></script>
+</body>
+</html>
