@@ -551,6 +551,25 @@ test-projects-motion:
 test-cmd-markdown:
     node test/cmd-markdown-harness.mjs
 
+# Syntax-checks the parallel-implementation skill's two scripts, then drives a
+# whole launch end to end: a scratch repository in a temp directory (its path
+# carries a space on purpose), a stub binary standing in for `claude`, and a
+# tmux server on a socket of its own. It touches nothing real and removes
+# everything it made.
+#
+# NOT in `test-all`, and so not in `verify`: it is the one harness here that
+# wants a live tmux server and creates real git worktrees, which every other
+# one deliberately avoids. Run it by hand after touching either script.
+# The parallel-implementation skill's launcher and its smoke test.
+test-mwc:
+    #!/usr/bin/env bash
+    set -eu
+    d="{{justfile_directory()}}/syzygy/skills/multi-worktree-coordinator/scripts"
+    bash -n "$d/mwc.sh"
+    bash -n "$d/smoke.sh"
+    echo "test-mwc: both scripts parse"
+    bash "$d/smoke.sh"
+
 
 # Typecheck, validate and run every harness.
 verify: check check-pane check-bytes validate test-all plan-check plan-names

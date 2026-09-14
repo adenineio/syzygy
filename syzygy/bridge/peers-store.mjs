@@ -21,8 +21,8 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync, chmodSync, existsSy
 import { dirname, join } from 'node:path'
 import { randomBytes, X509Certificate } from 'node:crypto'
 import {
-  validName, selfNameFrom, fpBytes, opensslArgv,
-  DEFAULT_POLICY, DEFAULT_PEER_PORT,
+  validName, selfNameFrom, fpBytes, opensslArgv, sanitizeForPeer,
+  DEFAULT_POLICY, DEFAULT_PEER_PORT, TRUST_TIERS, AUTO_APPLY_KINDS, PROPOSAL_KINDS, MAX_LIVE_CAP,
   ASK_EDGES, canTransition, isTerminalAsk,
   ASK_KEEP_PER_PEER, STALL_MS, ASK_TEXT_MAX,
 } from './peer.mjs'
@@ -69,13 +69,17 @@ export const emptyPeers = (hostname) => ({
   peers: [],
 })
 
-/** A policy value outside the range is pulled back into it; one of the wrong
- *  type is the default. Either way a consumer always reads two numbers. */
-const sanitizePolicy = (p) => {
+/** A value outside its range is pulled back into it; one of the wrong type is
+ *  the default; an unknown tier is `manual`. A consumer always reads six fields. */
+export const sanitizePolicy = (p) => {
   const o = isPlainObject(p) ? p : {}
   return {
     asksPerHour: Number.isInteger(o.asksPerHour) ? clamp(o.asksPerHour, 0, POLICY_MAX) : DEFAULT_POLICY.asksPerHour,
     peerAskDailyCapUsd: Number.isFinite(o.peerAskDailyCapUsd) ? clamp(o.peerAskDailyCapUsd, 0, POLICY_MAX) : DEFAULT_POLICY.peerAskDailyCapUsd,
+    trust: TRUST_TIERS.includes(o.trust) ? o.trust : 'manual',
+    autoApply: Array.isArray(o.autoApply) ? AUTO_APPLY_KINDS.filter((k) => o.autoApply.includes(k)) : [],
+    autoApplyMaxLive: Number.isInteger(o.autoApplyMaxLive) ? clamp(o.autoApplyMaxLive, 0, MAX_LIVE_CAP) : DEFAULT_POLICY.autoApplyMaxLive,
+    peerAsksPerHour: Number.isInteger(o.peerAsksPerHour) ? clamp(o.peerAsksPerHour, 0, POLICY_MAX) : DEFAULT_POLICY.peerAsksPerHour,
   }
 }
 
@@ -199,6 +203,18 @@ const STATES = {
 const count = (v) => (Number.isInteger(v) && v >= 0 ? v : 0)
 const bool = (v) => v === true
 
+const PROPOSALS_MAX = 20
+const PROPOSAL_STATES = ['applying', 'applied', 'failed']
+const clipOrNull = (v, n) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : null)
+const sanitizeProposals = (v) => (Array.isArray(v) ? v : [])
+  .filter((p) => isPlainObject(p) && Number.isInteger(p.index) && p.index >= 0 && PROPOSAL_KINDS.includes(p.kind) &&
+    isPlainObject(p.action) && p.mode === 'auto' && PROPOSAL_STATES.includes(p.state))
+  .slice(0, PROPOSALS_MAX)
+  .map((p) => ({
+    index: p.index, kind: p.kind, action: p.action, risk: clipOrNull(p.risk, 200), mode: p.mode, state: p.state,
+    error: clipOrNull(p.error, 400), gateNote: clipOrNull(p.gateNote, 200), at: numOrNull(p.at),
+  }))
+
 /** How each patchable field is coerced, shared by load and by every write, so
  *  an entry in memory never holds a value the next load would read back
  *  differently. */
@@ -213,8 +229,9 @@ const FIELDS = {
   nextAttemptAt: numOrNull,
   override: bool,
   delivered: bool,
+  proposals: sanitizeProposals,
 }
-const TRANSITION_KEYS = ['reply', 'error', 'startedAt', 'answeredAt', 'costUsd', 'actionsProposed', 'attempts', 'nextAttemptAt', 'override']
+const TRANSITION_KEYS = ['reply', 'error', 'startedAt', 'answeredAt', 'costUsd', 'actionsProposed', 'attempts', 'nextAttemptAt', 'override', 'proposals']
 const SET_KEYS = [...TRANSITION_KEYS, 'delivered']
 
 const outSeqOf = (v) => (Number.isInteger(v) && v > 0 ? v : null)
@@ -235,8 +252,13 @@ const sanitizeEntry = (e) => {
     t: numOrNull(e.t),
     updatedAt: numOrNull(e.updatedAt),
     outSeq: outSeqOf(e.outSeq),
+    origin: e.origin === 'agent' ? 'agent' : 'person',
+    forPeer: e.dir === 'out' ? sanitizeForPeer(e.forPeer) : null,
   }
   for (const k of SET_KEYS) out[k] = FIELDS[k](e[k])
+  // Only a load reaches here. An apply still marked applying on disk was
+  // interrupted when its relay stopped, and nothing will ever settle it.
+  out.proposals = out.proposals.map((p) => (p.state === 'applying' ? { ...p, state: 'failed', error: p.error ?? 'the relay stopped' } : p))
   return out
 }
 
@@ -329,7 +351,7 @@ export const createAsksStore = ({ file, now = Date.now }) => {
      *  same ask recorded twice would be answered twice, so a repeat of a
      *  (peer, dir, askId) is refused here -- a receiver checks `find` first
      *  and treats a repeat as already accepted. */
-    create({ peer, dir, askId, text } = {}) {
+    create({ peer, dir, askId, text, origin, forPeer } = {}) {
       if (typeof peer !== 'string' || peer === '') throw new Error('an ask needs a peer')
       if (dir !== 'out' && dir !== 'in') throw new Error('an ask must go out or come in')
       if (typeof text !== 'string' || text.length === 0 || text.length > ASK_TEXT_MAX) {
@@ -356,6 +378,9 @@ export const createAsksStore = ({ file, now = Date.now }) => {
         override: false,
         outSeq: null,
         delivered: false,
+        origin: origin === 'agent' ? 'agent' : 'person',
+        forPeer: dir === 'out' ? sanitizeForPeer(forPeer) : null,
+        proposals: [],
       }
       items.push(e)
       dirty = true

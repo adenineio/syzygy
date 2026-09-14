@@ -89,6 +89,14 @@ input.peerinput[type="number"] { width: 80px; }
 .peercaps { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
 .peercaps input.peerinput[type="number"] { width: 70px; }
 
+/* The per-peer trust tier and its automatic-apply kind list. Reuses
+   .peerfield/.peerinput so the trust select matches every other field in
+   this panel; the kinds row is its own .peerfield sibling, hidden by
+   MCX.show at the manual tier. */
+.peertrust { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+.peerkinds { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.peerkind { display: inline-flex; gap: 4px; align-items: center; }
+
 /* The ghost roster strip: one small read-only card per session on the
    other side, never a hover or a pointer cursor -- these cards take no
    input at all. */

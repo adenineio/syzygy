@@ -148,6 +148,32 @@ The workflow this was built for.
 
 Each step is a click you make. Nothing dispatches itself.
 
+## Parallel implementation
+
+`syzygy:multi-worktree-coordinator` is a skill rather than a tab. Hand a
+planning session several independent features and it proposes a split into
+right-sized plans, writes one plan document per feature and commits them — a
+worktree branches from committed state, so an uncommitted plan would not exist
+inside the session meant to read it. Then its own launcher,
+`syzygy/skills/multi-worktree-coordinator/scripts/mwc.sh`, which needs nothing
+but `bash`, `git` and `tmux`, opens ONE tmux window holding a merge-coordinator
+pane plus a tiled pane per worker, each a named Claude Code session in its own
+git worktree on `feature/<name>`.
+
+Workers implement and report `DONE` or `BLOCKED` over Claude Code's own
+cross-session messaging. The merge coordinator checks each branch on disk rather
+than taking a report's word for it, **asks you for approval in its own pane**,
+and only then merges into the base one branch at a time, running the tests after
+each, before removing the worktrees and the branches. Nothing merges until you
+say so in that pane.
+
+Every session starts with the orchestrating session's identity variables
+stripped from its environment, or a worker would write into that session's
+transcript. Workers default to `--model opus --permission-mode
+bypassPermissions` — full autonomy inside an isolated worktree, reviewed at
+merge time. Pass `--permission-mode acceptEdits` to `mwc.sh launch` to tighten
+that.
+
 ## The orchestrator
 
 A field under the presence sphere: ask a question about the *whole board* and get

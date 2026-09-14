@@ -2906,14 +2906,27 @@ const renderOrchActions = (box, t) => {
       : a.kind === 'arm_resume' ? (a.mode === 'disarm' ? 'disarm limit resume'
         : a.mode === 'arm_weekly' ? 'arm limit resume (5h + 7d)' : 'arm limit resume')
       : a.kind === 'drop' ? (noPeer ? 'drop: no peer on this turn' : `drop ${dropPaths.length} file(s) to ${t.peer}`)
+      : a.kind === 'peer_ask' ? `ask ${a.peer}: ${String(a.text || '').slice(0, 60)}`
       : a.kind
-    const btn = el('button', 'orchact' + (applied ? ' applied' : ''), (applied ? '✓ ' : '') + label)
+    // An action the relay already gated `auto` applies itself: the button
+    // stays visible so the turn keeps its full record, but it never takes a
+    // click while the apply is still in flight, and it says as much rather
+    // than looking like every other button waiting to be pressed.
+    const auto = a.gate === 'auto'
+    const autoErr = t.applyErrors?.get(i) || null
+    const autoPending = auto && !applied && !autoErr
+    const shown = autoPending ? 'automatic: ' + label
+      : auto && applied ? '✓ applied automatically: ' + label
+      : (applied ? '✓ ' : '') + label
+    const btn = el('button', 'orchact' + (applied ? ' applied' : ''), shown)
     btn.type = 'button'
-    btn.disabled = !!applied || noPeer
+    btn.disabled = !!applied || noPeer || autoPending
     const detail = a.kind === 'drop' ? [a.note, ...dropPaths].filter(Boolean).join(String.fromCharCode(10))
       : a.note || a.text || a.prompt || a.ask || ''
-    if (detail) btn.title = detail
-    if (!applied && !noPeer) {
+    const tooltip = [detail, a.risk ? 'risk: ' + a.risk : '', a.gateNote || '',
+      autoErr ? 'automatic apply failed: ' + autoErr : ''].filter(Boolean).join(String.fromCharCode(10))
+    if (tooltip) btn.title = tooltip
+    if (!applied && !noPeer && !autoPending) {
       btn.addEventListener('click', async (ev) => {
         // A drop's modifiers open the Peering panel's composer, filled from
         // this proposal and aimed at this turn's peer: ⇧ to strike a path or
@@ -2959,6 +2972,8 @@ const renderOrchActions = (box, t) => {
                 cwd: a.cwd, name: a.name || '', prompt: a.prompt,
                 model: a.model, effort: a.effort, ...forAsk,
               })
+          : a.kind === 'peer_ask'
+            ? await post('/api/peer/' + encodeURIComponent(a.peer) + '/ask', { text: a.text || '', origin: 'agent', ...forAsk })
           : a.kind === 'drop'
             ? await post('/api/peer/' + encodeURIComponent(t.peer) + '/drop', { paths: dropPaths, note: a.note || '' })
           : a.kind === 'arm_resume'

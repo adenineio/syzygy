@@ -47,7 +47,7 @@ import {
   signCookie, verifyCookie, parseCookies, rateLimiter, gate,
 } from './auth.mjs'
 import {
-  emptyCanvas, sanitizeCanvas, inheritPosition, liveSpawnCount, settleSpawns, movePending, pruneNodes,
+  emptyCanvas, sanitizeCanvas, inheritPosition, liveSpawnCount, isLiveSpawn, settleSpawns, movePending, pruneNodes,
   pushRecent, spawnSession, attachSession, realRun, validateCwd, completeDirs,
   pickClaudeBin, probeClaudeBin, probeSafeMode, killPlan, killSession,
   resolvePendingLink, dropExpiredLinks,
@@ -62,7 +62,7 @@ import { SPINNERS } from '../hooks/spinner-frames.js'
 import { createOrchestrator, DEFAULT_BLURB_MIN_MS } from './orchestrator.mjs'
 import { createThreadStore } from './orchestrator-threads.mjs'
 import { createPeerLink } from './peer-link.mjs'
-import { forPeerIndex, selfNameFrom } from './peer.mjs'
+import { forPeerIndex, selfNameFrom, applyRequest, livePeerSessions } from './peer.mjs'
 import { setWireTap } from './peer-listener.mjs'
 import { redactionContext, hostParts } from './peer-redact.mjs'
 import { createWireLog, createWireSettings, createWireTap } from './peer-wirelog.mjs'
@@ -320,7 +320,8 @@ const NO_CLAUDE = { error: 'no claude binary with --bg was found — see the rel
 // applied action put to work carries `forPeer`.
 // 21: `peerWire` -- the wire log's digest and the redaction switch, its own key
 // beside `peers` -- and `peers.asks[].askId`, the wire id an ask is joined on.
-const PAYLOAD_VERSION = 21
+// 22: peers.list[].policy carries trust, autoApply, autoApplyMaxLive and peerAsksPerHour; peers.asks[] carries origin and a proposals summary.
+const PAYLOAD_VERSION = 22
 
 /** This relay's build, read ONCE at boot from the checkout this file lives in
  *  -- never per request, and never from `process.cwd()`, which is whatever
@@ -1151,6 +1152,9 @@ const orchestrator = createOrchestrator({
   patternDayUsd: PATTERN_DAY_USD,
   bundleChains: CHAIN_BUNDLE,
   spend,
+  // Read at call time, well after `peerLink` below exists -- the same lazy
+  // closure `snapshot` relies on.
+  actionGate: (ctx) => peerLink.gate(ctx),
 })
 // the timer trigger. Its own gates (a pane connected, the board having
 // changed, the 10-minute floor) live inside refreshBlurb() itself; this tick
@@ -1214,12 +1218,38 @@ const selfIsHostname = () => {
   try { return peerLink.payload().self === selfNameFrom(osHostname()) } catch { return false }
 }
 
+/** An action applied without a click goes through the same loopback route, and
+ *  with the same body, as the pane's button: validation, the forPeer tag, the
+ *  capture line and the broadcast all happen exactly as they do for a click.
+ *  Never throws: every failure is an answer the engine records. */
+const applyAction = async (action, { peer = null, forAsk = null } = {}) => {
+  try {
+    const req = applyRequest(action, { peer, forAsk, sessions: live() })
+    if (req.error) return { ok: false, error: String(req.error).slice(0, 400) }
+    const r = await fetch(`http://127.0.0.1:${boundPort}${req.path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: TOKEN, ...req.body }),
+    })
+    const body = await r.json().catch(() => ({}))
+    return r.ok ? { ok: true } : { ok: false, error: String(body?.error ?? `HTTP ${r.status}`).slice(0, 400) }
+  } catch (e) {
+    return { ok: false, error: String(e?.message ?? e).slice(0, 400) }
+  }
+}
+
+/** Sessions a peer's asks have running here: live ones carrying its tag, and
+ *  every spawn for it the ledger still counts as live, by the same rule the
+ *  canvas's own live count uses. */
+const liveForPeer = (name) => livePeerSessions({
+  peer: name, sessions: withForPeer(live()), spawnedBy: world.canvas.spawnedBy, isLiveSpawn, now: now(),
+})
+
 // Peering: a second, TLS-only listener with its own route table, built
 // only while peering is enabled. It shares nothing with the server below --
 // not the handler, not the gate, not a prefix -- so no route added there can
 // ever be reached from it. Same ordering reason as `orchestrator` just above:
 // it closes over `broadcast`, `live` and `orchestrator`.
-const peerLink = createPeerLink({ dir: WORLD_DIR, run: realRun, sessions: () => withForPeer(live()), broadcast, orchestrator, dropRoots })
+const peerLink = createPeerLink({ dir: WORLD_DIR, run: realRun, sessions: () => withForPeer(live()), broadcast, orchestrator, dropRoots, applyAction, liveForPeer })
 peerLink.start().catch((e) => process.stderr.write(`peering failed to start: ${e?.stack || e}\n`))
 
 // The canvas's spawn ledger: one `claude agents --json --all` per pass, only

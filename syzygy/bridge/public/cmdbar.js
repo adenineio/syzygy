@@ -251,6 +251,21 @@ const MCQ = (() => {
     // A frame for a thread that is not on screen updates nothing visible --
     // but it must not be folded into the wrong conversation either.
     if (d.threadId && S.orchThreadId && d.threadId !== S.orchThreadId) return
+    // An automatic apply's outcome, for a turn this pane already holds. It never
+    // creates a turn: a finished apply for a turn nobody is showing is not news.
+    if (Array.isArray(d.applied)) {
+      const held = S.orchTurns.find((x) => x.serverId === d.id)
+      if (!held) return
+      held.appliedIdx = held.appliedIdx || new Set()
+      held.applyErrors = held.applyErrors || new Map()
+      for (const a of d.applied) {
+        if (!a || !Number.isInteger(a.index)) continue
+        if (a.ok) held.appliedIdx.add(a.index)
+        else held.applyErrors.set(a.index, String(a.error || 'the apply failed'))
+      }
+      renderAll()
+      return
+    }
     // Claim the question ask() already echoed rather than creating a second
     // card: the shared slot allows one ask in flight, so there is at most one
     // pending, unclaimed turn, and binding it keeps its MCX key stable.

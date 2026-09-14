@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.0 — 2026-09-14
+
+### Peering
+
+- **A peer can be trusted to act, one tier at a time.** Every paired peer
+  starts on the `manual` tier, where each action the liaison proposes on its
+  behalf is a button for the person at this instance. Marking a peer
+  `sanctioned` lets this relay apply a chosen list of action kinds from that
+  peer's asks on its own — `spawn`, `prompt`, `dispatch`, `drop`, `link`, each
+  named explicitly — with a cap on live sessions started that way. The tier
+  and the list are set only from this instance's own pane, with a two-press
+  arm, and nothing arriving over the link can read or change them; a tier
+  lowered while a batch is applying stops the batch. An automatic apply is the
+  same loopback request a click would send, so it passes every check a click
+  passes and lands in the same records.
+- **The liaison can ask a peer back.** A seventh action kind, `peer_ask`,
+  sends a question to a paired peer's liaison. Under `sanctioned` it goes
+  automatically, within an hourly allowance that counts clicked and automatic
+  asks alike; the liaison's own turns never send one, so a question cannot
+  bounce between two relays on its own.
+- **A dialled peer can be re-pointed at a new host and port** without pairing
+  again, keeping its pinned certificate and fingerprint, for instances whose
+  address changes between starts. A wrong address reads as down; it cannot
+  reach anything else.
+
+### Skills
+
+- **The multi-worktree-coordinator skill ships in the `syzygy` plugin.** Pull
+  and run `just install`; the skill lives inside the already-linked plugin, so
+  no new recipe is needed. It turns a set of features into parallel work: one
+  plan, one worktree and one named session per feature in tiled tmux panes,
+  coordinated over cross-session messages, merged back by a coordinator
+  session only on an explicit yes.
+
 ## 0.2.0 — 2026-09-13
 
 ### The band (`syzygy`)

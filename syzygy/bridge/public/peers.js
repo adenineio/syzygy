@@ -113,6 +113,17 @@ const MCN = (() => {
     forgetArmed = null
   }
 
+  // A peer's edited-but-not-yet-sent trust tier and kind list, kept per name
+  // so switching the selected peer never loses another row's unsent edit.
+  // Cleared the moment its own "Set trust" click actually sends, or its arm
+  // expires -- an expired arm falls back to the stored policy.
+  let trustDraft = new Map()
+  let trustArmed = null // { name, until, timer }
+  const disarmTrust = () => {
+    if (trustArmed) clearTimeout(trustArmed.timer)
+    trustArmed = null
+  }
+
   // ---------------------------------------------------------------- helpers
 
   const urlHost = (h) => (typeof h === 'string' && h.includes(':') ? '[' + h + ']' : h)
@@ -312,6 +323,36 @@ const MCN = (() => {
       caps.appendChild(fieldRow('$ / day', dayInput))
       row.appendChild(caps)
 
+      const trust = el('div', 'peertrust')
+      const tierSel = el('select', 'peerinput peertier')
+      for (const v of ['manual', 'sanctioned']) {
+        const o = el('option', '', v)
+        o.value = v
+        tierSel.appendChild(o)
+      }
+      trust.appendChild(fieldRow('trust', tierSel))
+      const kinds = el('div', 'peerkinds')
+      for (const k of ['spawn', 'prompt', 'dispatch', 'drop', 'link']) {
+        const lab = el('label', 'peerkind')
+        const box = el('input', 'peerkindbox')
+        box.type = 'checkbox'
+        box.dataset.kind = k
+        lab.appendChild(box)
+        lab.appendChild(el('span', '', k))
+        kinds.appendChild(lab)
+      }
+      // `fieldRow` wraps `kinds` in its own `.peerfield` node; keep THAT
+      // node (via its own class) to hide, rather than assuming what wraps
+      // it -- the wrapper is whatever fieldRow actually builds, read once
+      // above.
+      const kindsField = fieldRow('applied without a click', kinds)
+      kindsField.classList.add('peerkindsfield')
+      trust.appendChild(kindsField)
+      const setBtn = el('button', 'btn peertrustset', 'Set trust')
+      setBtn.type = 'button'
+      trust.appendChild(setBtn)
+      row.appendChild(trust)
+
       const confirmBox = el('div', 'peerconfirm')
       const fpRow = el('div', 'peerfprow')
       const theirsCol = el('div', 'peerfpcol')
@@ -386,6 +427,40 @@ const MCN = (() => {
       }
       hourInput.onchange = postCaps
       dayInput.onchange = postCaps
+
+      const stored = { trust: policy.trust === 'sanctioned' ? 'sanctioned' : 'manual', autoApply: Array.isArray(policy.autoApply) ? policy.autoApply : [] }
+      const draft = trustDraft.get(p.name) || stored
+      const tierSel = row.querySelector('.peertier')
+      if (document.activeElement !== tierSel) tierSel.value = draft.trust
+      const kindsHost = row.querySelector('.peerkinds')
+      const kindsField = row.querySelector('.peerkindsfield')
+      MCX.show(kindsField || kindsHost, draft.trust === 'sanctioned')
+      for (const box of kindsHost.querySelectorAll('.peerkindbox')) box.checked = draft.autoApply.includes(box.dataset.kind)
+      const readDraft = () => ({
+        trust: tierSel.value === 'sanctioned' ? 'sanctioned' : 'manual',
+        autoApply: [...kindsHost.querySelectorAll('.peerkindbox')].filter((b) => b.checked).map((b) => b.dataset.kind),
+      })
+      const onDraft = () => { trustDraft.set(p.name, readDraft()); disarmTrust(); render() }
+      tierSel.onchange = onDraft
+      for (const box of kindsHost.querySelectorAll('.peerkindbox')) box.onchange = onDraft
+      const changed = JSON.stringify(draft) !== JSON.stringify(stored)
+      const armedTrust = !!(trustArmed && trustArmed.name === p.name && Date.now() < trustArmed.until)
+      const setBtn = row.querySelector('.peertrustset')
+      MCX.show(setBtn, changed)
+      MCX.setText(setBtn, armedTrust ? 'Set trust: ' + draft.trust + '? press again' : 'Set trust')
+      setBtn.onclick = async () => {
+        if (!armedTrust) {
+          disarmTrust()
+          trustArmed = { name: p.name, until: Date.now() + FORGET_ARM_MS, timer: setTimeout(() => { disarmTrust(); trustDraft.delete(p.name); render() }, FORGET_ARM_MS) }
+          render()
+          return
+        }
+        disarmTrust()
+        const r = await post('/api/peer/policy', { name: p.name, trust: draft.trust, autoApply: draft.trust === 'sanctioned' ? draft.autoApply : [] })
+        if (!r || r.error) toast((r && r.error) || 'could not set trust', { kind: 'error' })
+        trustDraft.delete(p.name)
+        render()
+      }
 
       const unconfirmed = p.confirmedAt == null
       const confirmBox = row.querySelector('.peerconfirm')
@@ -927,6 +1002,14 @@ const MCN = (() => {
       if (elDropPaths) elDropPaths.focus()
       return
     }
+    if (key === 't') {
+      ev.preventDefault()
+      if (!selectedPeerName) return
+      const row = listHost && listHost.querySelector('.peerrow[data-selected="true"]')
+      const tierSel = row && row.querySelector('.peertier')
+      if (tierSel) tierSel.focus()
+      return
+    }
     // Plain j/k keep moving peers, exactly as before; shifted J/K move the
     // job selection instead, so the two lists have independent cursors.
     if (key === 'j' || key === 'k') {
@@ -1246,7 +1329,7 @@ const MCN = (() => {
 
   const buildHint = (body) => {
     elHint = el('div', 'peerhint',
-      'p pair · a ask · d drop · j/k peers · J/K jobs · enter roster/expand · x×2 cancel · o inbox path · ' +
+      'p pair · a ask · d drop · t trust · j/k peers · J/K jobs · enter roster/expand · x×2 cancel · o inbox path · ' +
       'c copy into · ⌥c copy to focus · esc leave · ⇧ all/note first · ⌥ dry run')
     MCX.show(elHint, false)
     body.insertBefore(elHint, body.firstChild)

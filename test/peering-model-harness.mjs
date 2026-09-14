@@ -126,6 +126,20 @@ ok('a plain answered ask gives no row -- its exchanges are wire rows', () => {
   assert.deepEqual(MCPRM.askRows([plainAsk], new Map()), [])
 })
 
+ok('askRows: an incoming ask whose proposals applied automatically says so', () => {
+  const rows = MCPRM.askRows([{
+    id: 'i1', askId: 'w1', peer: 'beta', dir: 'in', state: 'answered', t: 5, actionsProposed: 3, costUsd: 0.01,
+    proposals: [
+      { kind: 'spawn', mode: 'auto', state: 'applied', risk: null, error: null },
+      { kind: 'prompt', mode: 'auto', state: 'failed', risk: null, error: 'no such session' },
+      { kind: 'link', mode: 'auto', state: 'applied', risk: null, error: null },
+    ],
+  }], new Map())
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].kind, 'action')
+  assert.equal(rows[0].summary, '3 actions proposed · auto-applied: spawn, link · failed: prompt')
+})
+
 // ------------------------------------------------------------------ jobRows
 
 ok('a landed recv job gives a drop row', () => {

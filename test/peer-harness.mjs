@@ -210,7 +210,9 @@ await ok('peers.json is written atomically, mode 0600, and read back sanitised',
   assert.equal(existsSync(join(dir, 'peers.json.tmp')), false)
   const back = S.readPeers(dir, { hostname: 'ignored' })
   assert.deepEqual(back.peers.map((p) => p.name), ['vm'])
-  assert.deepEqual(back.peers[0].policy, { asksPerHour: 5, peerAskDailyCapUsd: 1.5 })
+  assert.deepEqual(back.peers[0].policy, {
+    asksPerHour: 5, peerAskDailyCapUsd: 1.5, trust: 'manual', autoApply: [], autoApplyMaxLive: 2, peerAsksPerHour: 6,
+  })
 })
 
 await ok('a failed serialize leaves the previous peers.json intact', () => {
@@ -285,6 +287,25 @@ await ok('the ask store: stalled asks fail after a day; a corrupt file is moved 
   writeFileSync(file, 'garbage')
   S.createAsksStore({ file, now: () => 77 })
   assert.equal(readFileSync(file + '.corrupt-77', 'utf8'), 'garbage')
+})
+
+await ok('the ask store: an apply left applying on disk reads back failed; one applying in memory stays applying', () => {
+  const dir = tmp(); const t = 5000
+  const file = join(dir, 'peer-asks.json')
+  const st = S.createAsksStore({ file, now: () => t })
+  const e = st.create({ peer: 'probe-check', dir: 'in', askId: 'cd'.repeat(8), text: 'start a collector' })
+  const action = { kind: 'spawn', cwd: '/w', name: 'probe-collector', prompt: 'collect' }
+  const running = { index: 0, kind: 'spawn', action, risk: null, mode: 'auto', state: 'applying', error: null, gateNote: null, at: t }
+  const noted = { ...running, index: 1, error: 'the route did not answer' }
+  const done = { ...running, index: 2, state: 'applied' }
+  st.set(e.id, { proposals: [running, noted, done] })
+  assert.deepEqual(st.get(e.id).proposals.map((p) => p.state), ['applying', 'applying', 'applied'])
+  st.flush()
+  const again = S.createAsksStore({ file, now: () => t })
+  assert.deepEqual(again.get(e.id).proposals.map((p) => [p.state, p.error]),
+    [['failed', 'the relay stopped'], ['failed', 'the route did not answer'], ['applied', null]])
+  again.set(e.id, { proposals: [running] })
+  assert.equal(again.get(e.id).proposals[0].state, 'applying')
 })
 
 // ---- the job store ------------------------------------------------------------
@@ -2166,6 +2187,158 @@ await ok('the jobs payload stays under its byte budget at the worst case: 50 kep
   }
   const bytes = Buffer.byteLength(JSON.stringify(p))
   assert.ok(bytes < 256_000, `the jobs payload is ${bytes} bytes at the file cap`)
+})
+
+// ---- the agent loop: policy, the gate, the cap, the apply builder --------
+
+await ok('agent loop: sanitizePolicy fills the new fields and reads anything else as manual', () => {
+  assert.deepEqual(S.sanitizePolicy(undefined), {
+    asksPerHour: 20, peerAskDailyCapUsd: 2, trust: 'manual', autoApply: [], autoApplyMaxLive: 2, peerAsksPerHour: 6,
+  })
+  const p = S.sanitizePolicy({ trust: 'review', autoApply: ['link', 'arm_resume', 'spawn', 'spawn', 'peer_ask'], autoApplyMaxLive: 99, peerAsksPerHour: -3 })
+  assert.equal(p.trust, 'manual')
+  assert.deepEqual(p.autoApply, ['spawn', 'link'])
+  assert.equal(p.autoApplyMaxLive, 50); assert.equal(p.peerAsksPerHour, 0)
+  assert.equal(S.sanitizePolicy({ trust: 'sanctioned' }).trust, 'sanctioned')
+})
+
+await ok('agent loop: validatePolicyPatch validates what is present, names a bad field and ignores other keys', () => {
+  assert.deepEqual(P.validatePolicyPatch({ trust: 'sanctioned', autoApply: ['link', 'spawn'], other: 1 }),
+    { ok: true, patch: { trust: 'sanctioned', autoApply: ['spawn', 'link'] } })
+  assert.deepEqual(P.validatePolicyPatch({ name: 'beta' }), { ok: true, patch: {} })
+  for (const [body, field] of [
+    [{ trust: 'review' }, 'trust'], [{ trust: 'root' }, 'trust'],
+    [{ autoApply: ['arm_resume'] }, 'autoApply'], [{ autoApply: ['peer_ask'] }, 'autoApply'], [{ autoApply: 'spawn' }, 'autoApply'],
+    [{ autoApplyMaxLive: 51 }, 'autoApplyMaxLive'], [{ autoApplyMaxLive: 1.5 }, 'autoApplyMaxLive'],
+    [{ peerAsksPerHour: -1 }, 'peerAsksPerHour'], [{ asksPerHour: 1.5 }, 'asksPerHour'], [{ peerAskDailyCapUsd: 'x' }, 'peerAskDailyCapUsd'],
+  ]) {
+    const r = P.validatePolicyPatch(body)
+    assert.equal(r.ok, false, JSON.stringify(body)); assert.ok(r.error.startsWith(field + ' '), r.error)
+  }
+  assert.equal(P.validatePolicyPatch({ asksPerHour: 5 }).patch.asksPerHour, 5)
+})
+
+await ok('agent loop: gateActions — manual is all buttons, whatever the lists say', () => {
+  const kinds = ['link', 'prompt', 'dispatch', 'spawn', 'drop', 'peer_ask', 'arm_resume'].map((kind) => ({ kind }))
+  for (const source of ['ask', 'liaison']) {
+    const d = P.gateActions({ source, trust: 'manual', autoApply: P.AUTO_APPLY_KINDS, confirmed: true, actions: kinds })
+    assert.deepEqual(d.map((x) => x.gate), kinds.map(() => 'button'))
+  }
+})
+
+await ok('agent loop: gateActions — a local turn under sanctioned auto-sends peer_ask only, within the cap', () => {
+  const g = (over, actions) => P.gateActions({ source: 'ask', trust: 'sanctioned', confirmed: true, peerAskCount: 0, peerAsksPerHour: 6, ...over, actions })
+  assert.deepEqual(g({}, [{ kind: 'peer_ask' }, { kind: 'spawn' }]).map((d) => d.gate), ['auto', 'button'])
+  assert.deepEqual(g({ confirmed: false }, [{ kind: 'peer_ask' }]), [{ gate: 'button', gateNote: 'the peer is not confirmed' }])
+  assert.deepEqual(g({ peerAskCount: 6 }, [{ kind: 'peer_ask' }]), [{ gate: 'button', gateNote: 'peer_ask hourly cap reached' }])
+  assert.deepEqual(g({ peerAskCount: 5 }, [{ kind: 'peer_ask' }, { kind: 'peer_ask' }]).map((d) => d.gate), ['auto', 'button'])
+})
+
+await ok('agent loop: gateActions — a liaison turn under sanctioned auto-applies listed kinds, never peer_ask or arm_resume', () => {
+  const g = (over, actions) => P.gateActions({ source: 'liaison', trust: 'sanctioned', confirmed: true, liveForPeer: 0, autoApplyMaxLive: 2, ...over, actions })
+  assert.deepEqual(
+    g({ autoApply: ['spawn', 'drop'] }, ['spawn', 'drop', 'prompt', 'peer_ask', 'arm_resume', 'link', 'dispatch'].map((kind) => ({ kind }))).map((d) => d.gate),
+    ['auto', 'auto', 'button', 'button', 'button', 'button', 'button'])
+  // A kind smuggled into the list by hand is still never automatic.
+  assert.deepEqual(g({ autoApply: ['peer_ask', 'arm_resume'] }, [{ kind: 'peer_ask' }, { kind: 'arm_resume' }]).map((d) => d.gate), ['button', 'button'])
+  assert.deepEqual(g({ autoApply: ['spawn'], liveForPeer: 1, autoApplyMaxLive: 2 }, [{ kind: 'spawn' }, { kind: 'spawn' }]),
+    [{ gate: 'auto', gateNote: null }, { gate: 'button', gateNote: 'live session cap reached' }])
+  assert.deepEqual(g({ autoApply: ['prompt'], liveForPeer: 9, autoApplyMaxLive: 0 }, [{ kind: 'prompt' }]).map((d) => d.gate), ['auto'])
+  assert.deepEqual(g({ autoApply: ['spawn'] }, [null, 'junk']).map((d) => d.gate), ['button', 'button'])
+})
+
+await ok('agent loop: peerAskCap counts this peer\'s agent asks from the last rolling hour', () => {
+  const now = 10 * 3_600_000
+  const asks = [
+    { peer: 'beta', dir: 'out', origin: 'agent', t: now - 60_000 },
+    { peer: 'beta', dir: 'out', origin: 'agent', t: now - 3_599_000 },
+    { peer: 'beta', dir: 'out', origin: 'agent', t: now - 3_601_000 },
+    { peer: 'beta', dir: 'out', origin: 'person', t: now - 1000 },
+    { peer: 'beta', dir: 'in', origin: 'agent', t: now - 1000 },
+    { peer: 'gamma', dir: 'out', origin: 'agent', t: now - 1000 },
+  ]
+  assert.deepEqual(P.peerAskCap({ asks, peer: 'beta', now, perHour: 2 }), { ok: false, count: 2 })
+  assert.deepEqual(P.peerAskCap({ asks, peer: 'beta', now, perHour: 3 }), { ok: true, count: 2 })
+  assert.deepEqual(P.peerAskCap({ asks: null, peer: 'beta', now, perHour: 0 }), { ok: false, count: 0 })
+})
+
+await ok('agent loop: livePeerSessions counts a peer\'s tagged sessions and its live spawns, each once', async () => {
+  const tag = (peer, d) => ({ peer, askId: String(d).repeat(16) })
+  const live = (r) => r.state !== 'missing'
+  const sessA = { id: 'sess-a', forPeer: tag('beta', 1) }
+  const sessOther = { id: 'sess-b', forPeer: tag('gamma', 2) }
+  const sessBare = { id: 'sess-c' }
+  const sessBadTag = { id: 'sess-d', forPeer: { peer: 'beta', askId: 'not-a-store-id' } }
+  const rowOfA = { shortId: 's1', sessionId: 'sess-a', state: 'running', spawnedAt: 0, forPeer: tag('beta', 1) }
+  const rowNull = { shortId: 's2', sessionId: null, state: null, spawnedAt: 0, forPeer: tag('beta', 3) }
+  const rowStarting = { shortId: 's3', sessionId: null, state: 'starting', spawnedAt: 0, forPeer: tag('beta', 4) }
+  const rowMissing = { shortId: 's4', sessionId: null, state: 'missing', spawnedAt: 0, forPeer: tag('beta', 5) }
+  const rowOther = { shortId: 's5', sessionId: null, state: null, spawnedAt: 0, forPeer: tag('gamma', 6) }
+  const rowBare = { shortId: 's6', sessionId: null, state: null, spawnedAt: 0 }
+  const count = (sessions, spawnedBy, over = {}) => P.livePeerSessions({ peer: 'beta', sessions, spawnedBy, isLiveSpawn: live, now: 0, ...over })
+
+  assert.equal(count([sessA], []), 1, 'a tagged live session counts')
+  assert.equal(count([], [rowNull]), 1, 'a tagged spawn still live counts')
+  assert.equal(count([], [rowStarting]), 1, 'a spawn still starting counts')
+  assert.equal(count([sessA], [rowOfA]), 1, 'a spawn whose session is already counted is not counted twice')
+  assert.equal(count([], [rowOfA]), 1, 'the same spawn counts while its session is not live')
+  assert.equal(count([], [rowMissing]), 0, 'a row the predicate calls not live does not count')
+  assert.equal(count([sessOther, sessBare, sessBadTag], [rowOther, rowBare]), 0, 'another peer\'s or an untagged session or row does not count')
+  assert.equal(count([sessA, sessOther, sessBare, sessBadTag], [rowOfA, rowNull, rowStarting, rowMissing, rowOther, rowBare]), 3)
+  assert.equal(count([sessA, sessOther], [rowOfA, rowOther], { peer: 'gamma' }), 2)
+  assert.equal(count(null, null), 0)
+
+  const seen = []
+  count([], [rowNull], { isLiveSpawn: (r, t) => { seen.push([r.shortId, t]); return true }, now: 1234 })
+  assert.deepEqual(seen, [['s2', 1234]], 'the predicate is asked with the row and the time given')
+
+  const { isLiveSpawn, NULL_STATE_MAX_MS } = await import(join(ROOT, 'syzygy', 'bridge', 'canvas.mjs'))
+  const rows = [rowNull, rowStarting, rowMissing, { ...rowNull, shortId: 's7', forPeer: tag('beta', 7), spawnedAt: -NULL_STATE_MAX_MS }]
+  assert.equal(P.livePeerSessions({ peer: 'beta', sessions: [], spawnedBy: rows, isLiveSpawn, now: 1 }), 2, 'with the canvas rule: null and starting count, missing and an expired null do not')
+})
+
+await ok('agent loop: applyRequest builds the route and body a click posts, and resolves session refs', () => {
+  const sessions = [{ id: 's1', name: 'probe-check' }, { id: 's2', name: 'dup' }, { id: 's3', name: 'dup' }]
+  const forAsk = 'f'.repeat(16)
+  assert.deepEqual(P.applyRequest({ kind: 'prompt', to: 'probe-check', text: 'go' }, { forAsk, sessions }),
+    { path: '/api/command', body: { targetId: 's1', verb: 'prompt', payload: { text: 'go' }, forAsk } })
+  assert.deepEqual(P.applyRequest({ kind: 'prompt', to: 'dup', text: 'go' }, { sessions }), { error: 'no such session' })
+  assert.deepEqual(P.applyRequest({ kind: 'link', from: 's1', to: 'probe-check' }, { sessions }), { path: '/api/link', body: { from: 's1', to: 's1', note: '' } })
+  assert.deepEqual(JSON.parse(JSON.stringify(P.applyRequest({ kind: 'spawn', cwd: '/w', prompt: 'p', model: 'sonnet' }, { forAsk }))),
+    { path: '/api/spawn', body: { cwd: '/w', name: '', prompt: 'p', model: 'sonnet', forAsk } })
+  assert.deepEqual(JSON.parse(JSON.stringify(P.applyRequest({ kind: 'dispatch', title: 't' }, {}))),
+    { path: '/api/request/create', body: { title: 't', project: '', ask: '', brief: null } })
+  assert.deepEqual(P.applyRequest({ kind: 'drop', paths: ['/w/a'] }, { peer: 'beta' }), { path: '/api/peer/beta/drop', body: { paths: ['/w/a'], note: '' } })
+  assert.deepEqual(P.applyRequest({ kind: 'drop', paths: ['/w/a'] }, { peer: null }), { error: 'no peer on this turn' })
+  assert.deepEqual(P.applyRequest({ kind: 'peer_ask', peer: 'beta', text: 'run it' }, { forAsk }),
+    { path: '/api/peer/beta/ask', body: { text: 'run it', origin: 'agent', forAsk } })
+  assert.deepEqual(P.applyRequest({ kind: 'peer_ask', peer: 'Not A Name', text: 'x' }, {}), { error: 'not a peer name' })
+  assert.match(P.applyRequest({ kind: 'arm_resume', mode: 'arm' }, {}).error, /never applied automatically/)
+})
+
+await ok('agent loop: the ask store keeps origin, an outgoing ask\'s forPeer, and sanitised proposals across a reload', () => {
+  const file = join(tmp(), 'asks.json')
+  let t = 1000
+  const st = S.createAsksStore({ file, now: () => t })
+  const tag = { peer: 'beta', askId: 'a'.repeat(16) }
+  const out = st.create({ peer: 'beta', dir: 'out', text: 'run the probe', origin: 'agent', forPeer: tag })
+  const typed = st.create({ peer: 'beta', dir: 'out', text: 'typed', origin: 'nonsense', forPeer: { peer: 'Bad Name', askId: 'x' } })
+  const inc = st.create({ peer: 'beta', dir: 'in', askId: 'b'.repeat(16), text: 'start it', forPeer: tag })
+  assert.equal(out.origin, 'agent'); assert.deepEqual(out.forPeer, tag)
+  assert.equal(typed.origin, 'person'); assert.equal(typed.forPeer, null)
+  assert.equal(inc.origin, 'person'); assert.equal(inc.forPeer, null, 'only an outgoing ask carries a tag')
+  st.set(inc.id, { proposals: [
+    { index: 0, kind: 'spawn', action: { kind: 'spawn', cwd: '/w', prompt: 'p' }, risk: 'r'.repeat(300), mode: 'auto', state: 'applied', error: null, gateNote: null, at: 5 },
+    { index: 1, kind: 'arm_resume', action: { kind: 'arm_resume' }, mode: 'auto', state: 'applied' },
+    { index: 2, kind: 'prompt', action: 'not an object', mode: 'auto', state: 'applied' },
+    'junk',
+  ] })
+  const kept = st.get(inc.id).proposals
+  assert.equal(kept.length, 1); assert.equal(kept[0].risk.length, 200); assert.equal(kept[0].state, 'applied')
+  st.flush()
+  const again = S.createAsksStore({ file, now: () => t })
+  assert.deepEqual(again.get(out.id).forPeer, tag); assert.equal(again.get(out.id).origin, 'agent')
+  assert.deepEqual(again.get(inc.id).proposals, kept)
 })
 
 console.log(`\npeer harness: ${pass} checks passed`)

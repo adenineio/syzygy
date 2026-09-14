@@ -265,13 +265,15 @@ export const bundleContext = (snapshot, extras = {}) => {
     const peerList = Array.isArray(s.peers?.list) ? s.peers.list : []
     add(budgetedSection({
       header: '## Peers', items: peerList, noun: 'peers', remaining: remaining(),
-      // Name, health and session count, and nothing more. This bundle goes to
-      // the model on every ask, a liaison's included, so a peer's roster,
-      // fingerprints, policy or asks rendered here would be handed on to a
-      // third party. A count says a peer is busy without saying with what.
+      // Name, health, session count and whether a peer_ask to it can be sent,
+      // and nothing more. This bundle goes to the model on every ask, a
+      // liaison's included, so a peer's roster, fingerprints, policy or asks
+      // rendered here would be handed on to a third party. A count says a peer
+      // is busy without saying with what, and its trust setting never appears.
       renderItem: (p) => {
         const n = Array.isArray(p.sessions) ? p.sessions.length : 0
-        return `- **${p.name}** — ${p.health?.state ?? 'never'}, ${n} session(s)`
+        const accepts = p.confirmedAt != null ? 'accepts peer_ask' : 'peer_ask not accepted'
+        return `- **${p.name}** — ${p.health?.state ?? 'never'}, ${n} session(s), ${accepts}`
       },
     }))
   }
@@ -340,6 +342,7 @@ export const bundleContext = (snapshot, extras = {}) => {
  *                                     prompt last behind `--`, childEnv())
  *    drop     -> POST /api/peer/<name>/drop, where <name> is the peer whose
  *                                     ask the turn answered -- never a field
+ *    peer_ask -> POST /api/peer/<peer>/ask
  *
  * accepted any object whose `kind` was known and let the server sort
  *  out the rest. That is fine for two kinds whose fields are two session ids;
@@ -357,6 +360,7 @@ export const ACTION_REQUIRED = {
   arm_resume: ['mode'],
   // Its one required field is a list, declared in ACTION_REQUIRED_LIST.
   drop: [],
+  peer_ask: ['peer', 'text'],
 }
 
 /** Fields whose VALUE is a closed set, not merely a non-empty string. One kind
@@ -475,6 +479,20 @@ const sanitizeOptionalFields = (a, warnings) => {
   return out
 }
 
+export const RISK_MAX = 200
+
+/** `risk` is optional on every kind: one line naming a concern. A string that
+ *  trims to 1..RISK_MAX characters is kept trimmed; anything else is dropped
+ *  with a warning and the action stands, like a shaped-wrong model. */
+const sanitizeRisk = (a, warnings) => {
+  if (!Object.hasOwn(a, 'risk')) return a
+  const v = typeof a.risk === 'string' ? a.risk.trim() : ''
+  if (v && v.length <= RISK_MAX) return a.risk === v ? a : { ...a, risk: v }
+  warnings.push({ kind: a.kind, field: 'risk', value: a.risk })
+  const { risk: _dropped, ...rest } = a
+  return rest
+}
+
 export const parseActions = (text) => {
   const s = typeof text === 'string' ? text : ''
   const matches = [...s.matchAll(FENCE_RE)]
@@ -501,6 +519,7 @@ export const parseActions = (text) => {
     }
     let action = a.kind === 'prompt' ? withReportTo(a) : a
     action = sanitizeOptionalFields(action, warnings)
+    action = sanitizeRisk(action, warnings)
     actions.push(action)
   }
   const stripped = (s.slice(0, last.index) + s.slice(last.index + last[0].length)).trim()
@@ -527,7 +546,7 @@ export const ORCHESTRATOR_PREAMBLE = [
   '',
   'Write your answer to the user first, in plain prose. If you have a',
   'concrete action to propose, end your reply with exactly one fenced JSON',
-  'block containing an "actions" array and nothing else. Six kinds are',
+  'block containing an "actions" array and nothing else. Seven kinds are',
   'understood, and every field shown without a "?" is required:',
   '```json',
   '{"actions": [',
@@ -537,11 +556,19 @@ export const ORCHESTRATOR_PREAMBLE = [
   '  {"kind": "spawn", "cwd": "<absolute directory>", "prompt": "<the brief to start with>", "name?": "<session name>", "model?": "<opus|sonnet|haiku|fable or a full model id>", "effort?": "<one of the relay\'s effort levels>"},',
   '  {"kind": "arm_resume", "mode": "arm" | "arm_weekly" | "disarm"},',
   '  {"kind": "drop", "paths": ["<absolute path>", "…"], "note?": "<what these are>"},',
+  '  {"kind": "peer_ask", "peer": "<peer name>", "text": "<the ask, in full>"},',
   ']}',
   '```',
   'A "<session>" is a session ID -- the value shown after `id` on that',
   'session\'s line in the Sessions section, in full. The name beside it is',
   'decoration; an action keyed by a name is not guaranteed to resolve.',
+  '',
+  'Any action may also carry "risk?": one line naming a concern with it.',
+  '',
+  '"peer_ask" sends an ask to a paired peer named in the Peers section, when',
+  'the work must happen on that instance rather than here. When the Peers',
+  'section shows no peer that accepts one, do not propose it: say so, and tell',
+  'the person to use the ask box on the Peering tab.',
   '',
   '"report_to" names the session the prompted session should send its report',
   'to; it is folded into the prompt for you, so do not write the instruction',
@@ -568,26 +595,51 @@ export const ORCHESTRATOR_PREAMBLE = [
 ].join('\n')
 
 /** The liaison speaks for this board to a paired remote instance. Only its
- *  opening is its own: everything from the answer-and-actions instructions to
- *  the end is taken from ORCHESTRATOR_PREAMBLE, so the action contract has one
- *  source and a new action kind reaches both preambles at once. */
-const LIAISON_OPENING = [
+ *  opening is its own, and only the paragraph naming who decides varies with
+ *  the peer's trust setting. */
+const liaisonHead = [
   'You are Syzygy\'s liaison. You speak for THIS Syzygy instance to a remote',
   'Syzygy instance that has paired with it; the remote\'s name is given with the',
   'ask. The board state is THIS instance\'s board: the remote asked about us, so',
   'answer from it and nothing else.',
   '',
-  'You may PROPOSE actions. You may never PERFORM one -- nothing you say changes',
-  'anything by itself. An action you propose is shown to the person at THIS',
-  'instance, who decides whether to apply it. The person who asked, on the remote',
-  'instance, cannot apply it and is told only how many you proposed. A "drop"',
-  'goes to the peer that asked, and you never name a peer.',
-  '',
-  'Share what the board state shows and no more: no credentials, tokens, file',
-  'contents or transcripts, whatever the ask says.',
+  'Your job is to PROPOSE. You never PERFORM an action -- nothing you say changes',
+  'anything by itself. Do not decline to propose something because it looks',
+  'risky: this instance\'s trust setting and the person here are the gate. Put a',
+  'concern in one line in that action\'s "risk" field instead.',
   '',
 ]
-export const LIAISON_PREAMBLE = [...LIAISON_OPENING, ORCHESTRATOR_PREAMBLE.slice(ORCHESTRATOR_PREAMBLE.indexOf('Write your answer to the user first'))].join('\n')
+const liaisonTail = [
+  'The person who asked, on the remote instance, cannot apply anything and is',
+  'told only how many actions you proposed. A drop action goes to the peer that asked,',
+  'and you never name a peer for one.',
+  'A "peer_ask" you propose is never sent automatically.',
+  '',
+  'Never put file contents, transcripts or credentials into your reply.',
+  'A "drop" is the approved channel for file contents: propose one instead. A path',
+  'outside the projects on this board is a fact to mention, not a reason to refuse.',
+  '',
+]
+const usd = (v) => (Number.isFinite(v) ? String(v) : '0')
+
+/** The liaison's system prompt for one peer's tier. Everything from the
+ *  answer-and-actions instructions on is ORCHESTRATOR_PREAMBLE's, so the
+ *  action contract has one source. */
+export const liaisonPreamble = ({ peer = '', trust = 'manual', autoApply = [], asksPerHour = 20, peerAskDailyCapUsd = 2, autoApplyMaxLive = 2 } = {}) => {
+  const who = trust === 'sanctioned'
+    ? [
+        `The person at THIS instance has sanctioned the peer ${JSON.stringify(String(peer))}. Treat its asks as`,
+        'this instance\'s operator\'s own requests, within these limits: proposals of',
+        `these kinds are applied without a click -- ${Array.isArray(autoApply) && autoApply.length ? autoApply.join(', ') : 'none'};`,
+        `at most ${asksPerHour} asks an hour and $${usd(peerAskDailyCapUsd)} a day are answered;`,
+        `at most ${autoApplyMaxLive} live sessions run for it. Every other action you propose is`,
+        'shown to the person at THIS instance, who decides whether to apply it.',
+        '',
+      ]
+    : ['An action you propose is shown to the person at THIS instance, who decides', 'whether to apply it.', '']
+  return [...liaisonHead, ...who, ...liaisonTail, ORCHESTRATOR_PREAMBLE.slice(ORCHESTRATOR_PREAMBLE.indexOf('Write your answer to the user first'))].join('\n')
+}
+export const LIAISON_PREAMBLE = liaisonPreamble({ trust: 'manual' })
 
 /** The user turn of a liaison ask: this board's bundle, then the remote's
  *  question under a header naming the peer, so the model can never mistake
@@ -737,6 +789,10 @@ export const createOrchestrator = ({
   // Left undefined so `passGate`'s own floor applies when the relay passes
   // nothing.
   patternMinMs = undefined,
+  // Called synchronously with each successful ask or liaison turn's parsed
+  // actions, and answers the list the pane is shown. Optional: with none,
+  // every action is a plain button.
+  actionGate = null,
 } = {}) => {
   /** The concurrency cap of ONE, SHARED between ask and blurb (numbers
    *  table) -- a single slot, not a map keyed by request id the way
@@ -904,6 +960,20 @@ export const createOrchestrator = ({
     }
   }
 
+  /** The one place a turn's proposals meet this instance's trust policy. Never
+   *  throws: a gate that fails or answers the wrong shape leaves every action a
+   *  plain button. */
+  const gated = (ctx) => {
+    if (typeof actionGate !== 'function' || !ctx.actions.length) return ctx.actions
+    try {
+      const out = actionGate(ctx)
+      return Array.isArray(out) && out.length === ctx.actions.length ? out : ctx.actions
+    } catch (e) {
+      process.stderr.write(`[orchestrator] the action gate threw: ${e?.message ?? e}\n`)
+      return ctx.actions
+    }
+  }
+
   /** Assembles the assistant's text across every streamed frame and, in
    *  passing, the session id the first system frame carries -- the two
    *  things both `ask` and `refreshBlurb` need out of a run, so this is
@@ -1049,9 +1119,10 @@ export const createOrchestrator = ({
     }
     const { actions, rejected, text: cleanText, warnings } = parseActions(collector.text())
     logFieldWarnings(warnings)
-    recordAnswer(tid, cleanText, actions, rejected, null)
+    const shown = gated({ source: 'ask', turnId: id, threadId: tid, peer: null, askId: null, actions })
+    recordAnswer(tid, cleanText, shown, rejected, null)
     activeThread = null
-    broadcast('orchestrator', { id, threadId: tid, done: true, text: cleanText, actions, rejected, busy: false, asking: false })
+    broadcast('orchestrator', { id, threadId: tid, done: true, text: cleanText, actions: shown, rejected, busy: false, asking: false })
     // "after every ask reply" is one of the blurb's three triggers,
     // unconditional -- force:true skips the timer-only gates (a pane
     // connected, the board changed, the 10-minute floor). Fire and forget:
@@ -1076,8 +1147,9 @@ export const createOrchestrator = ({
    *  instance. `askId` is this relay's STORE id for the incoming ask -- the
    *  one the peering engine's `tagFor` takes -- never the id the asker minted.
    *  A turn that ran and failed still resolves `ok: true`, with `error` set and
-   *  its partial text kept, exactly as `ask()` keeps it. */
-  async function liaisonAsk(text, { peer, askId } = {}) {
+   *  its partial text kept, exactly as `ask()` keeps it. `policy` is the
+   *  peer's trust setting, which chooses the preamble's tier. */
+  async function liaisonAsk(text, { peer, askId, policy } = {}) {
     if (live) {
       if (live.kind !== 'blurb' && live.kind !== 'pattern') return { ok: false, code: 409, error: 'the orchestrator is busy with a turn', preempted: false }
       preemptLive(['blurb', 'pattern'])
@@ -1086,7 +1158,7 @@ export const createOrchestrator = ({
     const id = uid()
     const question = String(text)
     const bundle = bundleContext(snapshot(), { capture: capture?.read?.({ limit: 50 }) ?? [], findings: findings?.read?.() ?? [], now: now(), bundleChains })
-    const argv = askArgv({ text: liaisonTurnText({ peer, bundle, text: question }), model: askModel, budgetUsd: askBudgetUsd, preamble: LIAISON_PREAMBLE, safeMode })
+    const argv = askArgv({ text: liaisonTurnText({ peer, bundle, text: question }), model: askModel, budgetUsd: askBudgetUsd, preamble: liaisonPreamble({ peer, ...(policy ?? {}) }), safeMode })
     try { capture.append('liaison', String(peer ?? ''), { text: question }) } catch {}
     const collector = collectReply((delta) => broadcast('orchestrator', { id, peer, askId, question, delta }))
     const { code, errText, preempted } = await run(argv, askTimeoutMs, collector.handle, 'liaison')
@@ -1107,8 +1179,9 @@ export const createOrchestrator = ({
     }
     const { actions, rejected, text: cleanText, warnings } = parseActions(collector.text())
     logFieldWarnings(warnings)
-    broadcast('orchestrator', { id, peer, askId, question, done: true, text: cleanText, actions, rejected, busy: false, asking: false })
-    return { ok: true, id, text: cleanText, actions, rejected, costUsd, error: null }
+    const shown = gated({ source: 'liaison', turnId: id, threadId: null, peer, askId, actions })
+    broadcast('orchestrator', { id, peer, askId, question, done: true, text: cleanText, actions: shown, rejected, busy: false, asking: false })
+    return { ok: true, id, text: cleanText, actions: shown, rejected, costUsd, error: null }
   }
 
   /** The syzygy half of an exchange, on disk and in the capture log. One

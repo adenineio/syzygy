@@ -15,7 +15,7 @@ const {
   bundleContext, parseActions, askArgv, ORCHESTRATOR_PREAMBLE, BUNDLE_BUDGET_BYTES, KNOWN_ACTION_KINDS,
   createOrchestrator, clipToWordBoundary, BLURB_MAX_CHARS, DEFAULT_BLURB_MIN_MS,
   ACTION_REQUIRED, ACTION_FIELD_RE, reportInstruction, FINDINGS_IN_BUNDLE, DEFAULT_ASK_MODEL,
-  LIAISON_PREAMBLE, liaisonTurnText,
+  LIAISON_PREAMBLE, liaisonTurnText, liaisonPreamble, RISK_MAX,
 } = await import(join(ROOT, 'syzygy', 'bridge', 'orchestrator.mjs'))
 
 let pass = 0
@@ -225,7 +225,7 @@ await ok('## Peers renders name, health and session count, and nothing else from
       health: { state: 'up', rttMs: 4 }, sessions: [{ id: 's9', name: 'GHOST-SESSION-NAME' }, { id: 's8', name: 'other' }], counts: { asksIn: 1 } }],
     asks: [{ id: 'a', peer: 'vm', dir: 'out', text: 'ASK-TEXT-SHOULD-NOT-APPEAR', reply: 'REPLY-SHOULD-NOT-APPEAR' }], jobs: [] }
   const out = bundleContext(f)
-  assert.match(out, /## Peers\n- \*\*vm\*\* — up, 2 session\(s\)\n/)
+  assert.match(out, /## Peers\n- \*\*vm\*\* — up, 2 session\(s\), peer_ask not accepted\n/)
   for (const leak of ['FP-SHOULD-NOT-APPEAR', 'vm-host', 'GHOST-SESSION-NAME', 'ASK-TEXT-SHOULD-NOT-APPEAR', 'REPLY-SHOULD-NOT-APPEAR', 'AA:BB', '10.0.0.1'])
     assert.equal(out.includes(leak), false, leak)
   assert.ok(out.indexOf('## Peers') > out.indexOf('## Recent activity') || !out.includes('## Recent activity'))
@@ -447,11 +447,11 @@ await ok('arm_resume is understood, and its mode is checked by VALUE', () => {
   }
 })
 
-// The set is exactly the six kinds the parser documents, so a kind added in
+// The set is exactly the seven kinds the parser documents, so a kind added in
 // code without a documented line fails here.
-await ok('KNOWN_ACTION_KINDS is exactly link, prompt, dispatch, spawn, arm_resume and drop', () => {
-  assert.deepEqual([...KNOWN_ACTION_KINDS].sort(), ['arm_resume', 'dispatch', 'drop', 'link', 'prompt', 'spawn'])
-  assert.deepEqual(Object.keys(ACTION_REQUIRED).sort(), ['arm_resume', 'dispatch', 'drop', 'link', 'prompt', 'spawn'])
+await ok('KNOWN_ACTION_KINDS is exactly link, prompt, dispatch, spawn, arm_resume, drop and peer_ask', () => {
+  assert.deepEqual([...KNOWN_ACTION_KINDS].sort(), ['arm_resume', 'dispatch', 'drop', 'link', 'peer_ask', 'prompt', 'spawn'])
+  assert.deepEqual(Object.keys(ACTION_REQUIRED).sort(), ['arm_resume', 'dispatch', 'drop', 'link', 'peer_ask', 'prompt', 'spawn'])
 })
 
 // ------------------------------------------------------------ drop actions
@@ -468,7 +468,7 @@ await ok('a drop action needs a non-empty list of non-empty paths, and names no 
     assert.equal(parseActions('x ' + drop(bad)).rejected.length, 1)
   }
   // Every kind that already existed still validates unchanged.
-  assert.equal(KNOWN_ACTION_KINDS.size, 6)
+  assert.equal(KNOWN_ACTION_KINDS.size, 7)
 })
 
 await ok('a drop action is capped: 2,000 paths of 4,096 characters, and a note is a string', () => {
@@ -1870,12 +1870,13 @@ await ok('the liaison preamble proposes, never performs, and carries the one act
   assert.match(LIAISON_PREAMBLE, /never PERFORM/)
   assert.match(LIAISON_PREAMBLE, /the person at THIS\s+instance/)
   assert.match(LIAISON_PREAMBLE, /```json/)
-  // The sixth kind reaches both preambles through the one shared block, and
+  // The seventh kind reaches both preambles through the one shared block, and
   // only the liaison is told where a drop goes.
   for (const pre of [ORCHESTRATOR_PREAMBLE, LIAISON_PREAMBLE]) {
-    assert.ok(pre.includes('Six kinds are'), 'the kind count')
-    assert.ok(!pre.includes('Five kinds are'))
+    assert.ok(pre.includes('Seven kinds are'), 'the kind count')
+    assert.ok(!pre.includes('Six kinds are'))
     assert.ok(pre.includes('{"kind": "drop", "paths": ["<absolute path>", "…"], "note?": "<what these are>"},'))
+    assert.ok(pre.includes('{"kind": "peer_ask", "peer": "<peer name>", "text": "<the ask, in full>"},'))
   }
   assert.match(LIAISON_PREAMBLE, /never name a peer/)
   assert.doesNotMatch(ORCHESTRATOR_PREAMBLE, /never name a peer/)
@@ -2363,6 +2364,108 @@ await ok('the day total survives a restart through the real store', async () => 
   assert.equal(r.ok, false)
   assert.match(r.error, /\$0\.50 today/)
   assert.equal(spawned, 1, 'the restarted relay did not spawn over the cap')
+})
+
+// ---- the agent loop ------------------------------------------------------
+const fence = (actions, prose = 'ok') => prose + '\n```json\n' + JSON.stringify({ actions }) + '\n```'
+
+await ok('agent loop: peer_ask is the seventh kind and needs a peer and text', () => {
+  assert.deepEqual(ACTION_REQUIRED.peer_ask, ['peer', 'text'])
+  assert.equal(KNOWN_ACTION_KINDS.size, 7)
+  const r = parseActions(fence([{ kind: 'peer_ask', peer: 'beta', text: 'run the probe' }, { kind: 'peer_ask', peer: 'beta' }, { kind: 'peer_ask', text: 'no peer' }]))
+  assert.equal(r.actions.length, 1); assert.equal(r.rejected.length, 2)
+})
+
+await ok('agent loop: risk is kept trimmed; a misshapen one is dropped with a warning and the action stands', () => {
+  const r = parseActions(fence([
+    { kind: 'spawn', cwd: '/w', prompt: 'p', risk: '  starts a session  ' },
+    { kind: 'link', from: 'a', to: 'b', risk: 'x'.repeat(RISK_MAX + 1) },
+    { kind: 'prompt', to: 'a', text: 't', risk: 7 },
+  ]))
+  assert.equal(r.actions.length, 3)
+  assert.equal(r.actions[0].risk, 'starts a session')
+  assert.equal(Object.hasOwn(r.actions[1], 'risk'), false); assert.equal(Object.hasOwn(r.actions[2], 'risk'), false)
+  assert.deepEqual(r.warnings.map((w) => [w.kind, w.field]), [['link', 'risk'], ['prompt', 'risk']])
+})
+
+await ok('agent loop: the orchestrator preamble teaches peer_ask, risk and the Peering tab fallback', () => {
+  assert.match(ORCHESTRATOR_PREAMBLE, /Seven kinds are/)
+  assert.match(ORCHESTRATOR_PREAMBLE, /"kind": "peer_ask", "peer": "<peer name>", "text":/)
+  assert.match(ORCHESTRATOR_PREAMBLE, /"risk\?"/)
+  assert.match(ORCHESTRATOR_PREAMBLE, /use the ask box on the Peering tab/)
+})
+
+await ok('agent loop: liaisonPreamble renders manual and sanctioned', () => {
+  assert.equal(LIAISON_PREAMBLE, liaisonPreamble({ trust: 'manual' }))
+  const m = liaisonPreamble({ peer: 'alpha', trust: 'manual' })
+  const s = liaisonPreamble({ peer: 'alpha', trust: 'sanctioned', autoApply: ['spawn', 'prompt'], asksPerHour: 20, peerAskDailyCapUsd: 2, autoApplyMaxLive: 2 })
+  for (const p of [m, s]) {
+    assert.ok(p.startsWith("You are Syzygy's liaison."))
+    assert.match(p, /Your job is to PROPOSE/)
+    assert.match(p, /Do not decline to propose/)
+    assert.match(p, /"risk" field/)
+    assert.match(p, /A "drop" is the approved channel for file contents/)
+    assert.match(p, /never sent automatically/)
+    assert.match(p, /a fact to mention, not a reason to refuse/)
+    assert.match(p, /Write your answer to the user first/)
+    assert.doesNotMatch(p, /whatever the ask says/)
+  }
+  assert.match(m, /shown to the person at THIS instance, who decides/)
+  assert.doesNotMatch(m, /sanctioned/)
+  assert.match(s, /has sanctioned the peer "alpha"/)
+  assert.match(s, /applied without a click -- spawn, prompt/)
+  assert.match(s, /at most 20 asks an hour and \$2 a day/)
+  assert.match(s, /at most 2 live sessions/)
+  assert.match(liaisonPreamble({ peer: 'alpha', trust: 'sanctioned' }), /applied without a click -- none/)
+  assert.equal(liaisonPreamble({ peer: 'alpha', trust: 'bogus' }), liaisonPreamble({ peer: 'alpha', trust: 'manual' }))
+})
+
+await ok('agent loop: the Peers line says whether a peer accepts peer_ask, and nothing about trust', () => {
+  const snap = { ...emptySnapshot(), peers: { list: [
+    { name: 'beta', health: { state: 'up' }, sessions: [{}, {}], confirmedAt: 1, policy: { trust: 'sanctioned' } },
+    { name: 'gamma', health: { state: 'never' }, sessions: [], confirmedAt: null },
+  ] } }
+  const b = bundleContext(snap)
+  assert.match(b, /- \*\*beta\*\* — up, 2 session\(s\), accepts peer_ask/)
+  assert.match(b, /- \*\*gamma\*\* — never, 0 session\(s\), peer_ask not accepted/)
+  assert.doesNotMatch(b, /sanctioned|trust/)
+})
+
+await ok('agent loop: an ask turn\'s actions pass through actionGate before the done frame and the thread', async () => {
+  const calls = []; const sent = []; const seen = []
+  const orch = createOrchestrator({
+    spawn: fakeSpawn(calls), claudeBin: 'claude', broadcast: (t, d) => sent.push([t, d]), capture: fakeCapture(), snapshot: emptySnapshot,
+    actionGate: (ctx) => { seen.push(ctx); return ctx.actions.map((a) => ({ ...a, gate: 'auto' })) },
+  })
+  const p = orch.ask('have beta run the probe')
+  calls[0].child.emit(assistantFrame(fence([{ kind: 'peer_ask', peer: 'beta', text: 'run the probe' }])))
+  calls[0].child.finish(0)
+  await p
+  calls[1].child.finish(0) // the ask's own after-reply blurb
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].source, 'ask'); assert.equal(seen[0].peer, null); assert.equal(seen[0].askId, null)
+  const done = sent.find(([t, d]) => t === 'orchestrator' && d.done)[1]
+  assert.equal(seen[0].turnId, done.id)
+  assert.equal(done.actions[0].gate, 'auto')
+})
+
+await ok('agent loop: a liaison turn is gated with its peer and ask, follows the policy, and a throwing gate passes actions through', async () => {
+  const calls = []; const sent = []; const seen = []
+  const orch = createOrchestrator({
+    spawn: fakeSpawn(calls), claudeBin: 'claude', broadcast: (t, d) => sent.push([t, d]), capture: fakeCapture(), snapshot: emptySnapshot,
+    actionGate: (ctx) => { seen.push(ctx); throw new Error('the gate broke') },
+  })
+  const p = orch.liaisonAsk('start a collector', {
+    peer: 'alpha', askId: 'a'.repeat(16),
+    policy: { trust: 'sanctioned', autoApply: ['spawn'], asksPerHour: 20, peerAskDailyCapUsd: 2, autoApplyMaxLive: 2 },
+  })
+  calls[0].child.emit(assistantFrame(fence([{ kind: 'spawn', cwd: '/w', prompt: 'collect', risk: 'starts a session' }])))
+  calls[0].child.finish(0)
+  const r = await p
+  assert.equal(seen[0].source, 'liaison'); assert.equal(seen[0].peer, 'alpha'); assert.equal(seen[0].askId, 'a'.repeat(16))
+  assert.equal(r.actions.length, 1); assert.equal(Object.hasOwn(r.actions[0], 'gate'), false); assert.equal(r.actions[0].risk, 'starts a session')
+  const argv = calls[0].argv
+  assert.match(argv[argv.indexOf('--append-system-prompt') + 1], /has sanctioned the peer "alpha"/)
 })
 
 console.log(`orchestrator-harness: ${pass} passed`)

@@ -26,6 +26,7 @@ import {
   fpBytes, fpEqual, formatPairCode, parsePairCode, pairProof, pairAck, hexEqual,
   derivePairSecret, ghostRoster, isTerminalAsk, healthOf, retryLadder,
   signRequest, capCheck, ASK_TEXT_MAX, sanitizeForPeer,
+  validatePolicyPatch, gateActions, peerAskCap,
 } from './peer.mjs'
 import { readPeers, writePeers, ensureCert, createAsksStore, ASKS_FILE } from './peers-store.mjs'
 import { createJobsStore, JOBS_FILE } from './peer-jobs.mjs'
@@ -38,7 +39,6 @@ const FLUSH_MS = 4000
 const SWEEP_MS = 60_000
 const PAIR_LIMIT = 10
 const PAIR_WINDOW_MS = 60_000
-const POLICY_MAX = 1000
 const HOST_MAX = 253
 const NAME_ERROR = 'name must be lowercase letters, digits and dashes, 1-32'
 const ASK_ID_RE = /^[0-9a-f]{16,64}$/
@@ -74,6 +74,11 @@ export const createPeerLink = ({
   // root, every worktree, every live session's root. Never read at
   // construction time -- the caller's own scan is what stays current.
   dropRoots = () => [],
+  // Applies one action the gate let through without a click, tagged for the
+  // peer and ask it serves; answers `{ ok, error }`.
+  applyAction = async () => ({ ok: false, error: 'this relay cannot apply actions' }),
+  // How many live sessions on this board are working for a peer.
+  liveForPeer = () => 0,
   log = (m) => process.stderr.write('peering: ' + m + '\n'),
 }) => {
   const helloMs = Number(env.SZG_PEER_HELLO_MS) > 0 ? Number(env.SZG_PEER_HELLO_MS) : HELLO_MS
@@ -217,7 +222,7 @@ export const createPeerLink = ({
         localFingerprint: doc.fingerprint,
         pairedAt: p.pairedAt,
         confirmedAt: p.confirmedAt,
-        policy: { asksPerHour: p.policy.asksPerHour, peerAskDailyCapUsd: p.policy.peerAskDailyCapUsd },
+        policy: { ...p.policy, autoApply: [...p.policy.autoApply] },
         health: healthOf({ dials: !!p.address, ...r, now: t, helloMs }),
         sessions: [...(r.roster ?? [])],
         counts: { asksIn: live(p.name, 'in'), asksOut: live(p.name, 'out'), jobsActive: jobCounts.jobsActive, jobsFailed: jobCounts.jobsFailed },
@@ -247,6 +252,8 @@ export const createPeerLink = ({
         elapsedMs: Number.isFinite(e.t) ? (isTerminalAsk(e.state) ? (e.answeredAt ?? e.updatedAt ?? t) : t) - e.t : 0,
         actionsProposed: e.actionsProposed,
         costUsd: e.costUsd,
+        origin: e.origin,
+        proposals: (e.proposals ?? []).map(({ kind, mode, state, risk, error }) => ({ kind, mode, state, risk, error })),
       })),
       jobs: dropsPayload.jobs,
     }
@@ -500,7 +507,7 @@ export const createPeerLink = ({
 
     let r
     try {
-      r = orchestrator ? await orchestrator.liaisonAsk(e.text, { peer: e.peer, askId: e.id }) : { ok: false, code: 503, error: 'no orchestrator' }
+      r = orchestrator ? await orchestrator.liaisonAsk(e.text, { peer: e.peer, askId: e.id, policy: record.policy }) : { ok: false, code: 503, error: 'no orchestrator' }
     } catch (err) {
       r = { ok: false, code: 500, error: String(err?.message ?? err) }
     }
@@ -680,7 +687,7 @@ export const createPeerLink = ({
 
   /** A dry run signs exactly what would be sent, with a real timestamp and
    *  nonce, and sends, stores and broadcasts nothing. */
-  function localAsk(name, { text, dryRun }) {
+  function localAsk(name, { text, dryRun, origin, forAsk }) {
     const p = recordNamed(name)
     if (!p) return reply(404, { error: 'no such peer' })
     if (!p.confirmedAt) return reply(409, { error: 'confirm the fingerprints first' })
@@ -694,11 +701,128 @@ export const createPeerLink = ({
       key.fill(0)
       return reply(200, { envelope: { method: 'POST', path: '/peer/ask', canonical: signed.canonical, headers: signed.headers, bodySha256: signed.bodySha256, body } })
     }
-    const e = asks.create({ peer: p.name, dir: 'out', text: t })
+    // An agent's ask counts against the peer's hourly allowance; a person's
+    // ask from the Peering tab never does.
+    const agent = origin === 'agent'
+    if (agent) {
+      const cap = peerAskCap({ asks: asks.all(), peer: p.name, now: now(), perHour: p.policy.peerAsksPerHour })
+      if (!cap.ok) return reply(409, { error: `${p.name} has had its ${p.policy.peerAsksPerHour} peer_ask(s) for this hour — use the ask box on the Peering tab` })
+    }
+    const e = asks.create({ peer: p.name, dir: 'out', text: t, origin: agent ? 'agent' : 'person', forPeer: typeof forAsk === 'string' ? tagFor(forAsk) : null })
     if (p.address) setImmediate(() => { flushOut(p) })
     else asks.enqueueOutbound(e.id)
     broadcastIfChanged()
     return reply(200, { ok: true, id: e.id, askId: e.askId, state: e.state })
+  }
+
+  // ---- the action gate ----------------------------------------------------
+  //
+  // The orchestrator hands every turn's proposals here before it shows them.
+  // A local turn may send a peer_ask to a sanctioned peer; a liaison turn for a
+  // sanctioned peer may apply the kinds that peer's policy lists. Everything
+  // else stays a button for the person here to press.
+
+  const countLive = (name) => {
+    try { return Number(liveForPeer(name)) || 0 } catch (e) { log(`could not count live sessions: ${e?.message ?? e}`); return 0 }
+  }
+
+  function gate({ source, turnId = null, threadId = null, askId = null, actions } = {}) {
+    const list = Array.isArray(actions) ? actions : []
+    if (!list.length || !started || stopped) return list
+    load()
+    let decisions = []
+    let entry = null
+    if (source === 'ask') {
+      // Counted per peer across this turn too, so one turn cannot overrun the
+      // hourly allowance with several peer_asks at once.
+      const extra = new Map()
+      decisions = list.map((a) => {
+        if (a?.kind !== 'peer_ask') return { gate: 'button', gateNote: null }
+        const rec = typeof a.peer === 'string' ? recordNamed(a.peer) : null
+        if (!rec) return { gate: 'button', gateNote: 'no such peer' }
+        const base = peerAskCap({ asks: asks.all(), peer: rec.name, now: now(), perHour: rec.policy.peerAsksPerHour }).count
+        const [d] = gateActions({
+          source, trust: rec.policy.trust, confirmed: !!rec.confirmedAt,
+          peerAskCount: base + (extra.get(rec.name) ?? 0), peerAsksPerHour: rec.policy.peerAsksPerHour, actions: [a],
+        })
+        if (d.gate === 'auto') extra.set(rec.name, (extra.get(rec.name) ?? 0) + 1)
+        return d
+      })
+    } else if (source === 'liaison') {
+      entry = typeof askId === 'string' ? asks.get(askId) : null
+      const rec = entry && entry.dir === 'in' ? recordNamed(entry.peer) : null
+      if (!rec) return list
+      decisions = gateActions({
+        source, trust: rec.policy.trust, autoApply: rec.policy.autoApply,
+        liveForPeer: countLive(rec.name), autoApplyMaxLive: rec.policy.autoApplyMaxLive, actions: list,
+      })
+    } else {
+      return list
+    }
+    const autos = decisions.flatMap((d, i) => (d.gate === 'auto' ? [i] : []))
+    if (entry && autos.length) {
+      asks.set(entry.id, { proposals: autos.map((i) => ({
+        index: i, kind: list[i].kind, action: list[i], risk: list[i].risk ?? null,
+        mode: 'auto', state: 'applying', error: null, gateNote: null, at: now(),
+      })) })
+      broadcastIfChanged()
+    }
+    if (autos.length) runApplies({ turnId, threadId, entry, list, autos }).catch((e) => log(`automatic applies failed: ${e?.message ?? e}`))
+    return list.map((a, i) => ({ ...a, gate: decisions[i].gate, ...(decisions[i].gateNote ? { gateNote: decisions[i].gateNote } : {}) }))
+  }
+
+  /** Whether an apply the gate allowed still stands against the record as it
+   *  is now. A person may set the peer back to manual, take the kind off its
+   *  list or forget the peer while an earlier apply of the same turn runs. */
+  const stillAllowed = (entry, action) => {
+    const rec = entry ? recordNamed(entry.peer) : typeof action?.peer === 'string' ? recordNamed(action.peer) : null
+    if (!rec || rec.policy.trust !== 'sanctioned') return false
+    return entry ? rec.policy.autoApply.includes(action?.kind) : true
+  }
+
+  /** The automatic applies of one turn, in order, each checked against the
+   *  peer's record again just before it runs. Each outcome lands on the ask's
+   *  proposal record, and one frame tells the transcript which buttons
+   *  applied. */
+  async function runApplies({ turnId, threadId, entry, list, autos }) {
+    const results = []
+    const settle = (i, ok, error) => {
+      results.push({ index: i, ok, error })
+      const cur = entry ? asks.get(entry.id) : null
+      if (cur) asks.set(cur.id, { proposals: (cur.proposals ?? []).map((p) => (p.index === i ? { ...p, state: ok ? 'applied' : 'failed', error } : p)) })
+    }
+    for (const i of autos) {
+      if (stopped) break
+      if (!stillAllowed(entry, list[i])) {
+        settle(i, false, 'policy changed')
+        continue
+      }
+      let out
+      try {
+        out = await applyAction(list[i], { peer: entry?.peer ?? null, forAsk: entry?.id ?? null })
+      } catch (e) {
+        out = { ok: false, error: String(e?.message ?? e) }
+      }
+      const ok = out?.ok === true
+      settle(i, ok, ok ? null : String(out?.error ?? 'the apply failed').slice(0, ERROR_MAX))
+    }
+    if (stopped) {
+      // An apply that never ran is failed rather than left applying, and
+      // nothing is published once the engine has stopped.
+      const ran = new Set(results.map((r) => r.index))
+      const cur = entry ? asks.get(entry.id) : null
+      if (cur) {
+        asks.set(cur.id, { proposals: (cur.proposals ?? []).map((p) => (
+          autos.includes(p.index) && !ran.has(p.index) ? { ...p, state: 'failed', error: 'the relay stopped' } : p)) })
+      }
+      return
+    }
+    broadcastIfChanged()
+    try {
+      broadcast('orchestrator', { id: turnId, ...(threadId ? { threadId } : {}), ...(entry ? { peer: entry.peer, askId: entry.id } : {}), applied: results })
+    } catch (e) {
+      log(`could not report automatic applies: ${e?.message ?? e}`)
+    }
   }
 
   // ---- the local drop route -------------------------------------------------
@@ -920,16 +1044,29 @@ export const createPeerLink = ({
     return reply(200, { ok: true })
   }
 
-  function setPolicy({ name, asksPerHour, peerAskDailyCapUsd }) {
+  /** A peer that moved keeps its pairing: only where this side dials it
+   *  changes. The pinned fingerprint still has to answer at the new address,
+   *  so a wrong one reads down rather than reaching anyone else. */
+  function setAddress({ name, host, port }) {
     const p = recordNamed(name)
     if (!p) return reply(404, { error: 'no such peer' })
-    if (!Number.isInteger(asksPerHour) || asksPerHour < 0 || asksPerHour > POLICY_MAX) {
-      return reply(400, { error: `asksPerHour must be a whole number from 0 to ${POLICY_MAX}` })
-    }
-    if (!Number.isFinite(peerAskDailyCapUsd) || peerAskDailyCapUsd < 0 || peerAskDailyCapUsd > POLICY_MAX) {
-      return reply(400, { error: `peerAskDailyCapUsd must be a number from 0 to ${POLICY_MAX}` })
-    }
-    const policy = { asksPerHour, peerAskDailyCapUsd }
+    if (!p.address) return reply(409, { error: `${name} dials this side, so there is no address to change` })
+    if (!validBind(host).ok) return reply(400, { error: 'host must be an IP address, and not a wildcard' })
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return reply(400, { error: 'port must be an integer from 1 to 65535' })
+    replaceRecord(p, { ...p, address: { host, port } })
+    broadcastIfChanged()
+    setImmediate(() => { tick() })
+    return reply(200, { ok: true })
+  }
+
+  /** A validated merge: what the local person sent replaces those fields, and
+   *  everything else the record held stands. No peer route reaches this. */
+  function setPolicy(body) {
+    const p = typeof body?.name === 'string' ? recordNamed(body.name) : null
+    if (!p) return reply(404, { error: 'no such peer' })
+    const v = validatePolicyPatch(body)
+    if (!v.ok) return reply(400, { error: v.error })
+    const policy = { ...p.policy, ...v.patch }
     replaceRecord(p, { ...p, policy })
     broadcastIfChanged()
     return reply(200, { ok: true, policy })
@@ -1107,6 +1244,7 @@ export const createPeerLink = ({
         case 'pair/accept': return await pairAccept(b)
         case 'pair/confirm': return pairConfirm(b)
         case 'forget': return forget(b)
+        case 'address': return setAddress(b)
         case 'policy': return setPolicy(b)
         case 'ask/answer': return releaseAsk(b)
         case 'filter/test': return await filterTest(b)
@@ -1126,5 +1264,5 @@ export const createPeerLink = ({
     }
   }
 
-  return { start, stop, flush, payload, tagFor, local, tick }
+  return { start, stop, flush, payload, tagFor, local, tick, gate }
 }

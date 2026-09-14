@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "syzygy-editor",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "A file named in a reply becomes a pressable box in the transcript; pressing it opens that file in an editor split beneath the session's tmux pane, which closes itself when the editor exits. A folder opens in a Finder window instead, on macOS. Ships the syzygy-edit script, an open_in_editor tool and a relative-path instruction. Zero model calls.",
   "author": {
     "name": "adenineio",

@@ -345,6 +345,52 @@ chevron flips instantly rather than animating.
 
 ---
 
+## Parallel implementation
+
+A skill rather than a view. `syzygy:multi-worktree-coordinator` turns one
+planning conversation into several sessions building at the same time: one plan
+per feature, one git worktree and one named Claude Code session per plan, tiled
+into a single tmux window, and merged back by a session whose only job is
+merging.
+
+**The split is the decision worth your attention, so it is the gate.** The
+orchestrating session proposes how the requested features divide into
+right-sized plans, and names the shared files and the cross-plan interfaces up
+front instead of meeting them at merge time. Nothing is written until you
+approve that split. One plan name then becomes the branch, the worktree, the
+session name and the plan file — one name, four uses.
+
+**The plans are committed before anything launches.** A worktree branches from
+committed state, so an uncommitted plan simply does not exist inside the worker
+that is supposed to read it.
+
+**One decision, in one pane.** Workers implement and report `DONE` or `BLOCKED`
+over Claude Code's own cross-session messaging. The merge coordinator verifies
+each branch on disk — commits present, worktree clean — rather than trusting the
+report, then **asks you for approval in its own pane**, merges sequentially with
+the tests run after each merge, and removes the worktrees and branches once it
+is green. A conflict beyond the expected ones stops it and asks you; that is
+the intent, not a failure.
+
+**A worker never inherits the orchestrator's identity.** Each session starts
+with the session-identity environment variables removed, because a leaked
+session id makes a worker write into another session's transcript. The briefing
+file a session boots on carries its identity, its plan path, the commit
+discipline, the no-merge rule and the message vocabulary, so a pane restarted by
+hand reads the same instructions.
+
+The launcher is plain shell — `bash`, `git`, `tmux`, nothing else — and refuses
+before it creates anything: a name that is not kebab-case, a `feature/` branch
+that already exists, a worktree path in the way, or the reserved name
+`merge-coordinator`. If one worktree cannot be created, the ones it has
+already made are rolled back rather than left half-launched.
+
+Key files: `syzygy/skills/multi-worktree-coordinator/SKILL.md` with
+`scripts/mwc.sh` beside it, and `scripts/smoke.sh`, which drives a whole launch
+against a scratch repository, a stub binary and a tmux server of its own.
+
+---
+
 ## The orchestrator
 
 A field under the presence sphere. Ask a question about the **whole board** and
@@ -590,7 +636,8 @@ orchestrator turn under a liaison prompt, from its own board state; that turn
 never continues the other person's own conversation. The answering pane shows
 it in its orchestrator transcript as `from <peer>: …`, with any proposed
 actions as buttons **there** — the person at the answering instance decides
-whether to apply them. The asking side's log shows the reply and `N actions
+whether to apply them, or has decided in advance by sanctioning that peer (see
+trust below). The asking side's log shows the reply and `N actions
 proposed on <peer>`, never the actions themselves. A person's own typed ask
 always takes the orchestrator from a liaison turn, which goes back in line and
 retries after 5 s, 15 s and 45 s.
@@ -601,6 +648,30 @@ row. An ask past either cap — or one that found the orchestrator busy through
 every retry — is **held**: it runs nothing and sends nothing back, and the log
 shows an `Answer` button that lets that one ask through. An ask that sits
 unchanged for 24 hours fails as `stalled`.
+
+**Trust: what a peer's asks may do without a click.** Each peer row has a
+trust setting. `manual`, the default, applies nothing without a click.
+`sanctioned` changes two things:
+
+- **The liaison's proposals of the kinds ticked in that row apply
+  automatically.** Any of `spawn`, `prompt`, `dispatch`, `drop` and `link` can
+  be ticked, with at most two automatic sessions running for that peer by
+  default.
+- **This instance's own orchestrator may send that peer an ask on its own**,
+  at most six an hour by default. Clicking a proposed ask to that peer counts
+  against the same six.
+
+Some things are never automatic: arming limit resume, and an ask to another
+peer proposed while answering a remote question. A changed setting posts
+nothing until **Set trust** is pressed twice within three seconds. Lowering
+it, or forgetting the peer, stops whatever a turn had not yet applied.
+
+Everything applied automatically goes through the same routes a click uses,
+and is marked in the transcript and in the Peering log as applied
+automatically. The liaison is told the setting: it proposes rather than
+refuses, notes any concern beside a proposal, and sends file contents only as
+a drop. The other instance sees nothing new, since an automatic ask is an
+ordinary ask.
 
 **Gestures.** In the ask box, `Enter` sends to the selected peer,
 `Shift+Enter` sends one ask to every confirmed peer, and `Alt+Enter` is a dry
@@ -675,8 +746,10 @@ floor, not a guarantee: it cannot see a secret of a shape it does not know, the
 contents of a file, or a description the other instance's liaison writes in its
 own words. The log is how you watch for those.
 
-**Nothing a peer sends runs here.** An ask becomes a liaison turn that may only
-propose; a proposed action is a button in this instance's own pane and does
+**Nothing a peer sends runs here unless you sanctioned it.** An ask becomes a
+liaison turn that may only propose. Under `sanctioned`, only the kinds you
+ticked for that peer apply, within its caps, and no peer can change its own
+trust setting. Otherwise a proposed action is a button in this instance's own pane and does
 nothing until somebody here clicks it. The asking side is told how many actions
 were proposed and nothing else, and any other field in a reply is ignored.
 
@@ -685,8 +758,8 @@ routes; everything else — any other path or method, a bad signature, a stale
 timestamp, a replayed nonce — is an empty 404. Every request but pairing is
 signed, certificates are pinned by fingerprint on both ends, and the pairing
 code's token is never the stored key. Forgetting a peer revokes it. The
-orchestrator's board summary names each peer, its health and its session count,
-and nothing more. The relay's own listener stays loopback-only and unchanged.
+orchestrator's board summary names each peer, its health, its session count and
+whether it accepts an ask from this orchestrator, and nothing more. The relay's own listener stays loopback-only and unchanged.
 
 **Files.** `peers.json` (mode 0600: pairings, secrets, pinned certificates and
 addresses — none of which ever reaches the pane), `peer-asks.json` (the ask

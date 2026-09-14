@@ -86,9 +86,18 @@ const MCPRM = (() => {
         } else {
           // `applied` is keyed by the WIRE id (`forPeer.askId`), never the
           // store id -- `a.id` and `a.askId` are two different things.
+          // An automatic apply's own proposals (`a.proposals`, mode `auto`)
+          // take precedence over `idx`, which only ever knows about a
+          // record a person's click created.
+          const props = Array.isArray(a.proposals) ? a.proposals.filter((p) => p && p.mode === 'auto') : []
+          const autoOk = props.filter((p) => p.state === 'applied').map((p) => p.kind)
+          const autoBad = props.filter((p) => p.state === 'failed').map((p) => p.kind)
           const kinds = idx.get(a.askId)
-          const applyText = Array.isArray(kinds) && kinds.length ? 'applied: ' + kinds.join(', ') : 'no apply recorded'
-          summary = n + (n === 1 ? ' action' : ' actions') + ' proposed · ' + applyText
+          const parts = []
+          if (autoOk.length) parts.push('auto-applied: ' + autoOk.join(', '))
+          if (autoBad.length) parts.push('failed: ' + autoBad.join(', '))
+          if (!parts.length) parts.push(Array.isArray(kinds) && kinds.length ? 'applied: ' + kinds.join(', ') : 'no apply recorded')
+          summary = n + (n === 1 ? ' action' : ' actions') + ' proposed · ' + parts.join(' · ')
         }
         rows.push({ ...base, dir: a.dir, kind: 'action', summary })
       }

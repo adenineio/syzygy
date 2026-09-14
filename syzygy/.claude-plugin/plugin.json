@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "syzygy",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Syzygy: a live band above the prompt (real context/token meter, session spend, active model, git branch, guardrail count, elapsed time), twenty-two terminal spinners, and a local relay serving a browser dashboard several sessions share.",
   "author": {
     "name": "adenineio",

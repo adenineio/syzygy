@@ -27,7 +27,18 @@ export const NONCE_CACHE_CAP = 10_000
 export const PAIR_TOKEN_MS = 15 * 60_000
 export const HELLO_MS = 15_000
 export const DEFAULT_PEER_PORT = 4318
-export const DEFAULT_POLICY = Object.freeze({ asksPerHour: 20, peerAskDailyCapUsd: 2 })
+export const TRUST_TIERS = Object.freeze(['manual', 'sanctioned'])
+/** The kinds a sanctioned peer's liaison turn may apply without a click.
+ *  `arm_resume` arms a machine-wide behaviour and `peer_ask` can close a loop
+ *  between two instances, so neither is ever here. */
+export const AUTO_APPLY_KINDS = Object.freeze(['spawn', 'prompt', 'dispatch', 'drop', 'link'])
+export const PROPOSAL_KINDS = Object.freeze(['link', 'prompt', 'dispatch', 'spawn', 'drop', 'peer_ask'])
+export const MAX_LIVE_CAP = 50
+const POLICY_NUM_MAX = 1000
+export const DEFAULT_POLICY = Object.freeze({
+  asksPerHour: 20, peerAskDailyCapUsd: 2,
+  trust: 'manual', autoApply: Object.freeze([]), autoApplyMaxLive: 2, peerAsksPerHour: 6,
+})
 export const DEFAULT_RETRY_MS = Object.freeze([5000, 15000, 45000])
 export const STALL_MS = 24 * 3600_000
 export const ASK_KEEP_PER_PEER = 500
@@ -309,6 +320,30 @@ export const forPeerIndex = ({ spawnedBy = [], requests = [], sessions = [] } = 
   for (const r of Array.isArray(requests) ? requests : []) put(r?.session?.sessionId, r?.forPeer)
   for (const s of Array.isArray(sessions) ? sessions : []) put(s?.id, s?.forPeer)
   return out
+}
+
+/** How many sessions run here for one peer: the live sessions carrying its tag,
+ *  plus its spawns the ledger still counts as live -- starting, not yet ruled
+ *  on, or running before their session registers. A spawn whose session is
+ *  already one of the tagged live sessions is counted once, as that session.
+ *  The ledger's live rule is passed in, so this file needs nothing of the
+ *  canvas. */
+export const livePeerSessions = ({ peer, sessions = [], spawnedBy = [], isLiveSpawn, now } = {}) => {
+  if (!validName(peer)) return 0
+  const counted = new Set()
+  let n = 0
+  for (const s of Array.isArray(sessions) ? sessions : []) {
+    if (sanitizeForPeer(s?.forPeer)?.peer !== peer) continue
+    n += 1
+    if (typeof s.id === 'string' && s.id) counted.add(s.id)
+  }
+  if (typeof isLiveSpawn !== 'function') return n
+  for (const r of Array.isArray(spawnedBy) ? spawnedBy : []) {
+    if (!isPlainObject(r) || sanitizeForPeer(r.forPeer)?.peer !== peer) continue
+    if (typeof r.sessionId === 'string' && counted.has(r.sessionId)) continue
+    if (isLiveSpawn(r, now)) n += 1
+  }
+  return n
 }
 
 /** The only view of a session that crosses the link, in both directions: an
@@ -651,6 +686,127 @@ export const capCheck = ({ asks, peer, now = Date.now(), policy } = {}) => {
   if (lastHour >= perHour) return { ok: false, reason: 'asks per hour cap reached' }
   if (spend >= dailyUsd) return { ok: false, reason: 'daily spend cap reached' }
   return { ok: true }
+}
+
+// ---- trust and the agent loop -----------------------------------------------
+
+const wholeIn = (v, max) => Number.isInteger(v) && v >= 0 && v <= max
+
+/** A policy change as the local person sent it. Every field present is checked
+ *  and one bad field refuses the whole patch; a field absent is left out of the
+ *  patch so the stored value stands; any other key is ignored. */
+export const validatePolicyPatch = (body) => {
+  const b = isPlainObject(body) ? body : {}
+  const patch = {}
+  const bad = (field, rule) => ({ ok: false, error: `${field} ${rule}` })
+  if (Object.hasOwn(b, 'asksPerHour')) {
+    if (!wholeIn(b.asksPerHour, POLICY_NUM_MAX)) return bad('asksPerHour', `must be a whole number from 0 to ${POLICY_NUM_MAX}`)
+    patch.asksPerHour = b.asksPerHour
+  }
+  if (Object.hasOwn(b, 'peerAskDailyCapUsd')) {
+    const v = b.peerAskDailyCapUsd
+    if (!Number.isFinite(v) || v < 0 || v > POLICY_NUM_MAX) return bad('peerAskDailyCapUsd', `must be a number from 0 to ${POLICY_NUM_MAX}`)
+    patch.peerAskDailyCapUsd = v
+  }
+  if (Object.hasOwn(b, 'trust')) {
+    if (!TRUST_TIERS.includes(b.trust)) return bad('trust', `must be one of ${TRUST_TIERS.join(', ')}`)
+    patch.trust = b.trust
+  }
+  if (Object.hasOwn(b, 'autoApply')) {
+    if (!Array.isArray(b.autoApply) || b.autoApply.some((k) => !AUTO_APPLY_KINDS.includes(k))) {
+      return bad('autoApply', `may list only ${AUTO_APPLY_KINDS.join(', ')}`)
+    }
+    patch.autoApply = AUTO_APPLY_KINDS.filter((k) => b.autoApply.includes(k))
+  }
+  if (Object.hasOwn(b, 'autoApplyMaxLive')) {
+    if (!wholeIn(b.autoApplyMaxLive, MAX_LIVE_CAP)) return bad('autoApplyMaxLive', `must be a whole number from 0 to ${MAX_LIVE_CAP}`)
+    patch.autoApplyMaxLive = b.autoApplyMaxLive
+  }
+  if (Object.hasOwn(b, 'peerAsksPerHour')) {
+    if (!wholeIn(b.peerAsksPerHour, POLICY_NUM_MAX)) return bad('peerAsksPerHour', `must be a whole number from 0 to ${POLICY_NUM_MAX}`)
+    patch.peerAsksPerHour = b.peerAsksPerHour
+  }
+  return { ok: true, patch }
+}
+
+/** One decision per proposed action: applied without a click, or a button.
+ *  Only this side's own record for the peer feeds it, and a kind is compared
+ *  by exact membership, so nothing a peer sends can widen what applies.
+ *  A local turn may send a `peer_ask` on its own; a liaison turn never may. */
+export const gateActions = ({
+  source, trust = 'manual', autoApply = [], confirmed = false,
+  peerAskCount = 0, peerAsksPerHour = DEFAULT_POLICY.peerAsksPerHour,
+  liveForPeer = 0, autoApplyMaxLive = DEFAULT_POLICY.autoApplyMaxLive, actions = [],
+} = {}) => {
+  const button = (gateNote = null) => ({ gate: 'button', gateNote })
+  const auto = () => ({ gate: 'auto', gateNote: null })
+  let asked = peerAskCount
+  let live = liveForPeer
+  return (Array.isArray(actions) ? actions : []).map((a) => {
+    const kind = isPlainObject(a) ? a.kind : null
+    if (trust !== 'sanctioned') return button()
+    if (source === 'ask') {
+      if (kind !== 'peer_ask') return button()
+      if (!confirmed) return button('the peer is not confirmed')
+      if (asked >= peerAsksPerHour) return button('peer_ask hourly cap reached')
+      asked += 1
+      return auto()
+    }
+    if (source !== 'liaison' || !AUTO_APPLY_KINDS.includes(kind) || !Array.isArray(autoApply) || !autoApply.includes(kind)) return button()
+    if (kind === 'spawn') {
+      if (live >= autoApplyMaxLive) return button('live session cap reached')
+      live += 1
+    }
+    return auto()
+  })
+}
+
+/** Agent asks this side sent a peer in the last rolling hour, clicked or
+ *  automatic alike, against the peer's hourly allowance. */
+export const peerAskCap = ({ asks, peer, now = Date.now(), perHour } = {}) => {
+  let count = 0
+  for (const a of Array.isArray(asks) ? asks : []) {
+    if (!isPlainObject(a) || a.peer !== peer || a.dir !== 'out' || a.origin !== 'agent') continue
+    if (Number.isFinite(a.t) && now - a.t < HOUR_MS) count++
+  }
+  return { ok: count < num(perHour, DEFAULT_POLICY.peerAsksPerHour), count }
+}
+
+const resolveSessionRef = (ref, sessions) => {
+  if (typeof ref !== 'string' || !ref) return null
+  const list = Array.isArray(sessions) ? sessions : []
+  if (list.some((s) => s?.id === ref)) return ref
+  const named = list.filter((s) => s?.name === ref)
+  return named.length === 1 ? named[0].id : null
+}
+
+/** The loopback route and body an applied action posts: exactly what the
+ *  pane's button sends for a click, so an automatic apply is validated,
+ *  tagged and captured the same way. */
+export const applyRequest = (action, { peer = null, forAsk = null, sessions = [] } = {}) => {
+  const a = isPlainObject(action) ? action : {}
+  const tag = typeof forAsk === 'string' && forAsk ? { forAsk } : {}
+  switch (a.kind) {
+    case 'link': {
+      const from = resolveSessionRef(a.from, sessions)
+      const to = resolveSessionRef(a.to, sessions)
+      return from && to ? { path: '/api/link', body: { from, to, note: a.note || '' } } : { error: 'no such session' }
+    }
+    case 'prompt': {
+      const to = resolveSessionRef(a.to, sessions)
+      return to ? { path: '/api/command', body: { targetId: to, verb: 'prompt', payload: { text: a.text || '' }, ...tag } } : { error: 'no such session' }
+    }
+    case 'dispatch':
+      return { path: '/api/request/create', body: { title: a.title, project: a.project || '', ask: a.ask || '', brief: a.brief || null, model: a.model, effort: a.effort, ...tag } }
+    case 'spawn':
+      return { path: '/api/spawn', body: { cwd: a.cwd, name: a.name || '', prompt: a.prompt, model: a.model, effort: a.effort, ...tag } }
+    case 'drop':
+      return validName(peer) ? { path: `/api/peer/${peer}/drop`, body: { paths: a.paths, note: a.note || '' } } : { error: 'no peer on this turn' }
+    case 'peer_ask':
+      return validName(a.peer) ? { path: `/api/peer/${a.peer}/ask`, body: { text: a.text, origin: 'agent', ...tag } } : { error: 'not a peer name' }
+    default:
+      return { error: `${String(a.kind)} is never applied automatically` }
+  }
 }
 
 // ---- health -----------------------------------------------------------------

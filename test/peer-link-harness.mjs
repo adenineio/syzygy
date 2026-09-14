@@ -186,11 +186,13 @@ const { createPeerLink } = await import(join(ROOT, 'syzygy', 'bridge', 'peer-lin
 const ENV = { SZG_PEER_BIND: '127.0.0.1', SZG_PEER_PORT: '0', SZG_PEER_HELLO_MS: '200' }
 const links = []
 const frames = []
-const makeLink = ({ dir, env = ENV, hostname, sessions = () => [], now = Date.now, orchestrator = null, dropRoots = undefined }) => {
+const makeLink = ({ dir, env = ENV, hostname, sessions = () => [], now = Date.now, orchestrator = null, dropRoots = undefined, applyAction = undefined, liveForPeer = undefined }) => {
   const link = createPeerLink({
     dir, env, run: realRun, now, hostname, sessions, orchestrator, log: () => {},
     broadcast: (event, data) => frames.push({ event, data }),
     ...(dropRoots ? { dropRoots } : {}),
+    ...(applyAction ? { applyAction } : {}),
+    ...(liveForPeer ? { liveForPeer } : {}),
   })
   links.push(link)
   return link
@@ -387,8 +389,8 @@ await ok('no secret, certificate, address or code in any payload or frame', asyn
 })
 
 await ok('policy is validated, published and saved', async () => {
-  const policy = { asksPerHour: 3, peerAskDailyCapUsd: 0.5 }
-  const r = await B.local('policy', { name: 'alpha', ...policy })
+  const policy = { ...P.DEFAULT_POLICY, autoApply: [], asksPerHour: 3, peerAskDailyCapUsd: 0.5 }
+  const r = await B.local('policy', { name: 'alpha', asksPerHour: 3, peerAskDailyCapUsd: 0.5 })
   assert.equal(r.status, 200); assert.deepEqual(r.json, { ok: true, policy })
   assert.deepEqual(peerOf(B, 'alpha').policy, policy)
   assert.deepEqual(readJson(join(dirB, S.PEERS_FILE)).peers[0].policy, policy)
@@ -396,6 +398,64 @@ await ok('policy is validated, published and saved', async () => {
   assert.equal((await B.local('policy', { name: 'nobody', ...policy })).status, 404)
   assert.deepEqual(peerOf(B, 'alpha').policy, policy, 'a refused change changes nothing')
   assert.deepEqual(await B.local('no/such/thing', {}), { status: 404, json: { error: 'no such endpoint' } })
+})
+
+await ok('address: the dialling side re-points a peer that moved, and the pinned fingerprint still has to answer there', async () => {
+  // A fresh pair with a long heartbeat, so every dial here is one the case asked for.
+  const QUIET = { ...ENV, SZG_PEER_HELLO_MS: '60000' }
+  const dirD = tmp()
+  const dirE = tmp()
+  let D = makeLink({ dir: dirD, env: QUIET, hostname: 'delta-host' })
+  const E = makeLink({ dir: dirE, env: QUIET, hostname: 'echo-host' })
+  for (const link of [D, E]) {
+    await link.start()
+    assert.equal((await link.local('enable', { enabled: true })).status, 200)
+  }
+  const offer = await D.local('pair/offer', {})
+  assert.equal((await E.local('pair/accept', { code: offer.json.code, name: 'delta' })).status, 200)
+  assert.equal((await D.local('pair/confirm', { name: 'echo-host' })).status, 200)
+  assert.equal((await E.local('pair/confirm', { name: 'delta' })).status, 200)
+  await E.tick()
+  assert.equal(peerOf(E, 'delta').health.state, 'up')
+  const storedAddress = () => readJson(join(dirE, S.PEERS_FILE)).peers[0].address
+  const firstPort = D.payload().port
+
+  // D comes back on a port of the OS's choosing, which the code E accepted never named.
+  await D.stop()
+  D = makeLink({ dir: dirD, env: QUIET, hostname: 'delta-host' })
+  await D.start()
+  const movedPort = D.payload().port
+  assert.notEqual(movedPort, firstPort)
+  await E.tick()
+  assert.equal(peerOf(E, 'delta').health.state, 'down')
+
+  const refusals = [
+    [E, { name: 'nobody', host: '127.0.0.1', port: movedPort }, 404],
+    [D, { name: 'echo-host', host: '127.0.0.1', port: movedPort }, 409],
+    [E, { name: 'delta', host: 'example.com', port: movedPort }, 400],
+    [E, { name: 'delta', host: '0.0.0.0', port: movedPort }, 400],
+    [E, { name: 'delta', host: '127.0.0.1', port: 0 }, 400],
+    [E, { name: 'delta', host: '127.0.0.1', port: '4318' }, 400],
+  ]
+  for (const [link, body, status] of refusals) {
+    assert.equal((await link.local('address', body)).status, status, JSON.stringify(body))
+  }
+  assert.deepEqual(storedAddress(), { host: '127.0.0.1', port: firstPort }, 'a refused change changes nothing')
+  assert.equal(readJson(join(dirD, S.PEERS_FILE)).peers[0].address, null, 'the dialled side still holds no address')
+
+  const r = await E.local('address', { name: 'delta', host: '127.0.0.1', port: movedPort })
+  assert.deepEqual(r, { status: 200, json: { ok: true } })
+  assert.deepEqual(storedAddress(), { host: '127.0.0.1', port: movedPort })
+  const kept = readJson(join(dirE, S.PEERS_FILE)).peers[0]
+  assert.equal(kept.fingerprint, D.payload().fingerprint); assert.equal(typeof kept.confirmedAt, 'number')
+  assert.equal(JSON.stringify(E.payload()).includes('"address"'), false, 'the address never reaches the payload')
+  await E.tick()
+  assert.equal(peerOf(E, 'delta').health.state, 'up', JSON.stringify(peerOf(E, 'delta').health))
+
+  // Pointed at a listener holding another certificate, the dial fails closed.
+  assert.equal((await E.local('address', { name: 'delta', host: '127.0.0.1', port: C.payload().port })).status, 200)
+  await E.tick()
+  assert.equal(peerOf(E, 'delta').health.state, 'down')
 })
 
 for (const link of links) await link.stop()
@@ -409,23 +469,36 @@ for (const link of links) await link.stop()
 const fakeOrchestrator = () => {
   const script = []
   const calls = []
-  return {
+  const orch = {
     script,
     calls,
-    liaisonAsk: async (text, { peer, askId } = {}) => {
+    lastPolicy: null,
+    liaisonAsk: async (text, { peer, askId, policy } = {}) => {
       calls.push({ text, peer, askId })
+      orch.lastPolicy = policy
       const turn = script.shift() ?? (() => ({ ok: true, id: 'x', text: 'reply to ' + text, actions: [{ kind: 'link' }], rejected: [], costUsd: 0.01, error: null }))
-      return turn(text, peer)
+      return turn(text, peer, { askId, policy })
     },
   }
+  return orch
 }
 const ASK_ENV = { ...ENV, SZG_PEER_HELLO_MS: '60000', SZG_PEER_ASK_RETRY_MS: '50,100,200' }
 const askDirA = tmp()
 const askDirB = tmp()
 const orchA = fakeOrchestrator()
 const orchB = fakeOrchestrator()
-let A2 = makeLink({ dir: askDirA, env: ASK_ENV, hostname: 'alpha-host', orchestrator: orchA })
-const B2 = makeLink({ dir: askDirB, env: ASK_ENV, hostname: 'bravo-host', orchestrator: orchB })
+// Both engines apply through one recorder, whose outcome a case may change,
+// and which awaits `onApply` during a call when a case sets one.
+const applied = []
+let applyOutcome = { ok: true }
+let onApply = null
+const recordApply = async (action, opts) => {
+  applied.push({ action, opts })
+  if (onApply) await onApply(action, opts)
+  return applyOutcome
+}
+let A2 = makeLink({ dir: askDirA, env: ASK_ENV, hostname: 'alpha-host', orchestrator: orchA, applyAction: recordApply, liveForPeer: () => 0 })
+const B2 = makeLink({ dir: askDirB, env: ASK_ENV, hostname: 'bravo-host', orchestrator: orchB, applyAction: recordApply, liveForPeer: () => 0 })
 let askSecret = null
 
 const askOf = (link, dir, text) => link.payload().asks.find((e) => e.dir === dir && e.text === text) ?? null
@@ -665,13 +738,204 @@ await ok('asks: a turn interrupted by a restart is queued again and answered', a
   assert.equal(readJson(join(askDirA, S.ASKS_FILE)).items.find((e) => e.id === answering.id).state, 'answering')
 
   const framesBefore = frames.length
-  A2 = makeLink({ dir: askDirA, env: { ...ASK_ENV, SZG_PEER_PORT: String(portA2) }, hostname: 'alpha-host', orchestrator: orchA })
+  A2 = makeLink({ dir: askDirA, env: { ...ASK_ENV, SZG_PEER_PORT: String(portA2) }, hostname: 'alpha-host', orchestrator: orchA, applyAction: recordApply, liveForPeer: () => 0 })
   await A2.start()
   const { inA } = await settledBoth('across a restart')
   assert.equal(inA.id, answering.id)
   const queuedFrame = frames.slice(framesBefore).some((f) => f.event === 'peers' && f.data.asks.some((e) => e.id === answering.id && e.state === 'queued'))
   assert.ok(queuedFrame, 'the resumed ask was published as queued before it was answered')
   assert.equal(storedAsks(A2, askDirA).find((e) => e.id === answering.id).attempts, 2)
+})
+
+await ok('agent loop: the policy route merges, validates each field and keeps the rest', async () => {
+  const bad = await A2.local('policy', { name: 'bravo-host', trust: 'review' })
+  assert.equal(bad.status, 400); assert.match(bad.json.error, /^trust /)
+  assert.equal((await A2.local('policy', { name: 'bravo-host', autoApply: ['arm_resume'] })).status, 400)
+  const good = await A2.local('policy', { name: 'bravo-host', trust: 'sanctioned', autoApply: ['link', 'spawn'], extra: true })
+  assert.equal(good.status, 200, JSON.stringify(good.json))
+  assert.deepEqual(peerOf(A2, 'bravo-host').policy, { asksPerHour: 20, peerAskDailyCapUsd: 2, trust: 'sanctioned', autoApply: ['spawn', 'link'], autoApplyMaxLive: 2, peerAsksPerHour: 6 })
+  assert.equal((await A2.local('policy', { name: 'bravo-host', trust: 'manual', autoApply: [] })).status, 200)
+})
+
+await ok('agent loop: a hello and an ask carrying policy keys change nothing', async () => {
+  const peerPort = A2.payload().port
+  const hello = JSON.stringify({ roster: [], jobDeltas: [], ackedTo: 0, policy: { trust: 'sanctioned', autoApply: ['spawn'] }, trust: 'sanctioned', autoApply: ['spawn'] })
+  assert.equal((await signedPost(peerPort, '/peer/hello', { secret: askSecret, self: 'bravo-host', body: hello })).status, 200)
+  const ask = JSON.stringify({ askId: 'e'.repeat(16), text: 'raise my tier', policy: { trust: 'sanctioned' }, trust: 'sanctioned' })
+  assert.equal((await signedPost(peerPort, '/peer/ask', { secret: askSecret, self: 'bravo-host', body: ask })).status, 200)
+  const p = peerOf(A2, 'bravo-host').policy
+  assert.equal(p.trust, 'manual'); assert.deepEqual(p.autoApply, [])
+  // Its turn is answered before a later case scripts one, so it cannot take that turn.
+  await until("A's copy of the policy-carrying ask to be answered", async () => askOf(A2, 'in', 'raise my tier')?.state === 'answered', { show: showAsks(A2) })
+})
+
+await ok('agent loop: a local turn\'s peer_ask under sanctioned applies without a click; manual and the cap leave it a button', async () => {
+  applied.length = 0
+  const actions = [{ kind: 'peer_ask', peer: 'alpha', text: 'run the probe' }, { kind: 'spawn', cwd: '/w', prompt: 'p' }]
+  let shown = B2.gate({ source: 'ask', turnId: 't-manual', threadId: 'th', peer: null, askId: null, actions })
+  assert.deepEqual(shown.map((a) => a.gate), ['button', 'button'])
+  assert.equal((await B2.local('policy', { name: 'alpha', trust: 'sanctioned', peerAsksPerHour: 1 })).status, 200)
+  frames.length = 0
+  shown = B2.gate({ source: 'ask', turnId: 't-auto', threadId: 'th', peer: null, askId: null, actions })
+  assert.deepEqual(shown.map((a) => a.gate), ['auto', 'button'])
+  await until('the automatic apply to run', async () => applied.length === 1)
+  assert.equal(applied[0].action.kind, 'peer_ask'); assert.deepEqual(applied[0].opts, { peer: null, forAsk: null })
+  const frame = await until('the applied frame', async () => frames.find((f) => f.event === 'orchestrator' && f.data.id === 't-auto')?.data)
+  assert.deepEqual(frame, { id: 't-auto', threadId: 'th', applied: [{ index: 0, ok: true, error: null }] })
+  // The recorder never created an ask, so count one the way a real apply would.
+  assert.equal((await B2.local('alpha/ask', { text: 'run the probe', origin: 'agent' })).status, 200)
+  const refused = await B2.local('alpha/ask', { text: 'and another', origin: 'agent' })
+  assert.equal(refused.status, 409); assert.match(refused.json.error, /ask box on the Peering tab/)
+  assert.equal((await B2.local('alpha/ask', { text: 'typed by a person' })).status, 200, 'a person\'s ask is not capped')
+  assert.equal(B2.payload().asks.find((e) => e.text === 'run the probe').origin, 'agent')
+  shown = B2.gate({ source: 'ask', turnId: 't-cap', threadId: 'th', peer: null, askId: null, actions: [actions[0]] })
+  assert.deepEqual(shown, [{ ...actions[0], gate: 'button', gateNote: 'peer_ask hourly cap reached' }])
+  assert.equal((await B2.local('policy', { name: 'alpha', trust: 'manual', peerAsksPerHour: 6 })).status, 200)
+  // Both asks reach A and are answered there before a later case scripts a turn.
+  await settledBoth('run the probe')
+  await settledBoth('typed by a person')
+})
+
+await ok('agent loop: two peer_asks to one peer in one local turn share the hourly allowance', async () => {
+  applied.length = 0
+  // One agent ask to alpha is already in this hour, so two leaves room for one.
+  assert.equal((await B2.local('policy', { name: 'alpha', trust: 'sanctioned', peerAsksPerHour: 2 })).status, 200)
+  try {
+    const actions = [{ kind: 'peer_ask', peer: 'alpha', text: 'first' }, { kind: 'peer_ask', peer: 'alpha', text: 'second' }]
+    const shown = B2.gate({ source: 'ask', turnId: 't-two', threadId: 'th', peer: null, askId: null, actions })
+    assert.deepEqual(shown.map((a) => [a.gate, a.gateNote ?? null]), [['auto', null], ['button', 'peer_ask hourly cap reached']])
+    const frame = await until('the applied frame', async () => frames.find((f) => f.event === 'orchestrator' && f.data.id === 't-two')?.data)
+    assert.deepEqual(frame.applied, [{ index: 0, ok: true, error: null }])
+    assert.equal(applied.length, 1); assert.equal(applied[0].action.text, 'first')
+  } finally {
+    assert.equal((await B2.local('policy', { name: 'alpha', trust: 'manual', peerAsksPerHour: 6 })).status, 200)
+  }
+})
+
+await ok('agent loop: a liaison turn under sanctioned applies listed kinds, records them on the ask, and holds the live cap', async () => {
+  applied.length = 0
+  assert.equal((await A2.local('policy', { name: 'bravo-host', trust: 'sanctioned', autoApply: ['spawn'], autoApplyMaxLive: 1 })).status, 200)
+  let gatedActions = null
+  orchA.script.push((text, peer, { askId, policy }) => {
+    assert.equal(policy.trust, 'sanctioned')
+    gatedActions = A2.gate({ source: 'liaison', turnId: 'l-1', threadId: null, peer, askId, actions: [
+      { kind: 'spawn', cwd: '/w', prompt: 'collect', risk: 'starts a session' },
+      { kind: 'spawn', cwd: '/w', prompt: 'a second' },
+      { kind: 'peer_ask', peer: 'bravo-host', text: 'loop back' },
+    ] })
+    return { ok: true, id: 'l-1', text: 'starting', actions: gatedActions, rejected: [], costUsd: 0.01, error: null }
+  })
+  assert.equal((await B2.local('alpha/ask', { text: 'start a collector' })).status, 200)
+  const { inA } = await settledBoth('start a collector')
+  assert.deepEqual(gatedActions.map((a) => [a.gate, a.gateNote ?? null]), [['auto', null], ['button', 'live session cap reached'], ['button', null]])
+  await until('the spawn to apply', async () => applied.length === 1)
+  assert.deepEqual(applied[0].opts, { peer: 'bravo-host', forAsk: inA.id })
+  const rec = await until('the proposal to settle', async () => {
+    const e = A2.payload().asks.find((x) => x.id === inA.id)
+    return e?.proposals?.[0]?.state === 'applied' && e
+  })
+  assert.deepEqual(rec.proposals, [{ kind: 'spawn', mode: 'auto', state: 'applied', risk: 'starts a session', error: null }])
+  assert.equal(applied.some((x) => x.action.kind === 'peer_ask'), false, 'a liaison turn never sends a peer_ask on its own')
+  assert.equal((await A2.local('policy', { name: 'bravo-host', trust: 'manual', autoApply: [] })).status, 200)
+})
+
+await ok('agent loop: an engine that is not running gates nothing', async () => {
+  const idle = makeLink({ dir: tmp(), env: ASK_ENV, hostname: 'idle-host', applyAction: recordApply })
+  const actions = [{ kind: 'peer_ask', peer: 'bravo-host', text: 't' }]
+  const shown = idle.gate({ source: 'ask', turnId: 'x', actions })
+  assert.deepEqual(shown, actions)
+  assert.equal(Object.hasOwn(shown[0], 'gate'), false)
+})
+
+await ok('agent loop: a failed automatic apply is recorded on the ask and reported in the frame', async () => {
+  applied.length = 0
+  assert.equal((await A2.local('policy', { name: 'bravo-host', trust: 'sanctioned', autoApply: ['spawn'] })).status, 200)
+  applyOutcome = { ok: false, error: 'claude --bg failed' }
+  try {
+    orchA.script.push((text, peer, { askId }) => {
+      const actions = A2.gate({ source: 'liaison', turnId: 'l-fail', threadId: null, peer, askId, actions: [{ kind: 'spawn', cwd: '/w', prompt: 'will not start' }] })
+      return { ok: true, id: 'l-fail', text: 'trying', actions, rejected: [], costUsd: 0.01, error: null }
+    })
+    assert.equal((await B2.local('alpha/ask', { text: 'start one that fails' })).status, 200)
+    const { inA } = await settledBoth('start one that fails')
+    const rec = await until('the failed proposal to settle', async () => {
+      const e = A2.payload().asks.find((x) => x.id === inA.id)
+      return e?.proposals?.[0]?.state === 'failed' && e
+    }, { show: showAsks(A2) })
+    assert.deepEqual(rec.proposals, [{ kind: 'spawn', mode: 'auto', state: 'failed', risk: null, error: 'claude --bg failed' }])
+    const frame = await until('the applied frame', async () => frames.find((f) => f.event === 'orchestrator' && f.data.id === 'l-fail')?.data)
+    assert.deepEqual(frame.applied, [{ index: 0, ok: false, error: 'claude --bg failed' }])
+    assert.equal(frame.peer, 'bravo-host'); assert.equal(frame.askId, inA.id)
+  } finally {
+    applyOutcome = { ok: true }
+    assert.equal((await A2.local('policy', { name: 'bravo-host', trust: 'manual', autoApply: [] })).status, 200)
+  }
+})
+
+/** A liaison turn on A2 that gates a prompt and then a link. */
+const promptThenLink = (turnId) => (text, peer, { askId }) => {
+  const actions = A2.gate({ source: 'liaison', turnId, threadId: null, peer, askId, actions: [
+    { kind: 'prompt', session: 's1', text: 'go on' },
+    { kind: 'link', from: 's1', to: 's2' },
+  ] })
+  return { ok: true, id: turnId, text: 'on it', actions, rejected: [], costUsd: 0.01, error: null }
+}
+
+await ok('agent loop: a policy changed while a turn applies stops the rest of its applies', async () => {
+  applied.length = 0
+  assert.equal((await A2.local('policy', { name: 'bravo-host', trust: 'sanctioned', autoApply: ['prompt', 'link'] })).status, 200)
+  onApply = async () => {
+    onApply = null
+    assert.equal((await A2.local('policy', { name: 'bravo-host', trust: 'manual' })).status, 200)
+  }
+  try {
+    orchA.script.push(promptThenLink('l-changed'))
+    assert.equal((await B2.local('alpha/ask', { text: 'prompt then link' })).status, 200)
+    const { inA } = await settledBoth('prompt then link')
+    const frame = await until('the applied frame', async () => frames.find((f) => f.event === 'orchestrator' && f.data.id === 'l-changed')?.data)
+    assert.deepEqual(frame.applied, [{ index: 0, ok: true, error: null }, { index: 1, ok: false, error: 'policy changed' }])
+    assert.equal(applied.length, 1, 'the second apply never ran'); assert.equal(applied[0].action.kind, 'prompt')
+    assert.deepEqual(A2.payload().asks.find((x) => x.id === inA.id).proposals, [
+      { kind: 'prompt', mode: 'auto', state: 'applied', risk: null, error: null },
+      { kind: 'link', mode: 'auto', state: 'failed', risk: null, error: 'policy changed' },
+    ])
+  } finally {
+    onApply = null
+    assert.equal((await A2.local('policy', { name: 'bravo-host', trust: 'manual', autoApply: [] })).status, 200)
+  }
+})
+
+// Stops A2, so it is the last case to use it.
+await ok('agent loop: an engine stopped mid-turn applies nothing more, fails what is left and broadcasts nothing', async () => {
+  applied.length = 0
+  assert.equal((await A2.local('policy', { name: 'bravo-host', trust: 'sanctioned', autoApply: ['prompt', 'link'] })).status, 200)
+  let release = () => {}
+  const held = new Promise((resolveHeld) => { release = resolveHeld })
+  onApply = async () => { onApply = null; await held }
+  try {
+    orchA.script.push(promptThenLink('l-stopped'))
+    assert.equal((await B2.local('alpha/ask', { text: 'stopped midway' })).status, 200)
+    const inA = await until("A's copy to be answered with its first apply running", async () => {
+      const e = askOf(A2, 'in', 'stopped midway')
+      return e?.state === 'answered' && applied.length === 1 && e
+    }, { show: showAsks(A2) })
+    await A2.stop()
+    const self = A2.payload().self
+    const framesBefore = frames.length
+    release()
+    await new Promise((r) => setTimeout(r, 200))
+    assert.equal(applied.length, 1, 'nothing more is applied once stopped')
+    assert.deepEqual(A2.payload().asks.find((x) => x.id === inA.id).proposals, [
+      { kind: 'prompt', mode: 'auto', state: 'applied', risk: null, error: null },
+      { kind: 'link', mode: 'auto', state: 'failed', risk: null, error: 'the relay stopped' },
+    ])
+    const late = frames.slice(framesBefore).filter((f) => (f.event === 'orchestrator' && f.data.id === 'l-stopped') || (f.event === 'peers' && f.data.self === self))
+    assert.deepEqual(late, [], 'a stopped engine broadcasts nothing')
+  } finally {
+    onApply = null
+    release()
+    assert.equal((await A2.local('policy', { name: 'bravo-host', trust: 'manual', autoApply: [] })).status, 200)
+  }
 })
 
 for (const link of [A2, B2]) await link.stop()
@@ -841,11 +1105,19 @@ const handback = realpathSync(tmp())
 writeFileSync(join(handback, 'notes.md'), 'handed back')
 const HANDBACK_PATHS = [join(handback, 'notes.md')]
 const DROP_REPLY = ['Here are the notes.', '', '```json', JSON.stringify({ actions: [{ kind: 'drop', paths: HANDBACK_PATHS, note: 'the notes' }] }), '```'].join(NL)
+// While one of these exists, a local turn (the orchestrator's own preamble) or a
+// liaison turn answers with its contents instead of the canned reply.
+const replyLocalFile = join(fakeDir, 'reply-local')
+const replyLiaisonFile = join(fakeDir, 'reply-liaison')
+const fenced = (prose, actions) => [prose, '', '```json', JSON.stringify({ actions }), '```'].join(NL)
 writeFileSync(fakeClaudeJs, [
-  "import { appendFileSync, existsSync } from 'node:fs'",
+  "import { appendFileSync, existsSync, readFileSync } from 'node:fs'",
   `appendFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)) + '\\n')`,
   `if (existsSync(${JSON.stringify(slowFile)})) await new Promise((r) => setTimeout(r, 3000))`,
-  `const REPLY = existsSync(${JSON.stringify(dropReplyFile)}) ? ${JSON.stringify(DROP_REPLY)} : ${JSON.stringify(FAKE_REPLY)}`,
+  'const argv = process.argv.slice(2)',
+  "const pre = String(argv[argv.indexOf('--append-system-prompt') + 1] ?? '')",
+  `const scripted = pre.startsWith("You are Syzygy's liaison.") ? ${JSON.stringify(replyLiaisonFile)} : pre.startsWith('You are Syzygy, an orchestrator') ? ${JSON.stringify(replyLocalFile)} : null`,
+  `const REPLY = scripted && existsSync(scripted) ? readFileSync(scripted, 'utf8') : existsSync(${JSON.stringify(dropReplyFile)}) ? ${JSON.stringify(DROP_REPLY)} : ${JSON.stringify(FAKE_REPLY)}`,
   'const lines = [',
   "  { type: 'system', subtype: 'init', session_id: '00000000-0000-4000-8000-00000000000a' },",
   "  { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },",
@@ -863,6 +1135,7 @@ writeFileSync(fakeBin, [
   'if [ "$1" = "--help" ]; then echo "  --bg   run in the background"; echo "  attach   attach to a session"; echo "  --safe-mode"; exit 0; fi',
   'if [ "$1" = "--version" ]; then echo "0.0.0-fake (peer link harness)"; exit 0; fi',
   'if [ "$1" = "agents" ]; then echo "[]"; exit 0; fi',
+  'for a in "$@"; do if [ "$a" = "--bg" ]; then echo "backgrounded · ab12cd34 · probe"; exit 0; fi; done',
   `if [ "$1" = "-p" ]; then exec "${process.execPath}" "${fakeClaudeJs}" "$@"; fi`,
   'exit 0',
   '',
@@ -1145,6 +1418,9 @@ try {
       const e = await askIn(relay, dir, text)
       return e?.state === state && e
     }, { timeoutMs, show: showRelayAsks(relay) })
+  const argvLines = () => readFileSync(argvFile, 'utf8').trim().split(NL).map((l) => JSON.parse(l))
+  const liaisonArgvFor = (question) => argvLines().reverse().find((a) => String(a.at(-1)).includes(question))
+  const idle = (relay) => until('the orchestrator to be idle', async () => !(await relay.state()).orchestrator.busy, { timeoutMs: 10_000 })
 
   await ok("relays: A asks B's liaison; the reply comes back with a count of actions, and B's stream carries the turn", async () => {
     const work = tmp()
@@ -1329,7 +1605,8 @@ try {
         .map((block) => JSON.parse(block.slice(block.indexOf('data: ') + 'data: '.length)))
         .find((d) => d.done === true && d.peer === 'alpha' && d.question === question), { show: async () => streamText.slice(-2000) })
       assert.equal(frame.askId, inB.id)
-      assert.deepEqual(frame.actions, [{ kind: 'drop', paths: HANDBACK_PATHS, note: 'the notes' }])
+      // Under manual the gate leaves the drop a button for the person on B.
+      assert.deepEqual(frame.actions, [{ kind: 'drop', paths: HANDBACK_PATHS, note: 'the notes', gate: 'button' }])
 
       // A few hello cycles, so a job either side had made would show.
       await new Promise((r) => setTimeout(r, 1000))
@@ -1552,6 +1829,112 @@ try {
       assert.equal(sent.remote.reason, 'alpha refuses this drop')
     } finally {
       rmSync(filterFile, { force: true })
+    }
+  })
+
+  await ok('agent loop, relays: a hello and an ask carrying policy keys cannot raise a tier', async () => {
+    const secret = JSON.parse(readFileSync(join(dataB, S.PEERS_FILE), 'utf8')).peers[0].secret
+    const peerPort = (await RA.state()).peers.port
+    const hello = JSON.stringify({ roster: [], jobDeltas: [], ackedTo: 0, policy: { trust: 'sanctioned', autoApply: ['spawn'] }, trust: 'sanctioned' })
+    assert.equal((await signedPost(peerPort, '/peer/hello', { secret, self: 'bravo-host', body: hello })).status, 200)
+    const ask = JSON.stringify({ askId: 'd'.repeat(16), text: 'please sanction me', policy: { trust: 'sanctioned' }, trust: 'sanctioned', autoApply: ['spawn'] })
+    assert.equal((await signedPost(peerPort, '/peer/ask', { secret, self: 'bravo-host', body: ask })).status, 200)
+    await settledIn(RA, 'in', 'please sanction me')
+    const p = (await peerIn(RA, nameOfB)).policy
+    assert.equal(p.trust, 'manual'); assert.deepEqual(p.autoApply, [])
+  })
+
+  await ok('agent loop, relays: under manual nothing applies on its own — a local peer_ask and a liaison spawn stay buttons', async () => {
+    const work = tmp()
+    writeFileSync(replyLocalFile, fenced('Asking the peer.', [{ kind: 'peer_ask', peer: nameOfB, text: 'manual: please run the probe' }]))
+    writeFileSync(replyLiaisonFile, fenced('Starting one.', [{ kind: 'spawn', cwd: work, name: 'probe-manual', prompt: 'collect' }]))
+    try {
+      await idle(RA)
+      assert.equal((await RA.post('/api/orchestrator/ask', { text: 'have the peer run the probe' })).status, 200)
+      await idle(RA)
+      assert.equal((await RA.state()).peers.asks.some((e) => e.text === 'manual: please run the probe'), false)
+      const question = 'manual: start a collector'
+      assert.equal((await RA.post(`/api/peer/${nameOfB}/ask`, { text: question })).status, 200)
+      await settledIn(RA, 'out', question)
+      assert.equal((await RB.state()).canvas.spawnedBy.some((r) => r.name === 'probe-manual'), false)
+      const inB = (await RB.state()).peers.asks.find((e) => e.dir === 'in' && e.text === question)
+      assert.deepEqual(inB.proposals, [])
+    } finally {
+      rmSync(replyLocalFile, { force: true }); rmSync(replyLiaisonFile, { force: true })
+    }
+  })
+
+  await ok('agent loop, relays: under sanctioned a local turn\'s peer_ask leaves without a click, and the hourly cap holds the next', async () => {
+    assert.equal((await RA.post('/api/peer/policy', { name: nameOfB, trust: 'sanctioned', peerAsksPerHour: 1 })).status, 200)
+    writeFileSync(replyLocalFile, fenced('Asking the peer.', [{ kind: 'peer_ask', peer: nameOfB, text: 'please run the probe', risk: 'runs on the other instance' }]))
+    try {
+      await idle(RA)
+      assert.equal((await RA.post('/api/orchestrator/ask', { text: 'have the peer run the probe' })).status, 200)
+      const out = await until('A to send the agent ask', async () => (await RA.state()).peers.asks.find((e) => e.dir === 'out' && e.text === 'please run the probe'), { timeoutMs: 10_000, show: showRelayAsks(RA) })
+      assert.equal(out.origin, 'agent')
+      await settledIn(RB, 'in', 'please run the probe')
+      await settledIn(RA, 'out', 'please run the probe')
+      await idle(RA)
+      assert.equal((await RA.post('/api/orchestrator/ask', { text: 'and once more' })).status, 200)
+      await idle(RA)
+      assert.equal((await RA.state()).peers.asks.filter((e) => e.text === 'please run the probe').length, 1, 'the cap held the second')
+      const refused = await RA.post(`/api/peer/${nameOfB}/ask`, { text: 'a clicked peer_ask', origin: 'agent' })
+      assert.equal(refused.status, 409); assert.match(refused.json.error, /ask box on the Peering tab/)
+    } finally {
+      rmSync(replyLocalFile, { force: true })
+      assert.equal((await RA.post('/api/peer/policy', { name: nameOfB, trust: 'manual', peerAsksPerHour: 6 })).status, 200)
+    }
+  })
+
+  await ok('agent loop, relays: under sanctioned the liaison\'s spawn applies through /api/spawn, tagged, and the live cap turns the second into a button', async () => {
+    const work = tmp()
+    assert.equal((await RB.post('/api/peer/policy', { name: 'alpha', trust: 'sanctioned', autoApply: ['spawn'], autoApplyMaxLive: 1 })).status, 200)
+    writeFileSync(replyLiaisonFile, fenced('Starting a collector.', [
+      { kind: 'spawn', cwd: work, name: 'probe-collector', prompt: 'collect the probe output', risk: 'starts a session on this instance' },
+      { kind: 'spawn', cwd: work, name: 'probe-collector-two', prompt: 'a second one' },
+    ]))
+    try {
+      const question = 'start a collector for the probe'
+      assert.equal((await RA.post(`/api/peer/${nameOfB}/ask`, { text: question })).status, 200)
+      const out = await settledIn(RA, 'out', question, { timeoutMs: 10_000 })
+      assert.equal(out.actionsProposed, 2)
+      const inB = await until("B's proposal to settle", async () => {
+        const e = (await RB.state()).peers.asks.find((x) => x.dir === 'in' && x.text === question)
+        return e?.proposals?.[0]?.state === 'applied' && e
+      }, { timeoutMs: 10_000, show: showRelayAsks(RB) })
+      assert.deepEqual(inB.proposals, [{ kind: 'spawn', mode: 'auto', state: 'applied', risk: 'starts a session on this instance', error: null }])
+      const rows = (await RB.state()).canvas.spawnedBy.filter((r) => r.name === 'probe-collector' || r.name === 'probe-collector-two')
+      assert.deepEqual(rows.map((r) => r.name), ['probe-collector'])
+      assert.deepEqual(rows[0].forPeer, { peer: 'alpha', askId: inB.id })
+      const pre = liaisonArgvFor(question)
+      assert.match(pre[pre.indexOf('--append-system-prompt') + 1], /has sanctioned the peer "alpha"/)
+    } finally {
+      rmSync(replyLiaisonFile, { force: true })
+      assert.equal((await RB.post('/api/peer/policy', { name: 'alpha', trust: 'manual', autoApply: [] })).status, 200)
+    }
+  })
+
+  await ok('agent loop, relays: a spawn from an earlier turn that is still live counts against the cap, so the next turn\'s spawn stays a button', async () => {
+    // The fake `claude --bg` session never registers and the fake listing never
+    // names it, so the previous case's row stays unsettled and live for the
+    // ledger's whole grace period.
+    const earlier = (await RB.state()).canvas.spawnedBy.find((r) => r.name === 'probe-collector')
+    assert.ok(earlier && earlier.state == null && earlier.sessionId == null && earlier.forPeer?.peer === 'alpha', JSON.stringify(earlier))
+    assert.ok(Date.now() - earlier.spawnedAt < 30_000, `the earlier spawn is ${Date.now() - earlier.spawnedAt} ms old`)
+    const work = tmp()
+    assert.equal((await RB.post('/api/peer/policy', { name: 'alpha', trust: 'sanctioned', autoApply: ['spawn'], autoApplyMaxLive: 1 })).status, 200)
+    writeFileSync(replyLiaisonFile, fenced('Starting another.', [{ kind: 'spawn', cwd: work, name: 'probe-collector-next', prompt: 'collect again' }]))
+    try {
+      const question = 'start one more collector'
+      assert.equal((await RA.post(`/api/peer/${nameOfB}/ask`, { text: question })).status, 200)
+      const out = await settledIn(RA, 'out', question, { timeoutMs: 10_000 })
+      assert.equal(out.actionsProposed, 1)
+      const inB = await settledIn(RB, 'in', question)
+      assert.deepEqual(inB.proposals, [], 'the gate left the spawn a button')
+      assert.equal((await RB.state()).canvas.spawnedBy.some((r) => r.name === 'probe-collector-next'), false)
+    } finally {
+      rmSync(replyLiaisonFile, { force: true })
+      assert.equal((await RB.post('/api/peer/policy', { name: 'alpha', trust: 'manual', autoApply: [] })).status, 200)
     }
   })
 } finally {
