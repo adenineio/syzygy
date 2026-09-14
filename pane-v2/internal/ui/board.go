@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -246,7 +247,12 @@ func (m Model) boardRow(f Frame, s relay.Session, cursor, stale bool) string {
 		here, hs = theme.GHere, theme.SValue
 	}
 	glyph, gs := theme.GOff, theme.SDim
-	if s.Working && !stale {
+	switch {
+	case s.NeedsNow() != "" && !stale:
+		// Needs-me outranks working: a session parked on a question has
+		// finished its turn, and where the two disagree the urgent one wins.
+		glyph, gs = theme.GFlag, theme.SWarn
+	case s.Working && !stale:
 		glyph, gs = theme.GOn, theme.SWarn
 	}
 	r.Add(st(hs), here)
@@ -347,6 +353,16 @@ func (m Model) boardDetail(f Frame, s relay.Session, stale bool, n int) []string
 	r.Add(theme.SBg, " ")
 	r.Add(body, fmtx.TruncRight(feedFlat(s.Status), r.Rest()))
 	rows = append(rows, r.String())
+
+	// What it is waiting for, when it is waiting for anything. Its own row
+	// rather than a column: the sentence is the useful part.
+	if need := s.NeedsNow(); need != "" {
+		r = NewRow(w)
+		r.Add(theme.SBg, " ")
+		r.Add(theme.SWarn, theme.GFlag+" ")
+		r.Add(dimIf(theme.SWarn, stale), fmtx.TruncRight(feedFlat(need), r.Rest()))
+		rows = append(rows, r.String())
+	}
 
 	// --- counts ---
 	seen := fmtx.Ago(m.now.Sub(s.SeenAt.Time()))
@@ -512,6 +528,94 @@ func (m Model) boardFocus() (tea.Model, tea.Cmd) {
 	m.scroll = 0
 	m.rememberFocus()
 	return m, m.spinCmd()
+}
+
+// boardJump puts the user in front of the cursor session's own terminal.
+//
+// The case is decided here, from what the relay already reported, rather than
+// by posting and reading the answer: two of the four cases are completed by a
+// command this pane cannot run, and a toast that said "jumping" for them would
+// be a lie.
+func (m Model) boardJump() (tea.Model, tea.Cmd) {
+	s, ok := m.boardSession()
+	if !ok {
+		return m, nil
+	}
+	switch s.Jump {
+	case "tmux", "background":
+		return m, m.postCmd("/api/jump", map[string]any{"id": s.ID}, "jumping to "+s.Name)
+	case "resume":
+		return m, m.setToast("resume: that process is gone — the browser drawer has the command", ToneErr)
+	case "outside":
+		return m, m.setToast("outside tmux — the browser drawer has the command", ToneErr)
+	default:
+		return m, m.setToast("nothing to jump to yet", ToneErr)
+	}
+}
+
+// boardKill is the x key: arm on the cursor's session, then close it. The
+// strip names the mechanism the relay will use, from what the session IS.
+func (m Model) boardKill() (tea.Model, tea.Cmd) {
+	s, ok := m.boardSession()
+	if !ok {
+		return m, nil
+	}
+	_, what, can := s.KillPlan()
+	if !can {
+		return m, m.setToast(what, ToneErr)
+	}
+	if m.isArmed("x", s.ID) {
+		m.disarm()
+		return m, m.postCmd("/api/session/kill", map[string]any{"id": s.ID}, "session closed")
+	}
+	return m, m.arm(Arm{
+		Mode: ModeBoard, Key: "x", Target: s.ID, NeedsRelay: true,
+		Label: "KILL " + s.Name + " · " + what,
+		Short: "KILL " + shortID(s.ID),
+	})
+}
+
+// boardKillAgents is the X key: every subagent of the cursor's session, as one
+// named action. Which agent is a choice the drawer makes, where the list is
+// actually drawn; here there is no agent cursor to make it with.
+func (m Model) boardKillAgents() (tea.Model, tea.Cmd) {
+	s, ok := m.boardSession()
+	if !ok {
+		return m, nil
+	}
+	if len(s.Agents) == 0 {
+		return m, m.setToast("no subagents on "+s.Name, ToneErr)
+	}
+	if m.isArmed("X", s.ID) {
+		m.disarm()
+		return m, m.killAgentsCmd(s.ID, s.Agents)
+	}
+	return m, m.arm(Arm{
+		Mode: ModeBoard, Key: "X", Target: s.ID, NeedsRelay: true,
+		Label: fmt.Sprintf("KILL %d SUBAGENTS of %s", len(s.Agents), s.Name),
+		Short: fmt.Sprintf("KILL %d AGENTS", len(s.Agents)),
+	})
+}
+
+// killAgentsCmd posts one command per agent, in order, inside one command so
+// the outcome is one toast. A failure stops the run and says how far it got.
+func (m Model) killAgentsCmd(id string, agents []relay.Agent) tea.Cmd {
+	src := m.src
+	return func() tea.Msg {
+		sent := 0
+		for _, a := range agents {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_, err := src.Post(ctx, "/api/command", map[string]any{
+				"targetId": id, "verb": "kill-agent", "payload": map[string]any{"agentId": a.ID},
+			})
+			cancel()
+			if err != nil {
+				return postMsg{Err: fmt.Errorf("%d of %d killed · %w", sent, len(agents), err)}
+			}
+			sent++
+		}
+		return postMsg{OK: fmt.Sprintf("%d killed", sent)}
+	}
 }
 
 // boardLink is the l key. The first press marks the focused session as the

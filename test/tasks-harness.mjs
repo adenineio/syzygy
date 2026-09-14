@@ -1814,6 +1814,29 @@ rmSync(sandbox, { recursive: true, force: true })
   ok('a Tasks: line still parses real references, with commentary and commas')
 }
 
+// A `Tasks:` value may wrap onto following lines, but only while the line
+// before it ends in a comma -- a comma-separated list wrapped for readability
+// is still one value, while a value with no trailing comma ends at its own
+// line and a prose paragraph beneath the field is never absorbed into it.
+{
+  const wrapped = parseHeader(
+    '# P\n\n**Tasks:** docs/TASKS.md#a,\ndocs/TASKS.md#b,\ndocs/TASKS.md#c\n\nSome prose after the field.\n')
+  assert.deepEqual(wrapped.tasks, ['docs/TASKS.md#a', 'docs/TASKS.md#b', 'docs/TASKS.md#c'],
+    'every wrapped reference must be read')
+  ok('a Tasks: list wrapped after a comma yields every reference')
+
+  // The first line has no trailing comma, so the line after it -- itself a
+  // real reference followed by a comma -- must never be pulled in. If it
+  // were, its own comma would split off `docs/TASKS.md#c` as a THIRD, bogus
+  // reference: proof the guard is doing real work, not just leaving a
+  // single-line value alone by construction.
+  const notWrapped = parseHeader(
+    '# P\n\n**Tasks:** docs/TASKS.md#a\ndocs/TASKS.md#b, docs/TASKS.md#c\n')
+  assert.deepEqual(notWrapped.tasks, ['docs/TASKS.md#a'],
+    'a line following a comma-less value must not be absorbed into it')
+  ok('a following prose line after a comma-less value is not absorbed')
+}
+
 // brokenRefs is deduped across worktrees. Driven directly through
 // `resolveDeclaredRefs` rather than `scan()`, because scan() cannot exercise
 // this path: a healthy project has no broken reference at all, so a live scan
@@ -1852,6 +1875,384 @@ rmSync(sandbox, { recursive: true, force: true })
     assert.equal(w.plans[0].resolvedSpec.broken, true)
   }
   ok('every copy of a plan is still annotated, however the report is deduped')
+}
+
+// --- graphOf: bounded commit history per branch -----------------------------
+import { graphOf, headsKey, GRAPH_COMMITS_PER_BRANCH, GRAPH_BRANCHES_PER_PROJECT,
+  GRAPH_SUBJECT_MAX, GRAPH_RETRY_MS } from '../syzygy/bridge/tasks-git.mjs'
+
+// headsKey is pure -- no repo needed.
+{
+  const a = headsKey('/repo', [{ branch: 'main', head: 'aaa' }, { branch: 'feature', head: 'bbb' }])
+  const b = headsKey('/repo', [{ branch: 'feature', head: 'bbb' }, { branch: 'main', head: 'aaa' }])
+  assert.equal(a, b, 'headsKey must be stable under reordering')
+  const c = headsKey('/repo', [{ branch: 'main', head: 'aaa' }, { branch: 'feature', head: 'ccc' }])
+  assert.notEqual(a, c, 'headsKey must change when one head moves')
+  ok('headsKey is stable under reordering and changes when a head moves')
+}
+
+// A single real repo carries every branch shape the rest of the checks need:
+// a plain fast-forward, a merge, an oversized subject and an oversized
+// history. `graphOf` reads only `main.path` for every git call, so a
+// worktree entry never needs its own checkout -- a bare branch name pointing
+// into the same repo is enough.
+{
+  const graphBox = mkdtempSync(join(tmpdir(), 'szg-graph-'))
+  const gitc = (args) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args],
+    { cwd: graphBox, stdio: 'ignore' })
+  const gitOut = (args) => execFileSync('git', args, { cwd: graphBox }).toString().trim()
+
+  execFileSync('git', ['init', '-q', '-b', 'main', graphBox], { stdio: 'ignore' })
+  gitc(['commit', '--allow-empty', '-qm', 'root'])
+  gitc(['commit', '--allow-empty', '-qm', 'second'])
+  const mainHead = gitOut(['rev-parse', 'HEAD'])
+
+  gitc(['checkout', '-q', '-b', 'feature'])
+  gitc(['commit', '--allow-empty', '-qm', 'feature 1'])
+  gitc(['commit', '--allow-empty', '-qm', 'feature 2'])
+  const featureHead = gitOut(['rev-parse', 'HEAD'])
+
+  gitc(['checkout', '-q', 'main'])
+  gitc(['checkout', '-q', '-b', 'longsubj'])
+  gitc(['commit', '--allow-empty', '-qm', 'x'.repeat(GRAPH_SUBJECT_MAX + 40)])
+
+  gitc(['checkout', '-q', 'main'])
+  gitc(['checkout', '-q', '-b', 'many'])
+  for (let i = 0; i < GRAPH_COMMITS_PER_BRANCH + 5; i++) gitc(['commit', '--allow-empty', '-qm', `many ${i}`])
+
+  gitc(['checkout', '-q', 'main'])
+  gitc(['checkout', '-q', '-b', 'mbase'])
+  gitc(['commit', '--allow-empty', '-qm', 'mbase 1'])
+  gitc(['checkout', '-q', '-b', 'mside'])
+  gitc(['commit', '--allow-empty', '-qm', 'mside 1'])
+  gitc(['checkout', '-q', 'mbase'])
+  gitc(['merge', '--no-ff', '-q', '-m', 'merge mside', 'mside'])
+
+  gitc(['checkout', '-q', 'main'])
+
+  const mainWt = { path: graphBox, branch: 'main', head: mainHead, isMain: true }
+
+  // 2: a branch two commits ahead, base main, newest-first commits with a
+  // 40-char sha, a parents array and a numeric `at`.
+  {
+    const g = await graphOf(graphBox, [mainWt, { path: graphBox, branch: 'feature', head: featureHead, isMain: false }])
+    assert.equal(g.base, 'main')
+    const feat = g.branches.find((br) => br.name === 'feature')
+    assert.ok(feat, 'expected a feature branch row')
+    assert.equal(feat.ahead, 2)
+    assert.equal(feat.behind, 0)
+    assert.equal(feat.commits[0].subject, 'feature 2', 'commits must come back newest first')
+    assert.equal(feat.commits[0].sha.length, 40)
+    assert.ok(Array.isArray(feat.commits[0].parents))
+    assert.equal(typeof feat.commits[0].at, 'number')
+    ok('graphOf reports ahead/behind and newest-first commits with full shas')
+    resetCache()
+  }
+
+  // 3: a merge commit carries two parents.
+  {
+    const g = await graphOf(graphBox, [mainWt, { path: graphBox, branch: 'mbase', head: null, isMain: false }])
+    const mbase = g.branches.find((br) => br.name === 'mbase')
+    assert.equal(mbase.commits[0].parents.length, 2, 'the newest commit on mbase is the merge')
+    ok('a merge commit is reported with two parents')
+    resetCache()
+  }
+
+  // 4: an oversized subject is cut to exactly GRAPH_SUBJECT_MAX.
+  {
+    const g = await graphOf(graphBox, [mainWt, { path: graphBox, branch: 'longsubj', head: null, isMain: false }])
+    const ls = g.branches.find((br) => br.name === 'longsubj')
+    assert.equal(ls.commits[0].subject.length, GRAPH_SUBJECT_MAX)
+    ok('a subject longer than GRAPH_SUBJECT_MAX is cut to exactly that length')
+    resetCache()
+  }
+
+  // 5: more than GRAPH_COMMITS_PER_BRANCH commits truncates the branch to
+  // exactly the cap.
+  {
+    const g = await graphOf(graphBox, [mainWt, { path: graphBox, branch: 'many', head: null, isMain: false }])
+    const many = g.branches.find((br) => br.name === 'many')
+    assert.equal(many.truncated, true)
+    assert.equal(many.commits.length, GRAPH_COMMITS_PER_BRANCH)
+    ok('a branch with more than GRAPH_COMMITS_PER_BRANCH commits is truncated to exactly the cap')
+    resetCache()
+  }
+
+  // 6: more than GRAPH_BRANCHES_PER_PROJECT branches caps the graph itself,
+  // main first.
+  {
+    const extraCount = GRAPH_BRANCHES_PER_PROJECT + 5
+    const extras = []
+    for (let i = 0; i < extraCount; i++) {
+      execFileSync('git', ['branch', `extra-${i}`, 'main'], { cwd: graphBox, stdio: 'ignore' })
+      extras.push({ path: graphBox, branch: `extra-${i}`, head: null, isMain: false })
+    }
+    const g = await graphOf(graphBox, [mainWt, ...extras])
+    assert.equal(g.branches.length, GRAPH_BRANCHES_PER_PROJECT)
+    assert.equal(g.truncated, true)
+    assert.equal(g.branches[0].name, 'main', 'main must sort first once branches are capped')
+    ok('more than GRAPH_BRANCHES_PER_PROJECT branches caps the graph and keeps main first')
+    resetCache()
+  }
+
+  // 10: a detached worktree contributes no branch row and does not fail the call.
+  {
+    const g = await graphOf(graphBox, [mainWt, { path: graphBox, branch: null, head: null, isMain: false }])
+    assert.ok(g, 'a detached worktree must not fail the call')
+    assert.equal(g.branches.length, 1, 'a detached worktree must not contribute a branch row')
+    assert.equal(g.branches[0].name, 'main')
+    ok('a detached worktree contributes no branch row and does not fail the call')
+    resetCache()
+  }
+
+  // 9: the cache gate. A clean build is served by reference until its heads
+  // change; a build carrying a failed git call is served for GRAPH_RETRY_MS
+  // on an injected clock and then rebuilt.
+  {
+    let clockNow = 1_700_000_000_000
+    const now = () => clockNow
+    const cleanWts = [mainWt, { path: graphBox, branch: 'feature', head: featureHead, isMain: false }]
+
+    const a = await graphOf(graphBox, cleanWts, { now })
+    const b = await graphOf(graphBox, cleanWts, { now })
+    assert.equal(a, b, 'an unchanged heads key must serve the same object')
+    ok('graphOf serves a clean build from cache by reference')
+
+    resetCache()
+    const c = await graphOf(graphBox, cleanWts, { now })
+    assert.notEqual(c, a, 'resetCache must force a rebuild')
+    ok('resetCache clears the graph cache')
+
+    clockNow += 10 * GRAPH_RETRY_MS
+    const d = await graphOf(graphBox, cleanWts, { now })
+    assert.equal(d, c, 'a clean graph must not be rebuilt by the clock alone')
+    ok('a clean graph is cached until a head moves, never on a timer')
+
+    resetCache()
+    clockNow = 1_700_000_000_000
+    const failWts = [mainWt, { path: graphBox, branch: 'ghost-branch-does-not-exist', head: 'deadbeef', isMain: false }]
+
+    const f1 = await graphOf(graphBox, failWts, { now })
+    const ghost = f1.branches.find((br) => br.name === 'ghost-branch-does-not-exist')
+    assert.equal(ghost.commits.length, 0, 'a branch git cannot resolve is an empty row, not a throw')
+
+    clockNow += GRAPH_RETRY_MS - 1000
+    const f2 = await graphOf(graphBox, failWts, { now })
+    assert.equal(f2, f1, 'a failed build is still cached before GRAPH_RETRY_MS elapses')
+
+    clockNow += 2000
+    const f3 = await graphOf(graphBox, failWts, { now })
+    assert.notEqual(f3, f1, 'a failed build is rebuilt once GRAPH_RETRY_MS elapses')
+    ok('a build with a failed git call retries after GRAPH_RETRY_MS, unlike a clean one')
+    resetCache()
+  }
+
+  rmSync(graphBox, { recursive: true, force: true })
+}
+
+// 7: a repo with no commits at all.
+{
+  const emptyBox = mkdtempSync(join(tmpdir(), 'szg-graph-empty-'))
+  execFileSync('git', ['init', '-q', '-b', 'main', emptyBox], { stdio: 'ignore' })
+  const g = await graphOf(emptyBox, [{ path: emptyBox, branch: 'main', head: null, isMain: true }])
+  assert.ok(g, 'an empty repo must not return null')
+  assert.equal(g.branches.length, 1)
+  assert.deepEqual(g.branches[0].commits, [])
+  ok('a repo with no commits returns a graph with empty commits, never null')
+  resetCache()
+  rmSync(emptyBox, { recursive: true, force: true })
+}
+
+// 8: a path that is not a git directory returns null.
+{
+  const notGit = mkdtempSync(join(tmpdir(), 'szg-graph-notgit-'))
+  const wts = await worktreesOf(notGit)
+  assert.equal(wts, null, 'fixture must not itself be a git directory')
+  const g = await graphOf(notGit, wts)
+  assert.equal(g, null, 'a path that is not a git directory must yield null')
+  ok('graphOf returns null for a path that is not a git directory')
+  rmSync(notGit, { recursive: true, force: true })
+}
+
+// --- plan and task-file lookups: a real record on request --------------------
+// The scan keeps every item for the relay's own readers -- the digest and
+// document (tasks-digest.mjs) are what leaves the relay on every change and
+// on a project fetch; a view opening one plan or one task file's steps asks
+// for that record by the worktree path and rel the payload already named.
+import * as tasksModule from '../syzygy/bridge/tasks.mjs'
+import { spawn } from 'node:child_process'
+
+{
+  assert.equal(typeof tasksModule.planRecord, 'function', 'tasks.mjs exports no planRecord lookup')
+  const rec = tasksModule.planRecord(out, wt.path, plan.rel)
+  assert.ok(rec, 'a scanned plan in a scanned worktree was not found')
+  assert.equal(rec.rel, plan.rel)
+  assert.deepEqual(rec.items, plan.items)
+  assert.equal(tasksModule.planRecord(out, wt.path, 'docs/plans/nope.md'), null)
+  assert.equal(tasksModule.planRecord(out, '/not/a/scanned/worktree', plan.rel), null)
+  assert.equal(tasksModule.planRecord(out, wt.path, join(wt.path, plan.rel)), null, 'a filesystem path is not a plan rel')
+  assert.equal(tasksModule.planRecord(out, wt.path, './' + plan.rel), null)
+  assert.equal(tasksModule.planRecord(out, WT_T, plan.rel.replace('alpha', 'nope')), null)
+  assert.equal(tasksModule.planRecord(out, undefined, undefined), null)
+  assert.equal(tasksModule.planRecord(out, [wt.path], [plan.rel]), null)
+  assert.equal(tasksModule.planRecord(null, wt.path, plan.rel), null)
+  ok('planRecord finds a plan only by a scanned worktree and one of its scanned rels')
+}
+
+{
+  assert.equal(typeof tasksModule.backlogRecord, 'function', 'tasks.mjs exports no backlogRecord lookup')
+  const file = wt.tasks.find((t) => t.rel === 'docs/TASKS.md')
+  assert.ok(file?.items?.length, 'the fixture worktree carries no scanned task file')
+  const rec = tasksModule.backlogRecord(out, wt.path, file.rel)
+  assert.ok(rec, 'a scanned task file in a scanned worktree was not found')
+  assert.equal(rec.rel, file.rel)
+  assert.deepEqual(rec.items, file.items)
+  assert.equal(tasksModule.backlogRecord(out, wt.path, 'docs/NOPE.md'), null)
+  assert.equal(tasksModule.backlogRecord(out, '/not/a/scanned/worktree', file.rel), null)
+  assert.equal(tasksModule.backlogRecord(out, wt.path, join(wt.path, file.rel)), null, 'a filesystem path is not a task file rel')
+  assert.equal(tasksModule.backlogRecord(out, wt.path, './' + file.rel), null)
+  assert.equal(tasksModule.backlogRecord(out, wt.path, '../../../../etc/passwd'), null)
+  assert.equal(tasksModule.backlogRecord(out, wt.path, plan.rel), null, 'a plan is not a task file')
+  assert.equal(tasksModule.planRecord(out, wt.path, file.rel), null, 'a task file is not a plan')
+  assert.equal(tasksModule.backlogRecord(out, undefined, undefined), null)
+  assert.equal(tasksModule.backlogRecord(out, [wt.path], [file.rel]), null)
+  assert.equal(tasksModule.backlogRecord(null, wt.path, file.rel), null)
+  ok('backlogRecord finds a task file only by a scanned worktree and one of its scanned rels')
+}
+
+// The route, on a real relay: a mocked relay cannot prove a route ladder.
+// Isolated on every axis -- SZG_PORT=0, a throwaway SZG_DATA_DIR, no SZG_*
+// variable inherited, and a claude binary that does not exist.
+{
+  const relayPath = join(HERE, '..', 'syzygy', 'bridge', 'relay.mjs')
+  const TOKEN = 'tasks-harness-' + Math.random().toString(36).slice(2)
+  const MIN_PAYLOAD_VERSION = 18
+  const dataDir = mkdtempSync(join(tmpdir(), 'szg-tasks-relay-data-'))
+  const repo = mkdtempSync(join(tmpdir(), 'szg-tasks-relay-repo-'))
+  cpSync(MAIN, repo, { recursive: true })
+  // More items than the task register keeps, so every pass evicts entries and
+  // re-creates them with a fresh firstSeen: the full scan never serialises the
+  // same way twice, while nothing a pane is sent has changed.
+  writeFileSync(join(repo, 'docs', 'plans', 'zz-many-steps.md'),
+    '# Many Steps\n\n' + Array.from({ length: 5200 }, (_, i) => '- [ ] step ' + i).join('\n') + '\n')
+  const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('SZG_')))
+  const child = spawn(process.execPath, [relayPath], {
+    cwd: join(HERE, '..'),
+    env: {
+      ...baseEnv, SZG_PORT: '0', SZG_TOKEN: TOKEN, SZG_PANE_PASSWORD_DISABLED: '1', SZG_TMUX_BIN: '/usr/bin/false',
+      SZG_DATA_DIR: dataDir, SZG_CLAUDE_BIN: join(dataDir, 'no-such-claude'),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stdout = '', stderr = ''
+  child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8')
+  child.stdout.on('data', (c) => { stdout += c })
+  child.stderr.on('data', (c) => { stderr += c })
+  try {
+    const port = await new Promise((resolvePort, reject) => {
+      const timer = setTimeout(() => reject(new Error('relay did not report a port; stderr: ' + stderr)), 15_000)
+      child.on('exit', (code) => { clearTimeout(timer); reject(new Error('relay exited early, code ' + code + '; stderr: ' + stderr)) })
+      const poll = setInterval(() => {
+        const m = stdout.match(/relay on http:\/\/127\.0\.0\.1:(\d+)/)
+        if (!m) return
+        clearInterval(poll); clearTimeout(timer); resolvePort(Number(m[1]))
+      }, 50)
+    })
+    const base = 'http://127.0.0.1:' + port
+    const call = async (method, path, body) => {
+      const res = await fetch(base + path, {
+        method, headers: { 'content-type': 'application/json', 'x-mch-token': TOKEN },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      })
+      const text = await res.text()
+      let parsed = null
+      try { parsed = JSON.parse(text) } catch {}
+      return { status: res.status, body: parsed }
+    }
+    const reg = await call('POST', '/api/register', { token: TOKEN, session: { id: 'tr-1', name: 'tr', cwd: repo } })
+    assert.equal(reg.status, 200, 'register failed: ' + JSON.stringify(reg.body))
+
+    let state = null
+    const deadline = Date.now() + 15_000
+    while (Date.now() < deadline) {
+      state = (await call('GET', '/api/state')).body
+      if (state?.projects?.[0]?.worktrees?.[0]?.planCount) break
+      await new Promise((r) => setTimeout(r, 200))
+    }
+    const rDigest = state?.projects?.[0]
+    assert.ok(rDigest?.worktrees?.[0]?.planCount, 'the relay never scanned the registered session\'s plan; stderr: ' + stderr)
+    assert.ok(state.payloadVersion >= MIN_PAYLOAD_VERSION, 'the projects digest ships at version ' + MIN_PAYLOAD_VERSION + ' or later')
+    assert.equal('plans' in rDigest.worktrees[0], false, '/api/state still carries a worktree\'s plan list')
+    // Nothing claims alpha.md, so the digest leaves it out and counts it.
+    assert.equal(rDigest.efforts.some((e) => e.name === 'alpha.md'), false, 'the digest carried an unclaimed effort')
+    assert.ok(rDigest.moreEfforts >= 1)
+    // The plan's rel, current step and current step id come from the project's document.
+    const rDoc = (await call('GET', '/api/projects/' + encodeURIComponent(rDigest.key))).body?.project
+    assert.ok(rDoc, 'the document route did not answer for a scanned project')
+    const rWt = rDoc.worktrees[0]
+    const rEffort = rDoc.efforts.find((e) => e.name === 'alpha.md')
+    assert.equal(rEffort.currentItem, 'Step 2: second')
+    const rPlan = { rel: rEffort.rel, currentItemId: rEffort.currentItemId }
+    assert.equal(rPlan.rel, 'docs/plans/alpha.md')
+    ok('/api/state carries the projects digest, never a plan list or plan items')
+
+    const q = (wtPath, rel) => '/api/projects/plan?wt=' + encodeURIComponent(wtPath) + '&path=' + encodeURIComponent(rel)
+    const got = await call('GET', q(rWt.path, rPlan.rel))
+    assert.equal(got.status, 200, 'the plan route refused a scanned plan: ' + JSON.stringify(got.body))
+    assert.equal(got.body.plan.rel, rPlan.rel)
+    assert.ok(got.body.plan.items.some((i) => i.id === rPlan.currentItemId), 'the plan route returned no items')
+    assert.equal((await fetch(base + q(rWt.path, rPlan.rel), { method: 'HEAD', headers: { 'x-mch-token': TOKEN } })).status, 200)
+    ok('GET /api/projects/plan returns one scanned plan in full')
+
+    const refused = async (path, error) => {
+      const r = await call('GET', path)
+      assert.equal(r.status, 400, path + ' answered ' + r.status)
+      assert.deepEqual(r.body, { error }, path)
+    }
+    await refused(q(rWt.path, 'docs/plans/nope.md'), 'unknown file')
+    await refused(q('/not/scanned', rPlan.rel), 'unknown worktree')
+    await refused(q(rWt.path, join(rWt.path, rPlan.rel)), 'unknown file')
+    await refused(q(rWt.path, '../../../../etc/passwd'), 'unknown file')
+    await refused('/api/projects/plan', 'unknown worktree')
+    const posted = await call('POST', q(rWt.path, rPlan.rel), { token: TOKEN })
+    assert.notEqual(posted.status, 200, 'a POST must not read the plan route')
+    assert.equal(posted.body?.plan, undefined)
+    ok('the plan route refuses anything but a scanned worktree and one of its scanned plans, and is GET/HEAD-only')
+
+    // Nothing on disk changes from here on, so no `projects` frame may follow
+    // the snapshot, however the full scan churns beneath it.
+    const ac = new AbortController()
+    const frames = []
+    const streamed = fetch(base + '/api/stream?token=' + TOKEN, { signal: ac.signal }).then(async (res) => {
+      const dec = new TextDecoder()
+      let buf = ''
+      for await (const chunk of res.body) {
+        buf += dec.decode(chunk, { stream: true })
+        let at
+        while ((at = buf.indexOf('\n\n')) >= 0) {
+          const m = /^event: (\S+)/.exec(buf.slice(0, at))
+          if (m) frames.push(m[1])
+          buf = buf.slice(at + 2)
+        }
+      }
+    }).catch(() => {})
+    await new Promise((r) => setTimeout(r, 9_500))
+    ac.abort()
+    await streamed
+    assert.equal(frames[0], 'snapshot', 'the stream did not open with a snapshot: ' + frames.join(', '))
+    assert.equal(frames.filter((f) => f === 'projects').length, 0,
+      'an unchanged board was rebroadcast: ' + frames.join(', '))
+    ok('an unchanged board sends no projects frame, while the full scan churns beneath it')
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      const gone = new Promise((r) => child.once('exit', r))
+      child.kill('SIGTERM')
+      await Promise.race([gone, new Promise((r) => setTimeout(r, 3000))])
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    }
+    rmSync(dataDir, { recursive: true, force: true })
+    rmSync(repo, { recursive: true, force: true })
+  }
 }
 
 console.log('\n✔ all ' + passed + ' tasks-parse checks passed')

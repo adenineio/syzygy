@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -47,36 +48,81 @@ func TestMineWithNoClaimsExplainsItself(t *testing.T) {
 }
 
 // TestMineShowsOnlyThisSessionsBacklogSections extends the same filter to
-// backlog sections (worktrees[].tasks[].items[], resolved onto claimedBy by
-// the relay) and proves the kind=="section" guard has teeth: a claimed
-// *step* -- the other kind a backlog file's items carry -- must not leak in
-// as if it were a claimed section.
+// backlog sections (worktrees[].claimedSections[], resolved onto claimedBy by
+// the relay): a section only another session claims must not leak in, and a
+// section several sessions claim shows for each of them.
 func TestMineShowsOnlyThisSessionsBacklogSections(t *testing.T) {
 	st := relay.State{Projects: []relay.Project{{
 		Worktrees: []relay.Worktree{{
-			Tasks: []relay.TaskFile{{
-				Items: []relay.BacklogItem{
-					{Kind: "section", Text: "Fix the thing", ClaimedBy: []relay.Claimer{{ID: "s1", Name: "one"}}},
-					{Kind: "section", Text: "Someone else's section", ClaimedBy: []relay.Claimer{{ID: "s2", Name: "two"}}},
-					{Kind: "step", Text: "a step, not a section", ClaimedBy: []relay.Claimer{{ID: "s1", Name: "one"}}},
-				},
-			}},
+			ClaimedSections: []relay.ClaimedSection{
+				{Text: "Fix the thing", ClaimedBy: []relay.Claimer{{ID: "s1", Name: "one"}}},
+				{Text: "Someone else's section", ClaimedBy: []relay.Claimer{{ID: "s2", Name: "two"}}},
+				{Text: "Shared section", ClaimedBy: []relay.Claimer{{ID: "s2", Name: "two"}, {ID: "s1", Name: "one"}}},
+			},
 		}},
 	}}}
 	out := renderMine(st, "s1")
+	if want := "Fix the thing\nShared section"; out != want {
+		t.Fatalf("want exactly this session's sections %q, got:\n%s", want, out)
+	}
+	if contains(renderMine(st, "s2"), "Fix the thing") {
+		t.Fatalf("s1's section leaked into s2's MINE")
+	}
+}
+
+// decodeProjects decodes a `projects` payload exactly as the stream's
+// `projects` case does: a bare JSON array unmarshalled into []relay.Project.
+func decodeProjects(t *testing.T, payload string) []relay.Project {
+	t.Helper()
+	var v []relay.Project
+	if err := json.Unmarshal([]byte(payload), &v); err != nil {
+		t.Fatalf("projects decode: %v", err)
+	}
+	return v
+}
+
+// TestMineReadsClaimedSectionsFromTheWire decodes a worktree line in the shape
+// the relay sends and proves MINE reads its claimed sections: this session's
+// own heading renders, and a heading only another session claims does not.
+func TestMineReadsClaimedSectionsFromTheWire(t *testing.T) {
+	projects := decodeProjects(t, `[{"key":"/repo/.git","name":"repo","efforts":[],"moreEfforts":0,`+
+		`"worktrees":[{"path":"/repo","branch":"main","head":"abc123","isMain":true,"sessions":[],`+
+		`"planCount":1,"taskFile":"TASKS.md","taskAuthority":"TASKS.md",`+
+		`"diff":{"only-here":0,"removed":0,"done-here":0,"behind":0},`+
+		`"claimedSections":[`+
+		`{"rel":"TASKS.md","slug":"fix-the-thing","text":"Fix the thing","claimedBy":[{"id":"s1","name":"one"}]},`+
+		`{"rel":"TASKS.md","slug":"someone-elses","text":"Someone else's section","claimedBy":[{"id":"s2","name":"two"}]}`+
+		`]}]}]`)
+	out := renderMine(relay.State{Projects: projects}, "s1")
 	if !contains(out, "Fix the thing") {
 		t.Fatalf("own claimed section missing:\n%s", out)
 	}
 	if contains(out, "Someone else's section") {
 		t.Fatalf("another session's section leaked in:\n%s", out)
 	}
-	if contains(out, "a step, not a section") {
-		t.Fatalf("a claimed step rendered as if it were a claimed section:\n%s", out)
+}
+
+// TestMineWithNoClaimedSectionsKeyShowsNoSections: a worktree line with no
+// `claimedSections` key at all, as an older relay sends, decodes to no
+// sections and renders none, while a claimed plan beside it still renders.
+func TestMineWithNoClaimedSectionsKeyShowsNoSections(t *testing.T) {
+	projects := decodeProjects(t, `[{"efforts":[{"title":"Alpha","done":1,"total":4,`+
+		`"claimedBy":[{"id":"s1","name":"one"}]}],"worktrees":[{"path":"/repo","branch":"main"}]}]`)
+	st := relay.State{Projects: projects}
+	efforts, sections := mineClaims(st, "s1")
+	if len(sections) != 0 {
+		t.Fatalf("a worktree with no claimedSections key yielded sections: %+v", sections)
+	}
+	if len(efforts) != 1 {
+		t.Fatalf("the claimed plan beside it should still render, got %+v", efforts)
+	}
+	if out := renderMine(st, "s1"); out != "Alpha  1/4" {
+		t.Fatalf("want only the plan row, got:\n%s", out)
 	}
 }
 
-// TestMineMatchesByClaimerIDNotName guards the trap carried over from Task
-// 7's review: matching must go by the claim's session id, never by anything
+// TestMineMatchesByClaimerIDNotName: matching must go by the claim's session
+// id, never by anything
 // that merely looks like this session (here, a same-named claimer under a
 // different id). A name-based or partial match would show another session's
 // work as if it were this session's own.
@@ -139,16 +185,16 @@ func TestMineManyClaimsDoNotOverflowTheFrame(t *testing.T) {
 			ClaimedBy: []relay.Claimer{{ID: "s1", Name: "one"}},
 		})
 	}
-	var items []relay.BacklogItem
+	var sections []relay.ClaimedSection
 	for i := 0; i < 20; i++ {
-		items = append(items, relay.BacklogItem{
-			Kind: "section", Text: fmt.Sprintf("Section %02d", i),
+		sections = append(sections, relay.ClaimedSection{
+			Text:      fmt.Sprintf("Section %02d", i),
 			ClaimedBy: []relay.Claimer{{ID: "s1", Name: "one"}},
 		})
 	}
 	st := relay.State{Sessions: []relay.Session{{ID: "s1"}}, Projects: []relay.Project{{
 		Efforts:   efforts,
-		Worktrees: []relay.Worktree{{Tasks: []relay.TaskFile{{Items: items}}}},
+		Worktrees: []relay.Worktree{{ClaimedSections: sections}},
 	}}}
 
 	src := newFakeSource()

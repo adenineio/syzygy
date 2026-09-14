@@ -38,7 +38,7 @@ func main() {
 		relayURL   = flag.String("relay", "", "relay base URL (default http://127.0.0.1:<port from relay.json>)")
 		sessionID  = flag.String("session", "", "pin this session id or unique prefix; skips identification")
 		targetPane = flag.String("target-pane", "", "the tmux pane whose Claude this is (%N)")
-		modeFlag   = flag.String("mode", "", "starting mode: vitals|feed|console|board|grid|mine|hotkeys")
+		modeFlag   = flag.String("mode", "", "starting mode: vitals|feed|paste|board|grid|mine|hotkeys|chain")
 		snapshot   = flag.Bool("snapshot", false, "print one frame at --width/--height and exit")
 		width      = flag.Int("width", 60, "frame width, only with --snapshot")
 		height     = flag.Int("height", 40, "frame height, only with --snapshot")

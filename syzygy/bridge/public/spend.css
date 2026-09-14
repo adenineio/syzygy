@@ -1,0 +1,79 @@
+/* Syzygy — the Telemetry tab's "Syzygy's own usage" panel. Only what this
+   panel introduces: .panel, .phead, .tick, .pbody, .count, .hint, .hint kbd,
+   .empty and .btn come from app.css and are reused as-is.
+
+   NO ANIMATION AND NO TRANSITION ANYWHERE IN THIS FILE. A selected row is a
+   flat highlight, set once per render, the same rule peers.css states for
+   its own health dot. */
+
+/* A third grid child in view-telemetry's two-column grid, so it needs an
+   explicit span the same way #usage-panel and #peer-panel do, or it lands
+   under just the left column. */
+#spend-panel { grid-column: 1 / -1; }
+
+#spend-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+#spend-table th,
+#spend-table td {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: left;
+  padding: 5px 8px;
+  color: var(--text);
+}
+
+#spend-table th {
+  font-size: 9.5px;
+  font-weight: 400;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--dim);
+  border-bottom: 1px solid var(--edge-hi);
+}
+
+#spend-table th:not(:first-child),
+#spend-table td:not(:first-child) {
+  text-align: right;
+}
+
+#spend-table tbody tr[data-kind] {
+  border-bottom: 1px solid var(--edge);
+  cursor: pointer;
+}
+
+/* A row you have moved to with j/k, or clicked. A flat highlight, never a
+   transition -- an inset edge rather than a border, so it never nudges the
+   column widths beside it. */
+#spend-table tr[aria-selected="true"] {
+  background: var(--panel);
+  box-shadow: inset 3px 0 0 var(--cyan);
+}
+
+#spend-table tr[data-kind="total"] td {
+  font-weight: 600;
+  color: var(--white);
+}
+
+.spendcalls td {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+  padding: 4px 8px 8px 20px;
+  border-bottom: 1px solid var(--edge);
+}
+
+.spendcall { padding: 2px 0; }
+.spendcallline { padding: 2px 0; color: var(--grey); }
+
+.spendmore { margin-top: 4px; padding: 2px 7px; font-size: 9.5px; }
+
+.spendcaveat {
+  padding: 8px 0 0;
+  font-size: 11px;
+  color: var(--grey);
+  line-height: 1.4;
+}

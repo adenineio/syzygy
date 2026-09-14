@@ -26,6 +26,35 @@ export const FINDINGS_FILE = 'findings.json'
  *  restarts. Oldest go first. */
 export const FINDINGS_MAX = 200
 
+/** How many records ride on `snapshot()` and on the `findings` SSE event.
+ *  Smaller than FINDINGS_MAX on purpose: the snapshot goes to every pane on
+ *  connect and on every /api/state, and 200 records is ~80 KB of it for a
+ *  panel that shows a page at a time. The full store stays reachable at
+ *  GET /api/findings?limit=200. */
+export const FINDINGS_IN_SNAPSHOT = 50
+
+/** Six SHAPES OF FACT, deliberately not six degrees of importance: a session
+ *  classifying its own discovery by how much it matters is doing the
+ *  evaluator's job with the least context of anyone. */
+export const KINDS = new Set([
+  'constraint',   // a flag, an API or the platform binds other work
+  'drift',        // code and its doc/spec/plan/comment disagree
+  'hazard',       // a path that silently answers wrong rather than failing
+  'dead-code',    // reachable by nothing, or shipped and never wired
+  'duplicate',    // two implementations of one thing, found independently
+  'question',     // a shape question raised and deliberately not answered here
+])
+
+/** At least one evidence entry carries a line number. This is where `file:line`
+ *  specificity is REPORTED, and it is never enforced here: the store validates
+ *  `evidence` no further than "a non-empty string", because repo-relative,
+ *  absolute and file:line:col forms all arrive in practice, and an older
+ *  writer, a hand edit and the orchestrator all reach POST /api/findings.
+ *  hud.tsx's report_finding tool refuses a call without it, which is where
+ *  the fix is free: the model is right there. */
+export const hasLineEvidence = (evidence) =>
+  Array.isArray(evidence) && evidence.some((e) => typeof e === 'string' && /:\d+(:\d+)?$/.test(e.trim()))
+
 /** Per-field caps. One runaway record must not be able to eat the bundle's
  * whole 80 KB budget on its own. */
 export const SURPRISE_MAX = 2000
@@ -68,9 +97,15 @@ export const sanitizeFinding = (raw) => {
   if (!surprise) return null
   const t = Number(raw.t)
   if (!Number.isFinite(t) || t <= 0) return null
+  // NOT defaulted to a kind nobody chose. An unrecognised value becomes '',
+  // which renders as "unclassified" and matches the filter's "any" -- a typo
+  // must never masquerade as a real kind inside a filter.
+  const rawKind = text(raw.kind, 32)
+  const kind = KINDS.has(rawKind) ? rawKind : ''
   return {
     id: text(raw.id, 40) || uid(),
     t,
+    kind,
     session: text(raw.session, NAME_MAX),
     project: text(raw.project, NAME_MAX),
     touched: list(raw.touched),

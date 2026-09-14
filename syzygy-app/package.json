@@ -1,0 +1,14 @@
+{
+  "name": "syzygy-app",
+  "private": true,
+  "version": "0.1.0",
+  "productName": "Syzygy",
+  "description": "The Syzygy pane as a macOS app",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "main.js",
+  "devDependencies": {
+    "electron": "44.3.0",
+    "@electron/packager": "20.3.0"
+  }
+}

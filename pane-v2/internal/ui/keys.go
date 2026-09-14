@@ -2,8 +2,7 @@ package ui
 
 import "charm.land/bubbles/v2/key"
 
-// Mode is the pane's mode enum. Every mode but CONSOLE is implemented; that
-// one switches and renders a "not built yet" placeholder.
+// Mode is the pane's mode enum. Every mode is implemented.
 type Mode int
 
 const (
@@ -11,8 +10,11 @@ const (
 	ModeVitals Mode = iota
 	// ModeFeed is the scrolling event feed.
 	ModeFeed
-	// ModeConsole is not built yet.
-	ModeConsole
+	// ModePaste is the pasteboard: prompts stashed with the band's marker,
+	// reloadable into a session's composer. It takes the digit CONSOLE held
+	// and never built, so the strip stays at seven tabs -- an eighth would
+	// move the width arithmetic again, the way HOTKEYS did.
+	ModePaste
 	// ModeBoard is the switchboard.
 	ModeBoard
 	// ModeGrid is the patch bay: cards, drag-to-link, the notes form.
@@ -23,10 +25,17 @@ const (
 	// ModeHotkeys edits the AbovePrompt band's eight prompt slots, in the
 	// global config file or in this worktree's override.
 	ModeHotkeys
+	// ModeChain is the focused session's topic chain: its blocks down a spine,
+	// their summaries and turns, and the chain's revisions. It is reached
+	// through the leader, never a digit, and is on no tab. Appended last so
+	// every mode above keeps its value.
+	ModeChain
 )
 
-// Built reports whether a mode has a real implementation yet.
-func (m Mode) Built() bool { return m != ModeConsole }
+// Built reports whether a mode has a real implementation yet. Every one does
+// since PASTE took the CONSOLE slot; the method stays because --mode and the
+// tab strip both ask, and the next unbuilt mode will want it.
+func (m Mode) Built() bool { return true }
 
 // ListsAll reports whether a mode already shows every session, so the OTHERS
 // footer would only repeat the body.
@@ -42,8 +51,8 @@ func (m Mode) Label() string {
 	switch m {
 	case ModeFeed:
 		return "FEED"
-	case ModeConsole:
-		return "CONSOLE"
+	case ModePaste:
+		return "PASTE"
 	case ModeBoard:
 		return "BOARD"
 	case ModeGrid:
@@ -52,6 +61,8 @@ func (m Mode) Label() string {
 		return "MINE"
 	case ModeHotkeys:
 		return "HOTKEYS"
+	case ModeChain:
+		return "CHAIN"
 	default:
 		return "VITALS"
 	}
@@ -62,8 +73,8 @@ func (m Mode) Short() string {
 	switch m {
 	case ModeFeed:
 		return "FEED"
-	case ModeConsole:
-		return "CON"
+	case ModePaste:
+		return "PASTE"
 	case ModeBoard:
 		return "BRD"
 	case ModeGrid:
@@ -72,6 +83,8 @@ func (m Mode) Short() string {
 		return "MINE"
 	case ModeHotkeys:
 		return "KEYS"
+	case ModeChain:
+		return "CHAIN"
 	default:
 		return "VIT"
 	}
@@ -95,8 +108,8 @@ func (m Mode) Tiny() string {
 	switch m {
 	case ModeFeed:
 		return "F"
-	case ModeConsole:
-		return "C"
+	case ModePaste:
+		return "P"
 	case ModeBoard:
 		return "B"
 	case ModeGrid:
@@ -105,6 +118,10 @@ func (m Mode) Tiny() string {
 		return "M"
 	case ModeHotkeys:
 		return "H"
+	case ModeChain:
+		// Three cells, not one: a bank mode never reaches layTabs, so this is
+		// read only by the header's lit block, where 41 columns leave room.
+		return "CHN"
 	default:
 		return "V"
 	}
@@ -115,8 +132,8 @@ func ParseMode(s string) Mode {
 	switch s {
 	case "feed":
 		return ModeFeed
-	case "console":
-		return ModeConsole
+	case "paste", "pasteboard":
+		return ModePaste
 	case "board":
 		return ModeBoard
 	case "grid":
@@ -125,6 +142,8 @@ func ParseMode(s string) Mode {
 		return ModeMine
 	case "hotkeys", "keys":
 		return ModeHotkeys
+	case "chain":
+		return ModeChain
 	default:
 		return ModeVitals
 	}
@@ -132,7 +151,7 @@ func ParseMode(s string) Mode {
 
 // AllModes is the tab strip order.
 var AllModes = []Mode{
-	ModeVitals, ModeFeed, ModeConsole, ModeBoard, ModeGrid, ModeMine, ModeHotkeys,
+	ModeVitals, ModeFeed, ModePaste, ModeBoard, ModeGrid, ModeMine, ModeHotkeys,
 }
 
 // GlobalKeys are live in every mode. Every one of them is blind-safe except
@@ -140,7 +159,7 @@ var AllModes = []Mode{
 type GlobalKeys struct {
 	Vitals    key.Binding
 	Feed      key.Binding
-	Console   key.Binding
+	Paste     key.Binding
 	Board     key.Binding
 	Grid      key.Binding
 	Mine      key.Binding
@@ -151,7 +170,10 @@ type GlobalKeys struct {
 	Help      key.Binding
 	Reconnect key.Binding
 	Esc       key.Binding
-	Quit      key.Binding
+	// Leader is space: a prefix whose next keystroke picks from ModeBank, the
+	// modes that have no digit and no tab.
+	Leader key.Binding
+	Quit   key.Binding
 }
 
 // VitalsKeys are the mode-1 bindings. Vitals is read-only, so scrolling and
@@ -177,24 +199,25 @@ type FeedKeys struct {
 	Follow   key.Binding
 }
 
-// BoardKeys are the mode-4 bindings.
-//
-// The x kill is deliberately absent: it is specified as an armed action and
-// the armed strip does not exist yet. A key that silently does nothing is
-// worse than no key, and an unconfirmed kill is worse than either, so x lands
-// with the strip rather than before it.
+// BoardKeys are the mode-4 bindings. The destructive pair is a plain/modified
+// one: x is about the row -- the session -- and X reaches inside it. Both are
+// armed, so the first press only says what the second will do.
 type BoardKeys struct {
-	Up    key.Binding
-	Down  key.Binding
-	Focus key.Binding
-	Link  key.Binding
+	Up, Down   key.Binding
+	Focus      key.Binding
+	Link       key.Binding
+	Kill       key.Binding
+	KillAgents key.Binding
+	Jump       key.Binding
 }
 
 // GridKeys are the mode-5 bindings. l is link, as on BOARD, so the right
-// arrow alone steps right.
+// arrow alone steps right. w and W are the plain/modified pair for the settled
+// wires: w shows or hides them all, W narrows them to the cursor card's own.
 type GridKeys struct {
 	Up, Down, Left, Right    key.Binding
 	Link, Batch, Undo, Notes key.Binding
+	Wires, WiresFocus        key.Binding
 }
 
 // MineKeys are the mode-6 bindings. MINE is read-only, like VITALS, so
@@ -204,14 +227,46 @@ type MineKeys struct {
 	Down key.Binding
 }
 
-// HotkeysKeys are the mode-6 bindings. Clear is the one destructive key in
-// the pane, so it is a two-press confirm rather than a single stroke: the
-// armed strip that would replace it does not exist yet, and an unconfirmed
-// destructive key is worse than no key at all.
+// HotkeysKeys are the mode-6 bindings. Clear is destructive, so it is a
+// two-press confirm on the armed strip rather than a single stroke: an
+// unconfirmed destructive key is worse than no key at all.
 type HotkeysKeys struct {
 	Up, Down      key.Binding
 	Edit, Clear   key.Binding
 	Scope, Reload key.Binding
+}
+
+// PasteKeys are the mode-3 bindings. j/k move the cursor and J/K move the
+// entry under it -- the modified form of the same gesture, the way a visual
+// drag is the modified form of a motion in vim. Delete is the one destructive
+// key, so it is a two-press confirm for exactly the reason HotkeysKeys gives.
+type PasteKeys struct {
+	Up, Down         key.Binding
+	MoveUp, MoveDown key.Binding
+	Fill, Delete     key.Binding
+	Scope            key.Binding
+}
+
+// ChainKeys are CHAIN's bindings, reached with space c. Each plain key has a
+// modified form one step wider: J/K jump between branches where j/k step one
+// block, E opens the block full-screen where enter expands it in place, P pins
+// every older block where p pins one, M merges into the block below where m
+// merges into the one above, and R rebuilds the whole chain where r refines it.
+// m, M, s and R are destructive, so each is a two-press confirm.
+//
+// R is the global reconnect everywhere else. CHAIN's handler runs before the
+// global bindings, so inside this mode it rebuilds; m likewise merges here and
+// opens MINE elsewhere.
+type ChainKeys struct {
+	Up, Down               key.Binding
+	NextBranch, PrevBranch key.Binding
+	Open, Full             key.Binding
+	Collapse, Expand       key.Binding
+	Pin, PinBack           key.Binding
+	Merge, MergeNext       key.Binding
+	Split                  key.Binding
+	Refine, Rebuild        key.Binding
+	History                key.Binding
 }
 
 // FormKeys are live only while the notes form is open; every other key types.
@@ -230,6 +285,8 @@ type KeyMaps struct {
 	Grid    GridKeys
 	Mine    MineKeys
 	Hotkeys HotkeysKeys
+	Paste   PasteKeys
+	Chain   ChainKeys
 	Form    FormKeys
 }
 
@@ -239,7 +296,7 @@ func DefaultKeys() KeyMaps {
 		Global: GlobalKeys{
 			Vitals:    key.NewBinding(key.WithKeys("1"), key.WithHelp("1-5,m", "mode")),
 			Feed:      key.NewBinding(key.WithKeys("2"), key.WithHelp("2", "feed")),
-			Console:   key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "steer")),
+			Paste:     key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "paste")),
 			Board:     key.NewBinding(key.WithKeys("4"), key.WithHelp("4", "board")),
 			Grid:      key.NewBinding(key.WithKeys("5"), key.WithHelp("5", "grid")),
 			Mine:      key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "mine")),
@@ -250,6 +307,7 @@ func DefaultKeys() KeyMaps {
 			Help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 			Reconnect: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "reconnect")),
 			Esc:       key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "cancel")),
+			Leader:    key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "modes")),
 			Quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 		},
 		Vitals: VitalsKeys{
@@ -268,20 +326,25 @@ func DefaultKeys() KeyMaps {
 			Follow:   key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow")),
 		},
 		Board: BoardKeys{
-			Up:    key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("j/k", "move")),
-			Down:  key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/k", "move")),
-			Focus: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "focus")),
-			Link:  key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "link")),
+			Up:         key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("j/k", "move")),
+			Down:       key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/k", "move")),
+			Focus:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "focus")),
+			Link:       key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "link")),
+			Kill:       key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "close")),
+			KillAgents: key.NewBinding(key.WithKeys("X")),
+			Jump:       key.NewBinding(key.WithKeys("alt+enter", "J"), key.WithHelp("alt+enter", "jump")),
 		},
 		Grid: GridKeys{
-			Up:    key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("j/k", "move")),
-			Down:  key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/k", "move")),
-			Left:  key.NewBinding(key.WithKeys("h", "left"), key.WithHelp("h/→", "step")),
-			Right: key.NewBinding(key.WithKeys("right"), key.WithHelp("h/→", "step")),
-			Link:  key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "link")),
-			Batch: key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "batch")),
-			Undo:  key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "undo")),
-			Notes: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "notes")),
+			Up:         key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("j/k", "move")),
+			Down:       key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/k", "move")),
+			Left:       key.NewBinding(key.WithKeys("h", "left"), key.WithHelp("h/→", "step")),
+			Right:      key.NewBinding(key.WithKeys("right"), key.WithHelp("h/→", "step")),
+			Link:       key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "link")),
+			Batch:      key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "batch")),
+			Undo:       key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "undo")),
+			Notes:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "notes")),
+			Wires:      key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "wires")),
+			WiresFocus: key.NewBinding(key.WithKeys("W")),
 		},
 		Mine: MineKeys{
 			Up:   key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("j/k", "scroll")),
@@ -294,6 +357,33 @@ func DefaultKeys() KeyMaps {
 			Clear:  key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "clear")),
 			Scope:  key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "scope")),
 			Reload: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reload")),
+		},
+		Paste: PasteKeys{
+			Up:       key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("j/k", "move")),
+			Down:     key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/k", "move")),
+			MoveUp:   key.NewBinding(key.WithKeys("K")),
+			MoveDown: key.NewBinding(key.WithKeys("J"), key.WithHelp("J/K", "reorder")),
+			Fill:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "fill")),
+			Delete:   key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete")),
+			Scope:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "scope")),
+		},
+		Chain: ChainKeys{
+			Up:         key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("j/k", "move")),
+			Down:       key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/k", "move")),
+			NextBranch: key.NewBinding(key.WithKeys("J"), key.WithHelp("J/K", "jump to a branch")),
+			PrevBranch: key.NewBinding(key.WithKeys("K")),
+			Open:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "expand the block")),
+			Full:       key.NewBinding(key.WithKeys("E"), key.WithHelp("E", "the block full-screen")),
+			Collapse:   key.NewBinding(key.WithKeys("h"), key.WithHelp("h/l", "collapse/expand all")),
+			Expand:     key.NewBinding(key.WithKeys("l")),
+			Pin:        key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "pin")),
+			PinBack:    key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "pin every older block")),
+			Merge:      key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "merge into the block above")),
+			MergeNext:  key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "merge into the block below")),
+			Split:      key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "split at a turn")),
+			Refine:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refine now")),
+			Rebuild:    key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rebuild; discards pins")),
+			History:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "history")),
 		},
 		Form: FormKeys{
 			Next:  key.NewBinding(key.WithKeys("enter")),
@@ -326,13 +416,13 @@ func (k KeyMaps) ShortHelp(m Mode) []key.Binding {
 		// mode digits and the board tab give way rather than let the ellipsis
 		// eat `q quit` off the end.
 		return []key.Binding{
-			k.Feed.Down, k.Feed.Newest, k.Feed.Follow, k.Global.Console, k.Global.Quit,
+			k.Feed.Down, k.Feed.Newest, k.Feed.Follow, k.Global.Paste, k.Global.Quit,
 		}
 	}
 	if m == ModeBoard {
-		// BOARD's footer. The board's own four keys earn the row.
+		// BOARD's footer. The board's own keys earn the row.
 		return []key.Binding{
-			k.Board.Down, k.Board.Focus, k.Global.Home, k.Board.Link, k.Global.Quit,
+			k.Board.Down, k.Board.Focus, k.Global.Home, k.Board.Link, k.Board.Kill, k.Global.Quit,
 		}
 	}
 	if m == ModeGrid {
@@ -350,12 +440,26 @@ func (k KeyMaps) ShortHelp(m Mode) []key.Binding {
 			k.Hotkeys.Clear, k.Hotkeys.Reload,
 		}
 	}
+	if m == ModePaste {
+		// Ordered so the ellipsis at 41 columns keeps move, fill, scope, quit
+		// -- the two that do something, the one that changes what you see, and
+		// the one that leaves.
+		return []key.Binding{
+			k.Paste.Down, k.Paste.Fill, k.Paste.Scope, k.Global.Quit,
+			k.Paste.Delete, k.Paste.MoveDown,
+		}
+	}
+	if m == ModeChain {
+		// Stands only when CHAIN's own hint row steps aside, which is with no
+		// write credential, so the reading keys lead.
+		return []key.Binding{k.Chain.Down, k.Chain.Open, k.Chain.History, k.Global.Quit, k.Chain.Full}
+	}
 	base := []key.Binding{k.Global.Vitals}
 	switch m {
 	case ModeVitals:
 		base = append(base, k.Vitals.Down)
 	}
-	return append(base, k.Global.Console, k.Global.Board, k.Global.Quit)
+	return append(base, k.Global.Paste, k.Global.Board, k.Global.Quit)
 }
 
 // FullHelp is the ? overlay's groups.
@@ -367,18 +471,27 @@ func (k KeyMaps) FullHelp(m Mode) [][]key.Binding {
 	case ModeFeed:
 		mode = append(mode, k.Feed.Down, k.Feed.PageDown, k.Feed.Newest, k.Feed.Follow)
 	case ModeBoard:
-		mode = append(mode, k.Board.Down, k.Board.Focus, k.Board.Link)
+		mode = append(mode, k.Board.Down, k.Board.Focus, k.Board.Link,
+			k.Board.Kill, k.Board.KillAgents, k.Board.Jump)
 	case ModeMine:
 		mode = append(mode, k.Mine.Down)
 	case ModeHotkeys:
 		mode = append(mode, k.Hotkeys.Down, k.Hotkeys.Edit, k.Hotkeys.Clear,
 			k.Hotkeys.Scope, k.Hotkeys.Reload)
+	case ModePaste:
+		mode = append(mode, k.Paste.Down, k.Paste.Fill, k.Paste.Delete,
+			k.Paste.Scope, k.Paste.MoveDown)
 	case ModeGrid:
-		mode = append(mode, k.Grid.Down, k.Grid.Left, k.Grid.Link, k.Grid.Batch, k.Grid.Notes, k.Grid.Undo)
+		mode = append(mode, k.Grid.Down, k.Grid.Left, k.Grid.Link, k.Grid.Batch, k.Grid.Notes, k.Grid.Undo,
+			k.Grid.Wires)
+	case ModeChain:
+		mode = append(mode, k.Chain.Down, k.Chain.NextBranch, k.Chain.Open, k.Chain.Full,
+			k.Chain.Collapse, k.Chain.Pin, k.Chain.PinBack, k.Chain.Merge, k.Chain.MergeNext,
+			k.Chain.Split, k.Chain.Refine, k.Chain.Rebuild, k.Chain.History)
 	}
 	return [][]key.Binding{
 		mode,
 		{k.Global.Vitals, k.Global.Next, k.Global.Home},
-		{k.Global.Help, k.Global.Reconnect, k.Global.Quit},
+		{k.Global.Leader, k.Global.Help, k.Global.Reconnect, k.Global.Quit},
 	}
 }

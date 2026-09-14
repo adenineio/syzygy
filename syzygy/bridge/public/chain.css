@@ -1,0 +1,49 @@
+/* Syzygy — the session drawer's Topic chain section (chain.js, MCTC).
+   Read-only: no button here posts anything.
+
+   NO ANIMATION AND NO TRANSITION ANYWHERE IN THIS FILE. Every radius reads
+   --r-surface / --r-control, never a literal number. .empty comes from
+   app.css and is reused as-is for #d-chain-empty. */
+
+.chrow {
+  padding: 7px 9px; margin-bottom: 6px;
+  border: 1px solid var(--edge-hi); border-left: 3px solid var(--edge-hi);
+  background: var(--panel); border-radius: var(--r-surface);
+}
+.chrow.chopen { border-left-color: var(--cyan); }
+
+.chhead { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+
+/* The branch indent: an empty spacer, built once and hidden with MCX.show
+   rather than added/removed -- shown, it pushes the rest of the row right by
+   its own width; gone, the row sits flush with every plain continuation. */
+.chindent { width: 14px; flex: 0 0 auto; }
+
+.chdot { font-size: 11px; line-height: 1; flex: 0 0 auto; color: var(--grey); }
+.chdot[data-state="open"] { color: var(--accent); }
+
+.chtitle {
+  flex: 1 1 auto; min-width: 0; font-size: 11.5px; color: var(--white);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.chcount { font-size: 9.5px; color: var(--grey); flex: 0 0 auto; }
+
+/* A faint tag, shown only for a block a model or a human touched -- the
+   heuristic boundary rule is the silent default. */
+.chby {
+  font-size: 8.5px; letter-spacing: .06em; color: var(--accent-dim);
+  flex: 0 0 auto; text-transform: uppercase;
+}
+
+.chbody { margin-top: 8px; padding-left: 18px; }
+.chsummary { font-size: 11.5px; color: var(--text); line-height: 1.45; margin-bottom: 6px; }
+
+.chturn { margin-bottom: 6px; }
+.chturn:last-child { margin-bottom: 0; }
+.chturnline {
+  font-size: 10.5px; color: var(--dim); line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.chnote { font-size: 10.5px; color: var(--grey); }

@@ -19,10 +19,7 @@ export const TINT = {
   'tool-input': { name: 'yellow', hex: '#fbbf24', word: 'inscribing' },
   'tool-use': { name: 'red', hex: '#f87171', word: 'conjuring' },
 }
-/** An escalated turn overrides the mode tint: whatever the agent is doing, the
- *  fact that it is doing it on a stronger model is the more important signal. */
-export const ESCALATED_TINT = { name: 'magenta', hex: '#b267e6', word: 'escalated' }
-const tintOf = (mode, escalated) => (escalated ? ESCALATED_TINT : (TINT[mode] ?? TINT.thinking))
+const tintOf = (mode) => TINT[mode] ?? TINT.thinking
 
 const BRASS = 'yellow'
 const MARSH = 'green'
@@ -51,8 +48,8 @@ const batX = (b, f, cols) => {
   return b % 2 === 0 ? x : cols - 1 - x
 }
 
-const belfryDraw = ({ frame: f, columns, mode, escalated }) => {
-  const tint = tintOf(mode, escalated)
+const belfryDraw = ({ frame: f, columns, mode }) => {
+  const tint = tintOf(mode)
   if (columns < 40) return badge(`[${FLAP[f % 4]}]`, mode)
   const sky = [blank(columns), blank(columns)]
   for (let x = 0; x < columns; x++) {
@@ -97,8 +94,8 @@ const FOG_STYLE = (lv, tint) =>
   : lv === 3 ? { color: tint.name, dim: true }
   : lv === 4 ? { color: tint.name } : {}
 
-const tideDraw = ({ frame: f, columns, mode, escalated }) => {
-  const tint = tintOf(mode, escalated)
+const tideDraw = ({ frame: f, columns, mode }) => {
+  const tint = tintOf(mode)
   if (columns < 24) return badge(`${DENSITY[fogLower(0, f)]}${DENSITY[fogLower(3, f)]}${DENSITY[fogLower(6, f)]}`, mode)
   const top = []
   const bottom = []
@@ -128,8 +125,8 @@ const COMPLEX = [
 ]
 const beatSpeed = (mode) => (mode === 'tool-use' ? 4 : mode === 'thinking' ? 2 : 3)
 
-const galvanicDraw = ({ frame: f, columns, mode, word, message, elapsedMs, escalated }) => {
-  const tint = tintOf(mode, escalated)
+const galvanicDraw = ({ frame: f, columns, mode, word, message, elapsedMs }) => {
+  const tint = tintOf(mode)
   if (columns < 40) return badge(['♥', '♥', '♡', '♡'][Math.floor(f / 2) % 4], mode)
   const label = `${message ?? word}…${elapsedMs > 0 ? ` (${Math.round(elapsedMs / 1000)}s)` : ''}`
   const capW = Math.min(24, label.length + 2)
@@ -167,8 +164,8 @@ const wispLevel = (i, f) => {
 const wispRow = (i, f) => Math.floor((f + i * 7) / 8) % 2
 const wispCol = (i, f) => WISP_BASE[i] + ((Math.floor((f + i * 3) / 6) % 3) - 1)
 
-const wispDraw = ({ frame: f, columns, mode, escalated }) => {
-  const tint = tintOf(mode, escalated)
+const wispDraw = ({ frame: f, columns, mode }) => {
+  const tint = tintOf(mode)
   const oneRow = columns < 30
   const rows = oneRow ? [blank(11)] : [blank(11), blank(11)]
   for (let i = 0; i < 3; i++) {
@@ -255,7 +252,7 @@ const glyphCells = (text, style) =>
 
 /** One row: the animation, then the caption, clipped to the terminal. */
 const lineWith = (art, ctx, artStyle) => {
-  const tint = tintOf(ctx.mode, ctx.escalated)
+  const tint = tintOf(ctx.mode)
   const elapsed = ctx.elapsedMs > 0 ? ` (${Math.round(ctx.elapsedMs / 1000)}s)` : ''
   const tail = `  ${ctx.message ?? ctx.word}…${elapsed}`
   const row = [...glyphCells(art, artStyle), ...cells(tail, { color: 'gray' })]
@@ -313,7 +310,7 @@ const lineSpinners = [
   {
     id: 'orbitline', name: 'Orbit', kind: 'line', rows: 1, every: 1, caption: 'none',
     draw: (ctx) => {
-      const tint = tintOf(ctx.mode, ctx.escalated)
+      const tint = tintOf(ctx.mode)
       const w = fieldWidth(ctx, 8, 24)
       const at = ctx.frame % (w * 2)
       const x = at < w ? at : w * 2 - at - 1
@@ -323,7 +320,7 @@ const lineSpinners = [
   {
     id: 'pulse', name: 'Pulse', kind: 'line', rows: 1, every: 1, caption: 'none',
     draw: (ctx) => {
-      const tint = tintOf(ctx.mode, ctx.escalated)
+      const tint = tintOf(ctx.mode)
       const w = fieldWidth(ctx, 8, 20)
       const lit = Math.round((Math.sin(ctx.frame / 5) * 0.5 + 0.5) * w)
       return lineWith('█'.repeat(lit) + '░'.repeat(Math.max(0, w - lit)), ctx, { color: tint.name })
@@ -332,7 +329,7 @@ const lineSpinners = [
   {
     id: 'drift', name: 'Drift', kind: 'line', rows: 1, every: 1, caption: 'none',
     draw: (ctx) => {
-      const tint = tintOf(ctx.mode, ctx.escalated)
+      const tint = tintOf(ctx.mode)
       return lineWith(BOUNCE.map((_, i) => BOUNCE[(ctx.frame + i * 2) % BOUNCE.length]).join(''), ctx, { color: tint.name, dim: true })
     },
   },
@@ -340,7 +337,7 @@ const lineSpinners = [
     // A Knight-Rider sweep: the head is white, the two cells behind it fade.
     id: 'scanner', name: 'Scanner', kind: 'line', rows: 1, every: 1, caption: 'none',
     draw: (ctx) => {
-      const tint = tintOf(ctx.mode, ctx.escalated)
+      const tint = tintOf(ctx.mode)
       const w = fieldWidth(ctx, 8, 22)
       const at = ctx.frame % (w * 2 - 2)
       const x = at < w ? at : w * 2 - 2 - at
@@ -359,7 +356,7 @@ const lineSpinners = [
     // An audio meter: two incommensurate sines so the bars never march in step.
     id: 'waveform', name: 'Waveform', kind: 'line', rows: 1, every: 1, caption: 'none',
     draw: (ctx) => {
-      const tint = tintOf(ctx.mode, ctx.escalated)
+      const tint = tintOf(ctx.mode)
       const w = fieldWidth(ctx, 10, 26)
       const field = []
       for (let i = 0; i < w; i++) {
@@ -374,7 +371,7 @@ const lineSpinners = [
     // The telegraph really transmits the turn's word: dot, dash, letter gap.
     id: 'morse', name: 'Telegraph', kind: 'line', rows: 1, every: 1, caption: 'none',
     draw: (ctx) => {
-      const tint = tintOf(ctx.mode, ctx.escalated)
+      const tint = tintOf(ctx.mode)
       const word = ((ctx.message ?? ctx.word) || 'WAITING').toUpperCase().replace(/[^A-Z]/g, '') || 'WAITING'
       const stream = []
       for (const ch of word) {
@@ -397,7 +394,7 @@ const lineSpinners = [
   {
     id: 'spiral', name: 'Spiral', kind: 'line', rows: 1, every: 1, caption: 'none',
     draw: (ctx) => {
-      const tint = tintOf(ctx.mode, ctx.escalated)
+      const tint = tintOf(ctx.mode)
       const art = [0, 1, 2].map((k) => SPIRAL[(ctx.frame + k * 5) % SPIRAL.length]).join(' ')
       return lineWith(art, ctx, { color: tint.hex, bold: true })
     },
@@ -405,7 +402,7 @@ const lineSpinners = [
   {
     id: 'rain', name: 'Downpour', kind: 'line', rows: 1, every: 1, caption: 'none',
     draw: (ctx) => {
-      const tint = tintOf(ctx.mode, ctx.escalated)
+      const tint = tintOf(ctx.mode)
       const w = fieldWidth(ctx, 10, 26)
       const field = []
       for (let i = 0; i < w; i++) {
@@ -422,7 +419,7 @@ const lineSpinners = [
     // The word resolves out of ciphertext, then scrambles again.
     id: 'cipher', name: 'Cipher', kind: 'line', rows: 1, every: 1, caption: 'none',
     draw: (ctx) => {
-      const tint = tintOf(ctx.mode, ctx.escalated)
+      const tint = tintOf(ctx.mode)
       const word = ((ctx.message ?? ctx.word) || 'working').slice(0, 18)
       const cycle = 40
       const k = ctx.frame % cycle
@@ -453,7 +450,7 @@ const blockSpinners = [
   // A bounce becomes a real orbit: an ellipse around a sun, with a trail that
   // follows the actual path rather than a straight line.
   block('orrery', 'Orrery', 3, 1, (ctx) => {
-    const tint = tintOf(ctx.mode, ctx.escalated)
+    const tint = tintOf(ctx.mode)
     const w = 17
     const rows = emptyRows(3, w)
     const pos = (k) => {
@@ -473,7 +470,7 @@ const blockSpinners = [
   // The comet now arcs: it climbs to the top row mid-flight and the tail
   // follows the curve instead of trailing flat behind it.
   block('perihelion', 'Perihelion', 3, 1, (ctx) => {
-    const tint = tintOf(ctx.mode, ctx.escalated)
+    const tint = tintOf(ctx.mode)
     const w = 26
     const rows = emptyRows(3, w)
     const span = w + 8
@@ -492,7 +489,7 @@ const blockSpinners = [
   // One bar becomes a meter with 24 levels and a true peak-hold: the marker is
   // the decaying maximum of the last second, not a differently-phased sample.
   block('equaliser', 'Equaliser', 3, 1, (ctx) => {
-    const tint = tintOf(ctx.mode, ctx.escalated)
+    const tint = tintOf(ctx.mode)
     const w = 22
     const rows = emptyRows(3, w)
     const levelAt = (i, f) => {
@@ -520,7 +517,7 @@ const blockSpinners = [
 
   // Depth: three layers drifting at different speeds, far ones dim and slow.
   block('parallax', 'Parallax', 3, 1, (ctx) => {
-    const tint = tintOf(ctx.mode, ctx.escalated)
+    const tint = tintOf(ctx.mode)
     const w = 24
     const rows = emptyRows(3, w)
     for (let r = 0; r < 3; r++) {
@@ -539,7 +536,7 @@ const blockSpinners = [
   // Twenty-four levels of vertical resolution, and consecutive samples are
   // joined: a scope draws a continuous trace, not a scatter of blocks.
   block('scope', 'Oscilloscope', 3, 1, (ctx) => {
-    const tint = tintOf(ctx.mode, ctx.escalated)
+    const tint = tintOf(ctx.mode)
     const w = 26
     const rows = emptyRows(3, w)
     const sample = (i) => {
@@ -570,7 +567,7 @@ const blockSpinners = [
 
   // Concentric rings turning at different rates — the inner one fastest.
   block('vortex', 'Vortex', 3, 1, (ctx) => {
-    const tint = tintOf(ctx.mode, ctx.escalated)
+    const tint = tintOf(ctx.mode)
     const w = 15
     const rows = emptyRows(3, w)
     const RING = [
@@ -594,7 +591,7 @@ const blockSpinners = [
   // put, a rotor steps through keys beneath it, and the plaintext resolves
   // left to right as each column falls — you can see the crack propagate.
   block('cryptanalysis', 'Cryptanalysis', 3, 1, (ctx) => {
-    const tint = tintOf(ctx.mode, ctx.escalated)
+    const tint = tintOf(ctx.mode)
     const plain = ((ctx.message ?? ctx.word) || 'working').slice(0, 22)
     const w = Math.max(plain.length + 4, 24)
     const rows = emptyRows(3, w)

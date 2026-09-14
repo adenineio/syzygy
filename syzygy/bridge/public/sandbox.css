@@ -1,0 +1,283 @@
+/* Syzygy -- the sandbox tab. A gallery of components tried on live board
+   data: a line layer drawn on one canvas behind the grid, and a grid of
+   panelled cells in front of it. Each cell paints its panel colour on its
+   head alone, so its stage is a transparent window onto the lines behind.
+   Flat, token-only, no animation or transition anywhere in this file. */
+
+/* An id selector outranks .view:not(.on), so display is only ever set here,
+   under .on -- setting it unconditionally would leave the section visible
+   before its class says so. */
+#view-sandbox.on { display: flex; padding: 12px; }
+.gpanel { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.gpanel .phead .spacer { flex: 1; }
+
+/* The calm dial, inline in the header. Not .picks (that class belongs to a
+   sibling file's markup); the same look, restated here so this file owns it
+   outright. */
+.gcalm { display: flex; gap: 5px; }
+.gcalm button {
+  font: inherit; font-size: 9px; letter-spacing: .12em; text-transform: uppercase;
+  padding: 4px 8px; cursor: pointer; color: var(--dim);
+  border: 1px solid var(--edge-hi); background: transparent;
+  border-radius: var(--r-control);
+}
+.gcalm button:hover { color: var(--accent); border-color: var(--accent-deep); }
+.gcalm button[aria-pressed="true"] {
+  color: var(--bg); background: var(--accent); border-color: var(--accent);
+}
+
+.glegend { padding: 6px 12px 0; font-size: 9.5px; line-height: 1.6; color: var(--grey); }
+.glegend kbd { background: var(--panel); border: 1px solid var(--edge-hi); padding: 0 4px; color: var(--dim); }
+
+/* The stage draws behind the grid on one canvas the size of the wrap's
+   visible box; a cell's own rectangle is scissored out of it, which is why
+   the grid sits in front (z-index 1) and the canvas sits flat behind it
+   (z-index 0) and never intercepts a pointer of its own. An absolutely
+   positioned child of a scrolling box scrolls with its content, so the stage
+   writes the wrap's scroll offsets onto `left` and `top` to keep the canvas
+   over the visible part. Its height is the wrap's client height and never its
+   content's, so it never adds to what can be scrolled. `display` is never set
+   here, so [hidden] still hides it. */
+.gwrap { position: relative; flex: 1; min-height: 0; overflow: auto; background: var(--surface); }
+.glines { position: absolute; left: 0; top: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; }
+/* min-height keeps the grid at least as tall as the wrap even when its own
+   content is shorter -- taking a cell out of flow with position:absolute
+   (below) shrinks what the grid would otherwise measure to, and an expanded
+   cell has to reach the wrap's real edges, not a collapsed one. */
+.gcells {
+  position: relative; z-index: 1; min-height: 100%;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px; padding: 12px;
+}
+
+/* The panel colour lives on the head, not the cell: a background on the cell
+   would paint over the line canvas behind its stage, since the stage is the
+   cell's child and a transparent child cannot see through its parent's own
+   background. The head's negative margin carries the colour out to the
+   border, and overflow clips it to the cell's corners. */
+.gcell {
+  display: flex; flex-direction: column;
+  padding: 9px 11px 8px;
+  border: 1px solid var(--edge); background: transparent;
+  border-radius: var(--r-surface);
+  overflow: hidden;
+}
+:root[data-corners="sharp"] .gcell {
+  border-radius: 0;
+  clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
+}
+/* A plain click's expand gesture: the cell leaves the grid and covers the
+   whole of it instead, `.gcells`'s own min-height keeping that whole exactly
+   the wrap's visible box. At most one cell ever carries this class. */
+.gcell.expanded {
+  position: absolute; inset: 0; z-index: 2;
+}
+/* Full screen is the WRAP going full screen, not the cell: `.gcells` and
+   `.glines` are both already sized off `.gwrap`, so promoting it carries the
+   line canvas and the grid's own min-height along for free and the rule
+   above never has to know the difference -- the cell still just fills
+   `.gcells`. The padding leaves a gap for the corner token (and the sharp
+   chamfer) to read against, filled by this rule's own opaque background
+   rather than whatever sits behind the pane. 50 clears the tab strip
+   (unpositioned) and stays under the command bar's modal and its
+   quick-access deck, so either can still open over a full-screen cell. */
+.gwrap:has(.gcell.expanded) {
+  position: fixed; inset: 0; z-index: 50; padding: 12px;
+}
+.ghead {
+  display: flex; flex-direction: column; gap: 4px;
+  margin: -9px -11px 0; padding: 9px 11px 8px;
+  background: var(--panel);
+}
+.gtitlerow { display: flex; align-items: center; gap: 8px; }
+.gtitle { flex: 1; font-size: 11px; letter-spacing: .04em; color: var(--white); }
+.gblurb { font-size: 10px; line-height: 1.4; color: var(--dim); }
+
+/* The mark badge: one token colour per state, read from data-mark alone --
+   never a class, so MCX.show's .gone always survives a reconcile pass. */
+.gmark {
+  font: inherit; font-size: 9px; letter-spacing: .1em; text-transform: uppercase;
+  padding: 3px 7px; cursor: pointer; color: var(--dim);
+  border: 1px solid var(--edge-hi); background: transparent;
+  border-radius: var(--r-control);
+}
+.gmark[data-mark=""] { color: var(--grey); border-color: var(--edge-hi); }
+.gmark[data-mark="good"] { color: var(--bg); background: var(--green); border-color: var(--green); }
+.gmark[data-mark="near"] { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+.gmark[data-mark="potential"] { color: var(--amber-hot); background: transparent; border-color: var(--amber); }
+
+/* The stage's mount point: transparent so the line canvas behind it shows
+   through, sized so a cell reads as a real stage even before anything is
+   mounted into it. flex:1 costs nothing in the grid, where a cell's height
+   is exactly its content, but is what lets an expanded cell's extra height
+   reach the stage instead of sitting empty below it. */
+.gstage { position: relative; flex: 1; min-height: 320px; background: transparent; border-radius: var(--r-surface); }
+
+/* The stage's CSS3D layer, laid over the mount point at its own size, which
+   the stage sets; it clips its own overflow. */
+.gcss { position: absolute; left: 0; top: 0; border-radius: inherit; }
+
+/* The parameter panel: a real DOM sibling of the CSS3D layer inside the
+   stage, covering it outright (a solid background, so nothing drawn behind
+   it shows through) while leaving the header -- title and mark badge --
+   visible above. Hidden with MCX.show, so its own .gone survives every
+   reconcile pass the way the badge's does. */
+.gparams {
+  position: absolute; inset: 0; z-index: 3;
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 10px 11px; overflow: auto;
+  background: var(--panel); border-radius: inherit;
+}
+.gptitle { font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); }
+.gpnote { margin: 0; font-size: 10px; line-height: 1.4; color: var(--dim); }
+.gpcalm { flex-wrap: wrap; }
+.gpknobs { display: flex; flex-direction: column; gap: 8px; }
+.gpknob {
+  display: grid; grid-template-columns: 1fr auto; align-items: center;
+  column-gap: 8px; row-gap: 2px;
+}
+.gpklabel { grid-column: 1; font-size: 10px; color: var(--text); }
+.gpkval {
+  grid-column: 2; grid-row: 1; font-size: 9.5px; color: var(--dim);
+  font-variant-numeric: tabular-nums; text-align: right;
+}
+.gpknob input[type="range"] { grid-column: 1 / -1; grid-row: 2; width: 100%; accent-color: var(--accent); }
+/* The data-mode switch: the same look as .gcalm, restated for the same
+   reason -- one setting reachable from a settings-style pill group, owned
+   outright by this file rather than borrowed from a sibling's markup. */
+.gdata { display: flex; gap: 5px; }
+.gdata button {
+  font: inherit; font-size: 9px; letter-spacing: .12em; text-transform: uppercase;
+  padding: 4px 8px; cursor: pointer; color: var(--dim);
+  border: 1px solid var(--edge-hi); background: transparent;
+  border-radius: var(--r-control);
+}
+.gdata button:hover { color: var(--accent); border-color: var(--accent-deep); }
+.gdata button[aria-pressed="true"] {
+  color: var(--bg); background: var(--accent); border-color: var(--accent);
+}
+
+/* The session card: a real panel the stage places in 3D. Its size is fixed
+   here, and the stage's layout constants hold the same numbers; nothing ever
+   scales it. The stage restores text selection on the element itself, since
+   the 3D wrapper turns it off inline, and the CSS3D camera layer turns
+   pointer events off for everything beneath it, so the card turns them back
+   on. */
+.gcard {
+  width: 214px; height: 128px; padding: 10px 11px;
+  line-height: 1.2; color: var(--text); cursor: default;
+  background: var(--panel);
+  border: 1px solid var(--edge-hi); border-radius: var(--r-surface);
+  pointer-events: auto; user-select: text; -webkit-user-select: text;
+}
+.gcard.hot { border-color: var(--accent-deep); }
+
+/* The card's line frame: an SVG inside the tilted element, reaching 12px past
+   the border on every side (13px from the padding box the offset is measured
+   against). Stroked from tokens alone, so a theme change needs no code. */
+.gframe {
+  position: absolute; left: -13px; top: -13px;
+  fill: none; stroke: var(--edge); stroke-width: 1;
+  pointer-events: none; overflow: visible;
+}
+.gframe path { vector-effect: non-scaling-stroke; }
+.gcard.hot .gframe { stroke: var(--accent); }
+
+.gchead { display: flex; align-items: center; gap: 6px; min-width: 0; margin-bottom: 7px; }
+.gcdot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--accent); }
+.gcard.busy .gcdot { background: var(--amber); }
+.gcname {
+  min-width: 0; font-size: 10.5px; font-weight: 500; color: var(--white);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.gcmeta {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  font-size: 9.5px; color: var(--dim);
+}
+.gcmodel {
+  min-width: 0; padding: 1px 7px; color: var(--accent);
+  border: 1px solid var(--edge-hi); border-radius: var(--r-control);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.gcpct { flex: none; color: var(--text); font-variant-numeric: tabular-nums; }
+.gcbar { height: 3px; margin: 7px 0 8px; overflow: hidden; background: var(--edge); border-radius: var(--r-control); }
+.gcbar i { display: block; width: 0; height: 100%; background: var(--accent); }
+.gcline {
+  height: 13px; line-height: 13px; font-size: 9.5px; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* Which peer's ask this session is working on; an empty line when none. */
+.gcpeer { color: var(--accent); }
+.gcfoot {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  margin-top: 6px; font-size: 9px; color: var(--dim);
+}
+.gagents {
+  font: inherit; font-size: 9px; padding: 1px 8px; cursor: pointer;
+  color: var(--text); background: transparent;
+  border: 1px solid var(--edge-hi); border-radius: var(--r-control);
+}
+.gagents:hover { color: var(--accent); border-color: var(--accent-deep); }
+.gagents[aria-pressed="true"] { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+/* A card parked at the edge while another card's fly-out is open: its badge
+   does nothing, so it does not look pressable. */
+.gcard.parked .gagents { cursor: default; }
+.gcstat { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* A subagent's card, popped out beside its session's card: the same panel and
+   line frame at a fixed fraction of the session card's size, and the stage's
+   child constants hold these same numbers. Its opacity is animated from the
+   stage; nothing here moves. */
+.gcard.gkid { width: 128px; height: 77px; padding: 7px 8px; }
+.gkid .gchead { margin-bottom: 4px; }
+.gkid .gcname { font-size: 9.5px; }
+.gkdesc {
+  height: 24px; overflow: hidden; font-size: 9px; line-height: 12px; color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.gkid .gcline { margin-top: 3px; height: 12px; line-height: 12px; font-size: 9px; }
+
+/* The worktree graph's labels: real panels the stage places in 3D, one per
+   project, branch or commit, at fixed sizes the stage's scene geometry holds
+   too. Like the card, each turns pointer events and text selection back on
+   under the 3D layer. The lines between them are drawn behind, on the line
+   canvas. Their opacity is animated from the stage; nothing here moves. */
+.gnode {
+  overflow: hidden; padding: 6px 9px;
+  line-height: 1.2; color: var(--text); cursor: default;
+  background: var(--panel);
+  border: 1px solid var(--edge-hi); border-radius: var(--r-control);
+  pointer-events: auto; user-select: text; -webkit-user-select: text;
+}
+.gnproj { width: 164px; height: 62px; cursor: pointer; }
+.gnbranch { width: 176px; height: 46px; cursor: pointer; }
+.gnproj:hover, .gnbranch:hover { border-color: var(--accent-deep); }
+.gnode.focus { border-color: var(--accent); }
+.gnname {
+  font-size: 10.5px; font-weight: 500; color: var(--white);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* A project's second line: its branch count, or the sentence that says why
+   it has no graph to draw. */
+.gnsub {
+  margin-top: 2px; font-size: 9px; line-height: 11px; color: var(--dim);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.gnproj[data-state="graph"] .gnsub { color: var(--text); }
+.gnrow {
+  display: flex; align-items: baseline; gap: 4px; margin-top: 5px;
+  font-size: 9.5px; color: var(--dim); white-space: nowrap;
+}
+.gnsha { flex: none; font-family: var(--mono); color: var(--accent); }
+.gncount { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The ahead/behind column. Empty when nothing was measured. */
+.gnab { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text); }
+.gnbranch.base .gnab { color: var(--accent); }
+.gncommit, .gnnote {
+  display: flex; align-items: center; gap: 8px;
+  width: 260px; height: 30px; padding: 0 9px; font-size: 9.5px;
+}
+.gncommit .gnsha { font-size: 9px; }
+.gncommit.merge .gnsha { color: var(--amber); }
+.gnsubj { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gnnote { color: var(--dim); border-style: dashed; }

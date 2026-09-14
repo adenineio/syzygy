@@ -32,6 +32,10 @@ type Source interface {
 	Msgs() <-chan Msg
 	// Post performs a token-authed write. Label is echoed back in the result.
 	Post(ctx context.Context, path string, body map[string]any) (int, error)
+	// Get performs a token-authed read. The body is capped; a non-2xx status
+	// is returned rather than an error, so a caller can tell 404 from a dead
+	// relay.
+	Get(ctx context.Context, path string) ([]byte, int, error)
 	// Reconnect drops the current stream and retries immediately.
 	Reconnect()
 }
@@ -227,6 +231,36 @@ func (c *Client) stream(ctx context.Context) (sawSnapshot bool, err error) {
 				return
 			}
 			c.send(ctx, ProjectsMsg(v))
+		case "pasteboard":
+			// The one other wrapped payload beside `viewers`:
+			// broadcast('pasteboard', { pasteboard: [...] }).
+			var w struct {
+				Pasteboard []Paste `json:"pasteboard"`
+			}
+			if e := json.Unmarshal(payload, &w); e != nil {
+				c.debugf("pasteboard decode: %v", e)
+				return
+			}
+			c.send(ctx, PasteboardMsg(w.Pasteboard))
+		case "chain":
+			// Wrapped like `pasteboard`, and per session:
+			// broadcast('chain', { sessionId, chain }).
+			var v ChainMsg
+			if e := json.Unmarshal(payload, &v); e != nil {
+				c.debugf("chain decode: %v", e)
+				return
+			}
+			if v.SessionID == "" {
+				return
+			}
+			c.send(ctx, v)
+		case "canvas":
+			var v Canvas
+			if e := json.Unmarshal(payload, &v); e != nil {
+				c.debugf("canvas decode: %v", e)
+				return
+			}
+			c.send(ctx, CanvasMsg(v))
 		case "events":
 			var v []Event
 			if e := json.Unmarshal(payload, &v); e != nil {

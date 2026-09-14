@@ -1,4 +1,7 @@
-/* Projects view. Palette variables come from app.css. */
+/* Projects view. Palette variables come from app.css. Every corner reads a
+   token. Motion is driven from script, and so is its fallback on CSS
+   transitions for a page load without the Motion bundle: no rule here
+   declares a transition on anything a level change moves. */
 
 /* Fill the tab. `.view.on` is a row-flex container, so a lone child without
    flex:1 shrink-wraps to its content and stays that way once populated.
@@ -6,35 +9,200 @@
 #view-projects { flex: 1; flex-direction: column; }
 .panel.projects { flex: 1; min-height: 0; }
 
-.projlist { display: flex; flex-direction: column; gap: 18px; padding: 12px 14px; overflow-y: auto; }
-.project { border: 1px solid var(--edge); border-radius: var(--r-surface); padding: 10px 12px; }
-.projhead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
-.projname { font-weight: 600; letter-spacing: .04em; }
-.projpath, .wtpath { opacity: .55; font-size: 11px; font-family: ui-monospace, monospace; }
-.projwt, .projroll { font-size: 11px; opacity: .75; }
+/* --- the head: title, count, crumb, lens ------------------------------------ */
 
-.wtree { border-left: 2px solid var(--edge); margin: 8px 0 8px 6px; padding-left: 10px; }
-.wtree.main { border-left-color: var(--cyan); }
-.wthead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
-.wtbadge { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; opacity: .7;
-           border: 1px solid currentColor; border-radius: var(--r-control); padding: 0 4px; }
-.wtbranch { font-family: ui-monospace, monospace; font-size: 12px; }
+.projects .phead .count { margin-left: 0; }
+.pjcrumb { display: flex; gap: 6px; align-items: baseline; font-size: 11px; margin-left: 10px;
+           min-width: 0; text-transform: none; letter-spacing: .02em; }
+.pjcr { font: inherit; background: transparent; border: 0; padding: 0; color: var(--dim); cursor: pointer;
+        max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pjcr:hover { color: var(--cyan-hot); }
+.pjcr.here { color: var(--white); cursor: default; }
+.pjsep { color: var(--grey); }
+.pjlens { margin-left: auto; font-size: 10px; letter-spacing: .08em; color: var(--dim); }
+/* The mode word, and the filter field FILTER types into. The field stays
+   showing while a filter still narrows the rows. */
+.pjmode { margin-left: 10px; font-size: 10px; letter-spacing: .08em; color: var(--dim); }
+.pjmode.filter { color: var(--cyan-hot); }
+.pjmode.ask { color: var(--amber); }
+.pjfilter { margin-left: 10px; width: 16ch; font: inherit; font-size: 11px; text-transform: none;
+            letter-spacing: .02em; padding: 0 6px; color: inherit; background: var(--panel);
+            border: 1px solid var(--edge); border-radius: var(--r-input); }
+.pjfilter:focus { outline: none; border-color: var(--cyan-deep); }
+
+/* --- the stage: rail beside main -------------------------------------------- */
+
+.pjstage { flex: 1; min-height: 0; display: flex; }
+.pjrail { flex: 0 0 200px; overflow-y: auto; border-right: 1px solid var(--edge);
+          background: var(--rail); padding: 8px 6px; }
+.pjmain { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-y: auto; }
+.projlist { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; }
+/* Positioned so the line canvas can sit behind the whole level, and so the
+   cards' CSS3D layer has an ancestor to measure against. */
+.pjstage { position: relative; }
+.pjlines { position: absolute; inset: 0; width: 100%; height: 100%;
+           pointer-events: none; z-index: 0; }
+/* The rail one layer up: rows still wide from the overview travel into it
+   over the work area, never under the project's head. */
+.pjmain { position: relative; z-index: 1; }
+.pjrail { position: relative; z-index: 2; }
+
+/* --- a project row ---------------------------------------------------------- */
+
+.pjrow { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; cursor: pointer;
+         border: 1px solid var(--edge); border-radius: var(--r-surface); padding: 8px 12px; }
+.pjrow:hover { border-color: var(--edge-hi); }
+.pjname { font-weight: 600; letter-spacing: .04em; color: var(--white); }
+.pjroot { opacity: .55; font-size: 11px; font-family: var(--mono); }
+.pjsess { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.pjcounts { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+.pjchip { font-size: 10.5px; border: 1px solid var(--edge-hi); border-radius: var(--r-control);
+          padding: 0 6px; color: var(--dim); white-space: nowrap; }
+.pjchip.needs { border-color: var(--amber); color: var(--amber); }
+/* The keyboard's cursor, on whichever row the keys are walking. */
+.pjrow.at, .pjwt.at { outline: 1px solid var(--cyan-deep); outline-offset: -1px; }
+
+/* In the rail the same row is two lines: the name, then its live chips. */
+.pjrow.inrail { flex-direction: column; align-items: stretch; gap: 3px; padding: 6px 8px;
+                border-color: transparent; }
+.pjrow.inrail:hover { border-color: var(--edge); }
+.pjrow.inrail .pjroot,
+.pjrow.inrail .pjchip:not(.needs) { display: none; }
+.pjrow.inrail .pjcounts { margin-left: 0; }
+.pjrow.inrail.active { border-color: var(--cyan-deep); background: var(--panel); }
+.pjrail .overcap { padding-left: 8px; }
 
 .schip { font: inherit; font-size: 11px; cursor: pointer; border-radius: var(--r-pill);
          border: 1px solid var(--edge); background: transparent; color: inherit; padding: 1px 8px; }
 .schip.working { border-color: var(--amber); color: var(--amber); }
+.schip.needs { border-color: var(--amber-hot); color: var(--amber-hot); background: rgba(224, 151, 60, .16); }
 
-.plan { margin: 6px 0 10px; }
-/* The head is the disclosure control: a plan is collapsed to its current step
-   until clicked. Whole-row target, so it is hard to miss. */
-.planhead { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; cursor: pointer; }
-.planhead:hover .planname { color: var(--cyan-hot); }
+/* --- the stripe: the orb and the ask field ---------------------------------- */
+
+.pjstripe { display: flex; align-items: stretch; gap: 12px; border-top: 1px solid var(--edge);
+            padding: 8px 12px; }
+/* Positioned on purpose: the swarm's mode button is absolutely placed and
+   anchors to its nearest positioned ancestor. */
+.pjorb { position: relative; flex: 0 0 120px; height: 120px;
+         display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.pjask { flex: 1; display: flex; gap: 8px; align-items: flex-start; }
+.pjfield { flex: 1; resize: vertical; border-radius: var(--r-input);
+           border: 1px solid var(--edge); background: var(--panel); color: inherit;
+           font: inherit; padding: 6px 8px; }
+.pjscope { align-self: center; font-size: 11px; cursor: pointer; white-space: nowrap;
+           border: 1px solid var(--cyan-deep); border-radius: var(--r-pill); padding: 1px 8px;
+           color: var(--cyan-hot); }
+
+.pjlens.triage { color: var(--amber); }
+
+/* --- the isolated project's head, and the verb buttons ------------------------- */
+
+.pjhead { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 10px; padding: 12px 14px 0; }
+.pjhname { font-weight: 600; letter-spacing: .04em; color: var(--white); }
+.pjhroot { opacity: .55; font-size: 11px; font-family: var(--mono); margin-right: auto; }
+.pjbtn { font: inherit; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; cursor: pointer;
+         padding: 0 6px; border: 1px solid var(--edge-hi); border-radius: var(--r-control);
+         background: transparent; color: var(--dim); white-space: nowrap; }
+.pjbtn:hover { color: var(--cyan-hot); border-color: var(--cyan); }
+.pjhead .pjbtn { padding: 2px 8px; }
+.pjspec { cursor: pointer; }
+.pjspec:hover .pjfname { color: var(--cyan-hot); }
+
+/* --- needs-a-human cards ------------------------------------------------------ */
+
+/* Compact by default: a grid of one-line cards, each opening out on a click
+   (shift-click opens or closes them all). An open card spans the row it is in
+   so its where and fix have room to read. */
+.pjcards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px;
+           padding: 8px 14px 0; }
+.pjcard { border: 1px solid var(--amber); border-radius: var(--r-surface);
+          padding: 5px 9px; font-size: 11px; cursor: pointer; min-width: 0; }
+.pjcard:hover { border-color: var(--amber-hot); }
+.pjcard.at { border-color: var(--cyan); }
+.pjcard .pjwhat { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pjcard.open { grid-column: 1 / -1; padding: 8px 10px; font-size: 12px; }
+.pjcard.open .pjwhat { white-space: normal; }
+.pjcard:not(.open) .pjwhere, .pjcard:not(.open) .pjfix { display: none; }
+.pjcard .pjwhere { font-family: var(--mono); font-size: 11px; opacity: .6; overflow-wrap: anywhere; margin-top: 4px; }
+.pjcard .pjfix { opacity: .7; font-size: 11px; margin-top: 3px; }
+
+/* --- inside a project: four panels ------------------------------------------ */
+
+.pjpanels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px 14px; }
+.pjpanel { border: 1px solid var(--edge); border-radius: var(--r-surface); padding: 10px 12px;
+           min-width: 0; }
+.pjpanel > h3 { margin: 0 0 8px; font-size: 11px; letter-spacing: .08em;
+                text-transform: uppercase; opacity: .7; cursor: pointer; }
+/* The Graph panel's head says which it is showing, when it has something to
+   say: nothing while the stage draws the scene. */
+.pjpanel.pj-graph > h3[data-note]:not([data-note=""])::after {
+  content: " — " attr(data-note); opacity: .55; text-transform: none; letter-spacing: 0;
+}
+.pjsub { margin: 12px 0 4px; font-size: 10px; font-weight: 400; letter-spacing: .08em;
+         text-transform: uppercase; color: var(--dim); }
+.pjbody > .pjsub:first-child { margin-top: 0; }
+.pjlist { display: flex; flex-direction: column; gap: 6px; }
+
+/* Worktrees */
+.pjwt { border-left: 2px solid var(--edge); padding: 2px 0 2px 10px; }
+.pjwt.main { border-left-color: var(--cyan); }
+.pjwthead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; }
+.pjwthead:hover .wtbranch { color: var(--cyan-hot); }
+.pjwt.detached .pjwthead { cursor: default; }
+.pjwt.detached .pjwthead:hover .wtbranch { color: inherit; }
+.wtbadge { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; opacity: .7;
+           border: 1px solid currentColor; border-radius: var(--r-control); padding: 0 4px; }
+.wtbranch { font-family: var(--mono); font-size: 12px; }
+.wthash, .pjwtpath { opacity: .55; font-size: 11px; font-family: var(--mono); }
+.pjwtpath { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pjlocked { border-color: var(--amber); color: var(--amber); }
+.pjwtchips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 4px; }
+/* The selected worktree: the graph beside it follows this one. */
+.pjwt.lit { border-left-color: var(--cyan-hot); background: var(--panel); }
+
+/* Todos */
+.pjblhead, .pjeffhead { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+                        cursor: pointer; font-size: 12px; }
+.pjblhead:hover .pjbltext, .pjeffhead:hover .planname { color: var(--cyan-hot); }
+.pjbl.struck .pjbltext { text-decoration: line-through; opacity: .55; }
 .plancaret { font-size: 10px; opacity: .6; width: 9px; }
 .planname { font-weight: 600; font-size: 12px; }
-.plancount, .planowner { font-size: 11px; opacity: .7; font-family: ui-monospace, monospace; }
-/* A ghost plan should look absent, not merely carry a chip. */
-.plan.absent .planname { opacity: .5; text-decoration: line-through; }
-/* Stands in for the current step when a collapsed plan has none. */
+.plancount { font-size: 11px; opacity: .7; font-family: var(--mono); }
+.pjshipped { border-color: var(--green); color: var(--green); }
+.pjbehind { border-color: var(--amber); color: var(--amber); }
+.pjclaim { border-color: var(--cyan-deep); color: var(--cyan); }
+.pjon { font-size: 11px; color: var(--dim); padding-left: 17px; }
+.pjtaskchips { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 0 0 17px; }
+.pjtaskchips:empty { display: none; }
+.pjtask { font-size: 10.5px; cursor: pointer; border: 1px solid var(--cyan-deep);
+          border-radius: var(--r-control); padding: 0 6px; color: var(--cyan); }
+.pjtask:hover { color: var(--cyan-hot); border-color: var(--cyan); }
+.pjblbody, .planbody { padding: 2px 0 4px 8px; }
+
+/* Features */
+.pjfeat, .pjspec { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.pjfmeta { font-size: 11px; opacity: .55; font-family: var(--mono); }
+
+/* Graph */
+.pjbr { cursor: pointer; }
+.pjbrhead { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.pjbr:hover .pjbrname { color: var(--cyan-hot); }
+.pjbrname { font-family: var(--mono); font-weight: 600; }
+.pjbr.lit .pjbrname { color: var(--cyan-hot); }
+.pjab { font-size: 11px; color: var(--dim); font-family: var(--mono); }
+.pjrecent { padding-left: 10px; }
+.pjcommit { display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; min-width: 0; padding: 1px 4px; }
+.pjsha { font-family: var(--mono); color: var(--dim); flex: 0 0 auto; }
+.pjsubj { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pjago { font-size: 10.5px; color: var(--grey); flex: 0 0 auto; }
+.pjmerge { font-size: 10px; border: 1px solid var(--purple); color: var(--purple);
+           border-radius: var(--r-control); padding: 0 4px; flex: 0 0 auto; }
+.pjcommit.head { background: var(--panel); box-shadow: inset 2px 0 0 var(--cyan); }
+.pjcommit.head .pjsha { color: var(--cyan-hot); }
+.pjmore { font-size: 11px; opacity: .5; font-style: italic; padding-left: 10px; }
+
+/* --- rows inside a panel ------------------------------------------------------ */
+
 .plannote { font-size: 11px; opacity: .5; padding-left: 10px; font-style: italic; }
 
 .titem { display: flex; align-items: baseline; gap: 7px; font-size: 12px; padding: 1px 0 1px 10px; }
@@ -42,7 +210,6 @@
 .ttext { flex: 0 1 auto; }
 .titem.absent { opacity: .45; text-decoration: line-through; }
 .thist { font-size: 10px; opacity: .55; }
-.skipped { font-size: 11px; opacity: .6; padding-left: 10px; }
 /* A cap is a fact about the display, not about the project -- say so loudly
    enough that a missing worktree reads as a cap and not as an absence. */
 .overcap { font-size: 11px; color: var(--amber); opacity: .85; padding: 4px 0 0 10px; }
@@ -59,18 +226,126 @@
 .tdiff.removed   { color: var(--red-hot); }   /* gone */
 .tdiff.behind    { color: var(--amber); }     /* wants attention */
 
-/* The current item is the one being worked on. */
+/* The current item is the one being worked on. A still dot: nothing here
+   moves until a motion pass is described and agreed. */
 .titem.current { position: relative; }
 .titem.current .ttext { color: var(--cyan-hot); }
 .titem.current::before {
   content: ''; position: absolute; left: 0; top: 50%; width: 4px; height: 4px;
   margin-top: -2px; border-radius: 50%; background: var(--cyan-hot);
-  animation: mcp-pulse 1.6s ease-in-out infinite;
 }
-@keyframes mcp-pulse { 0%,100% { opacity: .25; transform: scale(1) } 50% { opacity: 1; transform: scale(1.9) } }
-@media (prefers-reduced-motion: reduce) {
-  .titem.current::before { animation: none; opacity: 1; }
+
+/* --- the deepest level: a rail of heads, a strip of chips, the graph ----------- */
+
+/* Todos and Features fold to their heads down the left, the worktrees panel
+   is a strip along the top, and the graph takes the rest. One layout, whatever
+   the motion setting -- a level-2 layout that depended on how you got there
+   could not be judged twice the same way. */
+.pjpanels.deep { grid-template-columns: 150px 1fr; grid-template-rows: auto 1fr;
+                 align-items: start; flex-grow: 1; }
+.pjpanels.deep > .pj-todos { grid-column: 1; grid-row: 1; }
+.pjpanels.deep > .pj-features { grid-column: 1; grid-row: 2; }
+.pjpanels.deep > .pj-worktrees { grid-column: 2; grid-row: 1; }
+/* At the deepest level the graph is the whole work area, so its mount fills
+   the panel rather than sitting at a fixed floor: a flex column down to the
+   mount, each link stretched by its parent instead of sized in a stylesheet
+   rule that would have to know the grid's own leftover height. */
+.pjpanels.deep > .pj-graph { grid-column: 2; grid-row: 2; align-self: stretch; min-height: 0;
+                              display: flex; flex-direction: column; }
+.pjpanels.deep > .pj-graph > .pjbody { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pjpanels.deep > .pj-graph > .pjbody > .pjwtstage,
+.pjpanels.deep > .pj-graph > .pjbody > .pjlist { flex: 1; height: auto; min-height: 0; }
+/* Positioned so a body still fading out stays with the head it belongs to. */
+.pjpanel.head-only { position: relative; }
+.pjpanel.head-only > h3 { margin-bottom: 0; }
+.pjpanel.head-only > .pjbody { display: none; }
+.pjpanel.head-only > .pjbody.pjhold { display: block; position: absolute; margin: 0; pointer-events: none; }
+.pjpanel.strip { display: flex; align-items: center; gap: 10px; }
+.pjpanel.strip > h3 { margin: 0; flex: 0 0 auto; }
+.pjpanel.strip > .pjbody { flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; }
+/* The worktree cards' mount. At the middle level it is as tall as its rows of
+   full-size cards, never below this floor; at the deepest it is a strip as
+   wide as its chips at their narrowest, and the panel body scrolls it. The
+   view sets both sizes. */
+.pjwtstage { position: relative; min-height: 220px; height: var(--pj-wt-h, auto); }
+.pjwtstage.chips { height: 28px; min-height: 0; width: var(--pj-chips-w, auto); min-width: 100%;
+                   overflow: hidden; }
+/* The graph's mount would otherwise inherit the cards' height rule with
+   nothing driving it, and sit at their floor. A scene draws to whatever rect
+   it is given rather than needing room for a card count, so at the middle
+   level it gets a fixed floor of its own instead; the deepest-level block
+   above swaps it to the panel's own grid area. */
+.pj-graph .pjwtstage { height: 320px; min-height: 0; }
+/* Without the stage the text list is the same strip: one row of the same
+   cards, their path and chip rows folded away by the class, never scaled. */
+.pjpanel.strip .pjlist { flex-direction: row; align-items: center; gap: 6px; height: 28px;
+                         overflow-x: auto; overflow-y: hidden; }
+.pjpanel.strip .pjwt { flex: 0 0 auto; padding-block: 0; }
+.pjpanel.strip .pjwthead { flex-wrap: nowrap; }
+.pjpanel.strip .pjwtpath,
+.pjpanel.strip .pjwtchips { display: none; }
+
+/* --- a worktree card on the stage ---------------------------------------------- */
+
+/* A fixed, compact box, because a CSS3D panel has no layout to size it, and
+   always drawn at this size: the grid makes room, the card never shrinks. The
+   reconciled worktree row sits inside it unchanged, each of its three rows on
+   one line. It takes the pointer and its text selects: the CSS3D layer turns
+   both off beneath it. The row clips, not the box, so the line frame can
+   reach past the border. */
+.pjwtcard { width: 208px; height: 96px; box-sizing: border-box;
+            border: 1px solid var(--edge-hi); border-radius: var(--r-surface);
+            background: var(--panel); padding: 8px 10px;
+            pointer-events: auto; user-select: text; -webkit-user-select: text; }
+.pjwtcard .pjwt { border-left: 0; padding: 0; height: 100%; overflow: hidden; }
+.pjwtcard .pjwthead { flex-wrap: nowrap; min-width: 0; }
+.pjwtcard .pjwthead > * { flex: 0 0 auto; }
+.pjwtcard .wtbranch { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                      white-space: nowrap; }
+.pjwtcard .pjwtchips { flex-wrap: nowrap; overflow: hidden; }
+.pjwtcard.hot { border-color: var(--cyan-deep); }
+.pjwtcard.lit { border-color: var(--cyan-hot); }
+/* On the stage the box carries the cursor, outside its border; the row
+   inside it does not draw a second one. */
+.pjwtcard.at { outline: 1px solid var(--cyan-deep); outline-offset: 2px; }
+.pjwtcard .pjwt.at { outline: 0; }
+/* The line frame, inside the card so it tilts with it. */
+.pjwtframe { position: absolute; left: -5px; top: -5px; fill: none; stroke: var(--edge);
+             stroke-width: 1; pointer-events: none; overflow: visible; }
+.pjwtcard.hot .pjwtframe, .pjwtcard.lit .pjwtframe { stroke: var(--cyan); }
+/* The same card as a chip in the strip: its head on one line, sized to its
+   slot by this class and a width. Never a scale. */
+.pjwtcard.chip { height: 28px; padding: 0 8px; }
+.pjwtcard.chip .pjwt { display: flex; align-items: center; }
+.pjwtcard.chip .pjwthead { flex-wrap: nowrap; }
+.pjwtcard.chip .pjwtpath,
+.pjwtcard.chip .pjwtchips,
+.pjwtcard.chip .pjwtframe { display: none; }
+.pjwtstage .gcss { position: absolute; inset: 0; }
+
+@media (max-width: 900px) {
+  .pjpanels { grid-template-columns: 1fr; }
+  .pjstage { flex-direction: column; }
+  .pjrail { flex: 0 0 auto; border-right: 0; border-bottom: 1px solid var(--edge); }
 }
+
+/* --- motion ------------------------------------------------------------------ */
+
+/* Without the Motion bundle a level change moves on CSS transitions carrying
+   the same numbers, set from script on each node as its step starts and
+   cleared when the change settles. None is declared here: one standing on a
+   node would animate every starting state as it is written, and a FLIP would
+   start from where it lands rather than from where it was. */
+.pjrow, .pjpanel, .pjcr, .pjscope { will-change: auto; }
+/* A 320ms width-bound move over a long list is the one real cost here; the
+   rows are containers of their own so the squeeze cannot reflow the board. */
+.pjrow { contain: layout; }
+/* The last project isolated keeps the light after stepping back out. */
+.pjrow.lit { border-color: var(--cyan); background: var(--panel); }
+/* The panels on their way out, held where they were over whatever the render
+   put beneath them until their fade ends. It has to beat the hidden rule,
+   which is itself !important, and it must never take a click. */
+.pjpanels.pjhold { display: grid !important; position: fixed; margin: 0; pointer-events: none; }
 
 /* Optional chips are built once and hidden here, never added and removed --
    see reconcile.js.

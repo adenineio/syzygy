@@ -166,8 +166,8 @@ const callForge = async ($, hooks, name, args) => {
     { tool: `mcp__forge__${name}`, tool_use_id: `t-${name}`, ...args },
     next,
   )
-  assert.ok(res && res.result && typeof res.result.text === 'string', 'forge answers with { result: { text } }')
-  return res.result.text
+  assert.ok(res && typeof res.result === 'string', 'forge answers with { result: <string> }')
+  return res.result
 }
 
 const section = (title) => console.log(`\n── ${title} ${'─'.repeat(Math.max(0, 60 - title.length))}`)

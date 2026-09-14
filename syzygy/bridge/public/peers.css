@@ -1,0 +1,215 @@
+/* Syzygy — the Peering panel. Only what this panel introduces: .panel,
+   .phead, .pbody, .count, .btn and .empty come from app.css and are reused
+   as-is.
+
+   NO ANIMATION AND NO TRANSITION ANYWHERE IN THIS FILE. The health dot is a
+   flat colour keyed by data-state, set once per render — it never pulses,
+   unlike the working pill's .dot elsewhere in the deck. */
+
+/* A third grid child in view-telemetry's two-column grid, so it needs an
+   explicit span the same way #usage-panel does, or it lands under just the
+   left column. */
+#peer-panel { grid-column: 1 / -1; }
+
+.peer-region + .peer-region { border-top: 1px solid var(--edge); margin-top: 10px; padding-top: 10px; }
+
+.peerpredates { color: var(--grey); font-size: 11px; letter-spacing: .04em; }
+
+.peerlink { display: flex; flex-direction: column; gap: 10px; }
+.peerstatus { font-size: 11.5px; color: var(--text); }
+
+.peerenable, .peerpair, .peeraccept { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+
+.peerfield { display: flex; flex-direction: column; gap: 3px; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; color: var(--grey); }
+.peerinput {
+  font-family: var(--mono); font-size: 11.5px; color: var(--text);
+  background: var(--bg); border: 1px solid var(--edge-hi); outline: none;
+  padding: 5px 8px; border-radius: var(--r-input); min-width: 0;
+}
+.peerinput:focus { border-color: var(--cyan); }
+input.peerinput[type="number"] { width: 80px; }
+
+.peerfp { display: flex; flex-direction: column; gap: 2px; }
+.peerfpline { font-family: var(--mono); font-size: 11px; color: var(--white); letter-spacing: .03em; word-break: break-all; }
+
+.peerhostrow { flex: 1 1 220px; }
+
+.peercode { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; width: 100%; }
+.peercodetext {
+  font-family: var(--mono); font-size: 13px; color: var(--white);
+  word-break: break-all; flex: 1 1 260px;
+}
+.peercodecountdown { font-size: 11px; color: var(--grey); font-variant-numeric: tabular-nums; }
+
+.peeraccepttext {
+  font-family: var(--mono); font-size: 11px; color: var(--text);
+  background: var(--bg); border: 1px solid var(--edge-hi); outline: none;
+  padding: 6px 8px; border-radius: var(--r-input);
+  width: 100%; min-height: 44px; resize: vertical;
+}
+.peeraccepttext:focus { border-color: var(--cyan); }
+.peeraccept .peerinput { flex: 1 1 200px; }
+
+.peerrow { padding: 8px 0; border-top: 1px solid var(--edge); }
+.peerrow:first-child { border-top: none; padding-top: 0; }
+
+.peerrowhead { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 11px; }
+
+/* The health dot. Static: colour by data-state alone, never a pulse — the
+   dot keeps its literal round shape too, rather than a corner token, the
+   same as every other dot in the deck. */
+.peerdot { width: 8px; height: 8px; border-radius: 50%; background: var(--grey); flex: 0 0 auto; }
+.peerdot[data-state="up"]    { background: var(--green); }
+.peerdot[data-state="down"]  { background: var(--red-hot); }
+.peerdot[data-state="never"] { background: var(--grey); }
+
+.peername { color: var(--white); font-weight: 600; }
+.peerdial, .peerseen, .peerrtt, .peercounts { color: var(--dim); font-size: 10.5px; }
+.peerforget { margin-left: auto; }
+
+.peererr { margin-top: 4px; font-size: 10.5px; color: var(--red-hot); }
+
+.peerconfirm { margin-top: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.peerfprow { display: flex; flex-wrap: wrap; gap: 16px; }
+.peerfpcol { display: flex; flex-direction: column; gap: 2px; }
+.peerfplabel { font-size: 8.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--grey); }
+.peerfpval { font-family: var(--mono); font-size: 10px; color: var(--text); word-break: break-all; max-width: 260px; }
+
+/* A row you have moved to with j/k. A flat highlight, never a transition. */
+.peerrow[data-selected="true"] { background: var(--panel); margin: 0 -8px; padding-left: 8px; padding-right: 8px; border-radius: var(--r-surface); }
+
+/* Clock skew, beside RTT in the row's head. The warn case replaces the
+   figure with a sentence, so it reads as a warning colour and not a number
+   that just happens to be red. */
+.peerskew { color: var(--dim); font-size: 10.5px; }
+.peerrow[data-skew="warn"] .peerskew { color: var(--amber-hot); }
+
+/* The two per-peer caps: reuses .peerfield/.peerinput so they match the
+   Link region's own fields exactly. */
+.peercaps { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.peercaps input.peerinput[type="number"] { width: 70px; }
+
+/* The ghost roster strip: one small read-only card per session on the
+   other side, never a hover or a pointer cursor -- these cards take no
+   input at all. */
+.peerroster { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.peerroster-card {
+  display: flex; align-items: center; gap: 6px;
+  border: 1px solid var(--edge-hi); border-radius: var(--r-control);
+  padding: 4px 8px; font-size: 10px; color: var(--text);
+}
+.peerroster-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--grey); flex: 0 0 auto; }
+.peerroster-dot[data-working="true"] { background: var(--amber); }
+.peerroster-name { color: var(--white); font-weight: 600; }
+.peerroster-model { color: var(--dim); }
+.peerroster-branch { color: var(--grey); }
+.peerroster-needs {
+  font-size: 8.5px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--bg); background: var(--amber); border-radius: var(--r-control);
+  padding: 1px 5px;
+}
+.peerroster-foryou {
+  font-size: 8.5px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--cyan); border: 1px solid var(--cyan); border-radius: var(--r-control);
+  padding: 0 5px;
+}
+
+/* ------------------------------------------------------------- the asks */
+
+.peerasker { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+.peerselect { flex: 0 1 160px; }
+.peerasktext { flex: 1 1 220px; min-height: 40px; resize: vertical; }
+.peerasksend { flex: 0 0 auto; }
+
+.askenvelope {
+  font-family: var(--mono); font-size: 10.5px; color: var(--text);
+  background: var(--bg); border: 1px solid var(--edge-hi); border-radius: var(--r-input);
+  padding: 8px; margin-top: 8px; white-space: pre-wrap; word-break: break-all;
+  max-height: 220px; overflow-y: auto;
+}
+
+.asklog { display: flex; flex-direction: column; }
+.askrow { padding: 8px 0; border-top: 1px solid var(--edge); font-size: 11px; }
+.askrow:first-child { border-top: none; padding-top: 0; }
+
+.askhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.askdir { color: var(--white); font-weight: 600; }
+.askclock { margin-left: auto; color: var(--dim); font-size: 10px; font-variant-numeric: tabular-nums; }
+
+.askchip[data-state="held"]     { color: var(--bg); background: var(--amber); border-color: var(--amber); }
+.askchip[data-state="answered"] { color: var(--bg); background: var(--green); border-color: var(--green); }
+.askchip[data-state="failed"]   { color: var(--bg); background: var(--red-hot); border-color: var(--red-hot); }
+
+.asktext { margin-top: 4px; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.askmore { margin-top: 2px; padding: 1px 6px; font-size: 9px; }
+.askreply { margin-top: 4px; color: var(--white); white-space: pre-wrap; word-break: break-word; }
+.askerror { margin-top: 4px; color: var(--red-hot); font-size: 10.5px; }
+.askactions { margin-top: 4px; color: var(--dim); font-size: 10.5px; }
+.askanswer { margin-top: 6px; padding: 3px 9px; font-size: 9.5px; }
+
+/* The key layer's own hint, shown only while focus is somewhere inside the
+   panel -- see peers.js's focusin/focusout pair on #peer-panel. */
+.peerhint { padding: 0 0 8px; font-size: 9.5px; letter-spacing: .04em; color: var(--grey); }
+
+/* The peer row's own Drop button: selects the peer and focuses the Jobs
+   region's composer, nothing more -- the composer's own button is what
+   reads a gesture and acts. */
+.peerdrop { margin-left: auto; }
+.peerdrop + .peerforget { margin-left: 0; }
+
+/* -------------------------------------------------------------- the jobs */
+
+.jobcomposer { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+.jobtarget { flex: 0 0 100%; font-size: 10px; color: var(--grey); }
+.jobdroppaths { flex: 1 1 220px; min-height: 44px; resize: vertical; }
+.jobdropnote { flex: 1 1 140px; }
+.jobdropbtn { flex: 0 0 auto; }
+
+.joblog { display: flex; flex-direction: column; }
+.jobrow { padding: 8px 0; border-top: 1px solid var(--edge); font-size: 11px; }
+.jobrow:first-child { border-top: none; padding-top: 0; }
+.jobrow[data-selected="true"] { background: var(--panel); margin: 0 -8px; padding-left: 8px; padding-right: 8px; border-radius: var(--r-surface); }
+
+.jobhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.jobdir { color: var(--white); font-weight: 600; }
+.jobpeer { color: var(--white); }
+.jobcount, .jobbytes { color: var(--dim); font-size: 10.5px; }
+
+.jobchip[data-state="sent"],
+.jobchip[data-state="landed"] { color: var(--bg); background: var(--green); border-color: var(--green); }
+.jobchip[data-state="refused"],
+.jobchip[data-state="failed"] { color: var(--bg); background: var(--red-hot); border-color: var(--red-hot); }
+
+.jobremote { font-size: 9.5px; color: var(--grey); }
+.jobfilter {
+  font-size: 8.5px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--dim); border: 1px solid var(--edge-hi); border-radius: var(--r-control);
+  padding: 1px 5px;
+}
+.jobpin {
+  font-size: 8.5px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--cyan); border: 1px solid var(--cyan); border-radius: var(--r-control);
+  padding: 0 5px;
+}
+
+.jobreason { margin-top: 4px; font-size: 10.5px; color: var(--red-hot); }
+.jobrefused { margin-top: 4px; font-size: 10.5px; color: var(--amber-hot); }
+
+.jobfiles { margin-top: 6px; font-family: var(--mono); font-size: 10px; color: var(--text); }
+.jobfileline { word-break: break-all; }
+.jobfilemore { color: var(--grey); }
+
+.jobcopyrow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.jobdestinput { flex: 1 1 200px; }
+.jobcopygo { flex: 0 0 auto; }
+
+/* Only while the panel sits in Telemetry does it fill that view, with every
+   other Telemetry panel behind the toggle in its head. The :has() keeps
+   these rules from hiding Telemetry when the panel lives in its own tab. */
+#view-telemetry.on:has(#peer-panel):not(.peer-others) { grid-template-columns: minmax(0, 1fr); }
+#view-telemetry.on:has(#peer-panel):not(.peer-others) > .panel:not(#peer-panel) { display: none; }
+#view-telemetry.on:not(.peer-others) #peer-panel { min-height: calc(100vh - 110px); }
+#view-telemetry.on:not(.peer-others) #peer-panel * { max-height: none; }
+.peer-otherstoggle { margin-left: auto; }
+.jobrow .jobhead { cursor: pointer; }
+.jobfilerefused { color: var(--amber-hot); text-decoration: line-through; }

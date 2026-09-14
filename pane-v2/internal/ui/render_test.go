@@ -25,6 +25,16 @@ type fakeSource struct {
 	ch     chan relay.Msg
 	posts  []string
 	bodies []map[string]any
+	// postErr, when set, is every write's answer, with a 409 status.
+	postErr error
+	// gets records the paths read. getBody, getStatus and getErr are what a
+	// read answers; a zero status means 200.
+	gets      []string
+	getBody   string
+	getStatus int
+	getErr    error
+	// reconnects counts Reconnect calls.
+	reconnects int
 }
 
 func newFakeSource() *fakeSource { return &fakeSource{ch: make(chan relay.Msg, 16)} }
@@ -33,9 +43,23 @@ func (f *fakeSource) Msgs() <-chan relay.Msg { return f.ch }
 func (f *fakeSource) Post(_ context.Context, path string, body map[string]any) (int, error) {
 	f.posts = append(f.posts, path)
 	f.bodies = append(f.bodies, body)
+	if f.postErr != nil {
+		return 409, f.postErr
+	}
 	return 200, nil
 }
-func (f *fakeSource) Reconnect() {}
+func (f *fakeSource) Get(_ context.Context, path string) ([]byte, int, error) {
+	f.gets = append(f.gets, path)
+	if f.getErr != nil {
+		return nil, 0, f.getErr
+	}
+	status := f.getStatus
+	if status == 0 {
+		status = 200
+	}
+	return []byte(f.getBody), status, nil
+}
+func (f *fakeSource) Reconnect() { f.reconnects++ }
 
 var frozen = time.Date(2026, 9, 6, 12, 1, 44, 0, time.UTC)
 
@@ -134,8 +158,8 @@ func assertPaletteOnly(t *testing.T, out string) {
 	}
 }
 
-// invertRuns counts reverse-video blocks: the brand, the active tab and (once
-// CONSOLE ships) the armed strip. Never more than three.
+// invertRuns counts reverse-video blocks: the brand, the active tab and, while
+// a two-press delete or clear is armed, its confirm row. Never more than three.
 //
 // Reverse is emitted as an attribute ahead of the colour (`1;7;38;5;3`), so it
 // is always bracketed -- which is what keeps a colour index of 7 from being
@@ -297,25 +321,24 @@ func TestDegradedStatesRenderAndHoldTheFrame(t *testing.T) {
 	}
 }
 
-// CONSOLE is the one mode left unbuilt; every other mode now draws for real,
+// Every mode draws for real now, so none may fall through to the placeholder,
 // and Built() is what says so.
-func TestUnbuiltModesSaySo(t *testing.T) {
+func TestEveryModeIsBuilt(t *testing.T) {
 	st := loadFixture(t)
 	self := st.Sessions[0].ID
 	m, _ := newModel(t, 60, 30, ident.Result{ID: self, How: ident.PaneTree})
 	m = feed(t, m, relay.SnapshotMsg(st), IdentResult(ident.Result{ID: self, How: ident.PaneTree}))
-	for _, mode := range []Mode{ModeConsole} {
-		m.mode = mode
-		out := ansi.Strip(m.Render())
-		if !strings.Contains(out, "not built yet") {
-			t.Fatalf("mode %v should say it is not built yet", mode)
-		}
-		assertFrame(t, m.Render(), 60, 30)
-	}
-	for _, mode := range []Mode{ModeVitals, ModeFeed, ModeBoard} {
+	for _, mode := range AllModes {
 		if !mode.Built() {
 			t.Errorf("mode %v is built and must say so", mode)
 		}
+		m.mode = mode
+		out := m.Render()
+		if strings.Contains(ansi.Strip(out), "not built yet") {
+			t.Errorf("mode %v renders the unbuilt placeholder", mode)
+		}
+		assertFrame(t, out, 60, 30)
+		assertPaletteOnly(t, out)
 	}
 }
 

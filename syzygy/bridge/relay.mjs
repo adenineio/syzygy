@@ -11,24 +11,37 @@
 
 import http from 'node:http'
 import { readFileSync, existsSync, statSync, readdirSync, writeFileSync, renameSync, mkdirSync, realpathSync } from 'node:fs'
-import { jumpCase, jumpToSession, tmuxOfPid } from './jump.mjs'
+import { jumpCase, jumpToSession, tmuxOfPid, parseTmuxTarget } from './jump.mjs'
+import { createGroups, normalizePaths, GROUPS_FILE, MEMBERS_MAX } from './groups.mjs'
+import { listArgv, listPanes, groupPlan, runGroup } from './tmux.mjs'
 import { extname, join, dirname, resolve, isAbsolute, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { homedir } from 'node:os'
+import { homedir, hostname as osHostname, userInfo, networkInterfaces } from 'node:os'
 import { execFile } from 'node:child_process'
-import { createStore, validateProject } from './requests.mjs'
+import { createStore, validateProject, SLUG_RE } from './requests.mjs'
+import { createTemplates, writePersonas, templateArgv, AGENT_PLUGIN_NAME } from './agent-templates.mjs'
+import { createFanoutStore } from './fanout-store.mjs'
+import { fanoutProjects, proposeTitle, FANOUT_ASK_MAX } from './fanout.mjs'
 import { createSteeringStore } from './steering.mjs'
 import { createCapture } from './capture.mjs'
-import { createFindings } from './findings.mjs'
+import { createFindings, FINDINGS_IN_SNAPSHOT } from './findings.mjs'
+import { createSandbox } from './sandbox.mjs'
+import { createSkillsQueue, PROPOSALS_IN_SNAPSHOT, PROPOSALS_MAX, SKILLS_FILE_NAME, prepBrief } from './skills-queue.mjs'
+import { resolveTargets, sweepGate, runSweep, SWEEP_QUIET_MS } from './fleet.mjs'
 import { createCards, validateColor } from './cards.mjs'
+import { createPasteboard } from './pasteboard.mjs'
+import { createChains, realSpawn } from './chains.mjs'
+import { createSpend } from './spend.mjs'
+import { SNAPSHOT_BUDGET_BYTES, shedToBudget } from './snapshot-budget.mjs'
 import { createScoper } from './scoping.mjs'
 import { createDispatcher, IMPLEMENT_PROMPT } from './dispatch.mjs'
 import { probeDispatchOptions } from './dispatch-options.mjs'
-import { createScanner, probe } from './tasks.mjs'
+import { createScanner, probe, planRecord, backlogRecord, digestProjects, documentProjects, stampChanged } from './tasks.mjs'
 import { readClaims, writeClaim, removeClaim, transferClaim } from './claims.mjs'
 import { inheritableClaim } from './claims-inherit.mjs'
-import { parseUsage, readNewestStatusline, dueEntries, crossings, NOTIFY_THRESHOLDS, DEFAULT_STALE_MS, DEFAULT_POLL_MS } from './usage.mjs'
+import { parseUsage, readNewestStatusline, dueEntries, crossings, NOTIFY_THRESHOLDS, DEFAULT_STALE_MS, DEFAULT_POLL_MS, inNightWindow, eligiblePlans, autoArmDecision, limitEpisode, disruptedSessions, RESUME_PROMPT, DISRUPT_MIN_FROZEN_MS, RESET_GRACE_MS } from './usage.mjs'
 import { createAfterResetStore, WINDOW_ALIASES } from './after-reset.mjs'
+import { createNightRunner } from './night.mjs'
 import {
   readAuth, writeAuth, hashPassword, verifyPassword, mintSecret,
   signCookie, verifyCookie, parseCookies, rateLimiter, gate,
@@ -37,6 +50,7 @@ import {
   emptyCanvas, sanitizeCanvas, inheritPosition, liveSpawnCount, settleSpawns, movePending, pruneNodes,
   pushRecent, spawnSession, attachSession, realRun, validateCwd, completeDirs,
   pickClaudeBin, probeClaudeBin, probeSafeMode, killPlan, killSession,
+  resolvePendingLink, dropExpiredLinks,
   OBSERVED_TERMINAL, COORD_MAX, NULL_STATE_MAX_MS, PROMPT_MAX,
 } from './canvas.mjs'
 import { createVoice, MAX_AUDIO_BYTES, MAX_SECONDS, CHUNK_MS } from './voice.mjs'
@@ -46,6 +60,12 @@ import { createVoice, MAX_AUDIO_BYTES, MAX_SECONDS, CHUNK_MS } from './voice.mjs
 // could offer an id the band would reject.
 import { SPINNERS } from '../hooks/spinner-frames.js'
 import { createOrchestrator, DEFAULT_BLURB_MIN_MS } from './orchestrator.mjs'
+import { createThreadStore } from './orchestrator-threads.mjs'
+import { createPeerLink } from './peer-link.mjs'
+import { forPeerIndex, selfNameFrom } from './peer.mjs'
+import { setWireTap } from './peer-listener.mjs'
+import { redactionContext, hostParts } from './peer-redact.mjs'
+import { createWireLog, createWireSettings, createWireTap } from './peer-wirelog.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PUBLIC = join(HERE, 'public')
@@ -65,7 +85,12 @@ const TOKEN = process.env.SZG_TOKEN || 'dev-token'
 // has to be the real one, not the requested one. Assigned in the `listen`
 // callback; nothing can spawn before the server is listening.
 let boundPort = PORT
-const SESSION_TTL_MS = 90_000
+// Configurable for the same reason SZG_CANVAS_POLL_MS is: the expiry sweep's
+// behaviour when the board empties is a TIMING property, and a timing property
+// the suite cannot reach in under ninety seconds is one that regresses. Both
+// default to the production values.
+const SESSION_TTL_MS = Number(process.env.SZG_SESSION_TTL_MS) > 0 ? Number(process.env.SZG_SESSION_TTL_MS) : 90_000
+const SWEEP_MS = Number(process.env.SZG_SWEEP_MS) > 0 ? Number(process.env.SZG_SWEEP_MS) : 10_000
 const EVENT_CAP = 400
 const SERIES_CAP = 240
 const REPLAY_CAP = 4000
@@ -79,8 +104,13 @@ const REPLAY_CAP = 4000
 // bytes a client is not draining, full stop, and is dropped rather than left
 // to grow without bound -- a dropped pane just reconnects and gets a fresh
 // snapshot (hud.tsx/app.js already do this on their own). A few frames' worth
-// of slack for a merely slow-but-alive client.
+// of slack for a merely slow-but-alive client. The snapshot is now measured
+// and shed to its budget before it is written, so this guard is the last resort.
 const SSE_MAX_BUFFERED_BYTES = 8 * 1024 * 1024
+// The snapshot frame's byte budget. Configurable so a harness or a check by
+// hand can force a shed; defaults to the production value, the way
+// SZG_SESSION_TTL_MS does.
+const SNAPSHOT_BUDGET = Number(process.env.SZG_SNAPSHOT_BUDGET) > 0 ? Number(process.env.SZG_SNAPSHOT_BUDGET) : SNAPSHOT_BUDGET_BYTES
 // An OPTIONAL state migration, loaded here -- before the first constant that
 // names a path, because everything below reads from whatever it leaves in
 // place. `./migrate.mjs` is not part of a release: a fresh install has nothing
@@ -105,6 +135,9 @@ if (!process.env.SZG_DATA_DIR) {
 const WORLD_DIR = process.env.SZG_DATA_DIR || join(homedir(), '.claude', 'syzygy')
 const WORLD_FILE = join(WORLD_DIR, 'world.json')
 const DISPATCH_FILE = join(WORLD_DIR, 'dispatch.json')
+// The fan-out runs: one rambling ask split into drafts, awaiting a person's
+// accept or discard.
+const FANOUT_FILE = join(WORLD_DIR, 'fanout.json')
 const STEERING_FILE = join(WORLD_DIR, 'steering.json')
 const TASKS_FILE = join(WORLD_DIR, 'tasks.json')
 const SCAN_INTERVAL_MS = 4000
@@ -124,20 +157,71 @@ const HUD_CONFIG_FILE = process.env.SZG_HUD_CONFIG || join(homedir(), '.claude',
 // The findings store. Under
 // WORLD_DIR like every other authoritative store, never a hardcoded path.
 const FINDINGS_FILE = join(WORLD_DIR, 'findings.json')
+// The proposals store (skills-queue.mjs). Under WORLD_DIR like every other
+// authoritative store, never a hardcoded path.
+const SKILLS_FILE = join(WORLD_DIR, SKILLS_FILE_NAME)
+// Persisted orchestrator conversations. Under WORLD_DIR like every other
+// authoritative store, never a hardcoded path.
+const ORCH_THREADS_FILE = join(WORLD_DIR, 'orchestrator-threads.json')
+// The one-thread GET's path prefix; the id is the single segment after it.
+const ORCH_THREAD_PREFIX = '/api/orchestrator/thread/'
+const PROJECT_PREFIX = '/api/projects/'
+// The one-chain GET's prefix, and the POST sub-router's. The id is the single
+// segment after it.
+const CHAIN_PREFIX = '/api/chain/'
+// A session id names a chain FILE, so one that could leave the chains
+// directory -- a slash, decoded from `%2F` or registered as one, or a NUL,
+// which the filesystem throws on -- is never handed to the store.
+const chainIdOk = (id) => typeof id === 'string' && id !== '' && !/[/\0]/.test(id)
+// What a chain records about its session, read from the relay's own record and
+// never from a request body: the transcript path is one the relay later reads.
+const chainMetaOf = (rec) => {
+  const str = (v) => (typeof v === 'string' ? v : '')
+  return { name: str(rec?.name), repo: str(rec?.repo), cwd: str(rec?.cwd), root: str(rec?.root), transcript: str(rec?.transcript), startedAt: rec?.startedAt }
+}
+// A thread as a page may see it. `resumeSessionId` is a Claude Code session
+// id: the browser has no use for it and shipping it to a page is surface for
+// nothing, so every response that carries a thread goes through here.
+const publicThread = (t) => {
+  const { resumeSessionId, ...rest } = t
+  return rest
+}
 // A session card's own outline colour (cards.mjs). Under WORLD_DIR, same as
 // FINDINGS_FILE just above, and for the same reason.
 const CARDS_FILE = join(WORLD_DIR, 'cards.json')
+// Prompts typed but deliberately not sent (pasteboard.mjs). Under WORLD_DIR
+// like every other authoritative store, never a hardcoded path -- which is
+// also what lets SZG_DATA_DIR point the harness at a temp directory.
+const PASTEBOARD_FILE = join(WORLD_DIR, 'pasteboard.json')
+// Session presets (agent-templates.mjs). Under WORLD_DIR like every other
+// authoritative store, for the same reason as PASTEBOARD_FILE just above.
+const AGENT_TEMPLATES_FILE = join(WORLD_DIR, 'agent-templates.json')
+// Where the generated personas plugin lives. Overridable so a harness points
+// it at a temp directory; production never sets it.
+const AGENT_PLUGIN_DIR = process.env.SZG_AGENT_PLUGIN_DIR || join(homedir(), '.claude', 'skills', AGENT_PLUGIN_NAME)
+// A judgement about each component tried in the gallery. AUTHORITATIVE like
+// `findings` and `pasteboard`: it exists nowhere else and nothing can
+// rebuild it, so the store writes through on every change rather than
+// waiting for a tick. Nothing is ever deleted -- clearing a mark records the
+// clearing.
+const SANDBOX_FILE = join(WORLD_DIR, 'sandbox.json')
 // Claude Code's own per-pid session registry. Read-only, and the ONE field
 // read out of it is `tmux` -- the pane a session is sitting in, which is
 // documented nowhere and is a hint rather than a contract (hud.tsx:594 reads
 // the same file for names, with the same caveat). Overridable so the harness
 // points at a fixture directory instead of the real one.
 const SESSIONS_DIR = process.env.SZG_SESSIONS_DIR || join(homedir(), '.claude', 'sessions')
+// Where Claude Code writes each session's transcript, read-only, which is how
+// a live scoping conversation's replies reach the pane. Overridable so the
+// harness points at an empty directory instead of the real one.
+const CLAUDE_PROJECTS_DIR = process.env.SZG_CLAUDE_PROJECTS_DIR || join(homedir(), '.claude', 'projects')
 // and. The DEFAULT lives in usage.mjs so there is one source for it;
 // this is only the env-var plumbing, matching every other SZG_*_MS constant
 // in this file.
 const USAGE_POLL_MS = Number(process.env.SZG_USAGE_POLL_MS) > 0 ? Number(process.env.SZG_USAGE_POLL_MS) : DEFAULT_POLL_MS
 const USAGE_STALE_MS = Number(process.env.SZG_USAGE_STALE_MS) > 0 ? Number(process.env.SZG_USAGE_STALE_MS) : DEFAULT_STALE_MS
+/** How often the night watchdog looks for a runaway session. */
+const NIGHT_WATCH_MS = Number(process.env.SZG_NIGHT_WATCH_MS) > 0 ? Number(process.env.SZG_NIGHT_WATCH_MS) : 60_000
 // How many CHANGED readings the telemetry sparkline gets to draw from. Not a
 // time window -- a reading that never changes (nobody working overnight)
 // costs nothing and pushes nothing, so this is depth, not duration.
@@ -195,7 +279,15 @@ const CLAUDE_BIN = await pickClaudeBin(CLAUDE_CANDIDATES, (b) => probeClaudeBin(
 // The Dispatch tab's pickers, read from the resolved binary's own --help once
 // at boot -- the same shape as pickClaudeBin's capability probe just above,
 // and for the same reason: ask the binary, do not assume the machine.
-const DISPATCH_OPTIONS = await probeDispatchOptions(CLAUDE_BIN, realRun)
+// A `let`: the agent roster it carries is re-probed after every personas
+// write, so the payload's roster never lags the plugin on disk.
+let DISPATCH_OPTIONS = await probeDispatchOptions(CLAUDE_BIN, realRun)
+// Does a night run's spawn carry --max-budget-usd? The binary's help text
+// documents the flag for --print only, but a live run showed a --bg session
+// accepts it too, so the probe alone decides. The relay's own watchdog is the
+// cap that is enforced either way. Read from the BOOT probe only: a personas
+// re-probe changes the roster, never the binary's flags.
+const MAX_BUDGET_FLAG = !!DISPATCH_OPTIONS?.maxBudget
 // Does this binary understand `--safe-mode`? Probed the same way and at the
 // same moment, and used for the relay's OWN `claude -p` children -- the
 // orchestrator's ask and blurb, and a scoping turn. Those are handed their
@@ -215,6 +307,40 @@ if (CLAUDE_BIN) {
   process.stderr.write(`canvas: no claude binary with --bg found (tried: ${CLAUDE_CANDIDATES.join(', ')}); /api/spawn and /api/attach are disabled\n`)
 }
 const NO_CLAUDE = { error: 'no claude binary with --bg was found — see the relay\'s stderr' }
+
+/** The shape of `snapshot()`. Bumped BY HAND, and only by hand, in the same
+ *  change that adds a field -- so a client can say "this relay predates the
+ *  feature I need" instead of reading `undefined`, taking some other branch,
+ *  and printing a confident wrong answer with nothing in the console. Never
+ *  derived from a file hash or a commit count: a version that moves on a
+ *  comment edit teaches every reader to ignore it. */
+// 19: `projects` became a digest; a project's contents are fetched by route.
+// 20: peers.jobs[] and peers.list[].counts.jobsActive/jobsFailed carry real
+// drop job rows instead of the earlier placeholders, and a session a peer's
+// applied action put to work carries `forPeer`.
+// 21: `peerWire` -- the wire log's digest and the redaction switch, its own key
+// beside `peers` -- and `peers.asks[].askId`, the wire id an ask is joined on.
+const PAYLOAD_VERSION = 21
+
+/** This relay's build, read ONCE at boot from the checkout this file lives in
+ *  -- never per request, and never from `process.cwd()`, which is whatever
+ *  directory the session that launched the relay happened to be in.
+ *
+ *  `git` may be absent, HERE may be a plugin cache rather than a checkout, and
+ *  neither is worth failing a boot over: both answer 'unknown'. A missing key
+ *  would be a third state every reader would have to handle; one string with a
+ *  reserved value is one. `realRun` resolves rather than rejects, so the
+ *  `.catch` is belt to its braces. */
+const BUILD_SHA = await (async () => {
+  const r = await realRun('git', ['-C', HERE, 'rev-parse', '--short', 'HEAD'], { timeout: 4000 }).catch(() => null)
+  const sha = String(r?.stdout ?? '').trim()
+  return r && r.code === 0 && sha ? sha : 'unknown'
+})()
+
+/** When this process came up. With BUILD_SHA it answers "is the relay
+ *  answering me the one built from the merge I just made?" from a terminal,
+ *  with no UI and without restarting anything. */
+const STARTED_AT = Date.now()
 
 // Voice input: no boot-time resolution at all, and deliberately so.
 // The venv and the model are installed through the settings section, not
@@ -236,7 +362,33 @@ const SPAWN_PLUGIN_DIR = process.env.SZG_SPAWN_PLUGIN_DIR || null
  *  Its own interval, and its own subprocess: the canvas's poll is gated on an
  *  unsettled spawn record and so is usually not running at all. */
 const NEEDS_POLL_MS = Number(process.env.SZG_NEEDS_POLL_MS) > 0 ? Number(process.env.SZG_NEEDS_POLL_MS) : 6000
+// A test knob: a harness proves a whole limit cycle in about a second, which a
+// real five-minute stillness would not allow. Unset, the default holds. Zero is
+// a legal value here, unlike the poll knobs beside it.
+const MIN_FROZEN_MS = /^\d+$/.test(process.env.SZG_DISRUPT_MIN_FROZEN_MS ?? '')
+  ? Number(process.env.SZG_DISRUPT_MIN_FROZEN_MS) : DISRUPT_MIN_FROZEN_MS
+// A test knob of the same kind: how long after a boundary the clock alone
+// proves the reset, so a harness need not wait out the real grace. Zero is legal.
+const RESET_GRACE = /^\d+$/.test(process.env.SZG_RESET_GRACE_MS ?? '') ? Number(process.env.SZG_RESET_GRACE_MS) : RESET_GRACE_MS
 const CANVAS_POLL_MS = Number(process.env.SZG_CANVAS_POLL_MS) > 0 ? Number(process.env.SZG_CANVAS_POLL_MS) : 5000
+/** How often live scoping conversations are driven: parked turns delivered,
+ *  replies read off their transcripts, `busy` settled, old ones ended.
+ *  Overridable only so a harness can poll fast. */
+const SCOPE_POLL_MS = Number(process.env.SZG_SCOPE_POLL_MS) > 0 ? Number(process.env.SZG_SCOPE_POLL_MS) : 5000
+/** How long the board must have been quiet before /api/sweep will start one
+ *  without an override. Tunable so a live check need not wait twenty minutes. */
+const SWEEP_QUIET = Number(process.env.SZG_SWEEP_QUIET_MS) > 0 ? Number(process.env.SZG_SWEEP_QUIET_MS) : SWEEP_QUIET_MS
+// The pattern pass's own knobs, each falling back to orchestrator.mjs's own
+// default when unset or unusable -- never a partial value.
+const PATTERN_MODEL = process.env.SZG_PATTERN_MODEL || undefined
+const PATTERN_BUDGET_USD = Number(process.env.SZG_PATTERN_BUDGET_USD) > 0 ? Number(process.env.SZG_PATTERN_BUDGET_USD) : undefined
+const PATTERN_MIN_MS = Number(process.env.SZG_PATTERN_MIN_MS) > 0 ? Number(process.env.SZG_PATTERN_MIN_MS) : undefined
+// What pattern passes may spend in one local day, relay-wide.
+const PATTERN_DAY_USD = Number(process.env.SZG_PATTERN_DAY_USD) > 0 ? Number(process.env.SZG_PATTERN_DAY_USD) : undefined
+// How often the relay checks whether a pass is due. Its own gates (the
+// floor, enough new material) live inside patternPass itself, so this only
+// has to run often enough that none of them goes stale.
+const PATTERN_TICK_MS = Number(process.env.SZG_PATTERN_TICK_MS) > 0 ? Number(process.env.SZG_PATTERN_TICK_MS) : 10 * 60_000
 // The orchestrator agent.
 // Models are separately configurable because the ask and the blurb are
 // deliberately different weights (opus for the ask a human is waiting on,
@@ -251,6 +403,24 @@ const ORCH_BLURB_MIN_MS = Number(process.env.SZG_ORCH_BLURB_MIN_MS) > 0 ? Number
 // anything itself (the checks are free; only a refresh that actually runs
 // spends a turn).
 const ORCH_BLURB_TICK_MS = 60_000
+// The topic chains' refiner. Unset, each falls through to chains.mjs's own
+// default, so those numbers live in exactly one place. CHAIN_DAY_USD is the
+// refiner's day cap across every session, not a per-session allowance.
+const CHAIN_MODEL = process.env.SZG_CHAIN_MODEL || undefined
+const CHAIN_DAY_USD = Number(process.env.SZG_CHAIN_DAY_USD) > 0 ? Number(process.env.SZG_CHAIN_DAY_USD) : undefined
+const CHAIN_IDLE_MS = Number(process.env.SZG_CHAIN_IDLE_MS) > 0 ? Number(process.env.SZG_CHAIN_IDLE_MS) : undefined
+const CHAIN_EVERY = Number(process.env.SZG_CHAIN_EVERY) > 0 ? Number(process.env.SZG_CHAIN_EVERY) : undefined
+// Whether the orchestrator's bundle carries chains at all. Off unless asked
+// for: the bundle's budget is already contested, and a chain is a different
+// fact from anything the session lines carry.
+const CHAIN_BUNDLE = process.env.SZG_CHAIN_BUNDLE === '1'
+// How often the relay CHECKS whether a pass is due. Its own cadence, well
+// under the idle window those checks enforce: the checks are free and only a
+// pass that actually runs spends anything.
+const CHAIN_TICK_MS = 15_000
+// How often the spend digest is recomputed with no new call, so the day and
+// the rolling week roll over on their own. Free: it reads nothing off disk.
+const SPEND_TICK_MS = 60_000
 // How far a node may be dragged. One constant, canvas.mjs's, so /api/spawn's
 // pre-positioned node and /api/canvas/move cannot disagree about the bounds.
 const clampPos = (v) => Math.min(COORD_MAX, Math.max(0, Math.round(v)))
@@ -313,6 +483,11 @@ setInterval(saveWorld, 4000).unref?.()
 const requests = createStore({ file: DISPATCH_FILE })
 const steering = createSteeringStore({ file: STEERING_FILE })
 setInterval(() => { try { requests.flush() } catch (e) { process.stderr.write(`dispatch save failed: ${e.message}\n`) } }, 4000).unref?.()
+/** The fan-out runs. Authoritative like `requests`: a run's drafts exist
+ *  nowhere else until they are accepted. Saved on the same 4 s cadence, and
+ *  written through after every route that changes one. */
+const fanoutStore = createFanoutStore({ file: FANOUT_FILE })
+setInterval(() => { try { fanoutStore.flush() } catch (e) { process.stderr.write(`fanout save failed: ${e.message}\n`) } }, 4000).unref?.()
 
 /** The orchestrator agent's memory: an append-only log of board actions,
  *  beside the two authoritative
@@ -320,6 +495,12 @@ setInterval(() => { try { requests.flush() } catch (e) { process.stderr.write(`d
  *  wraps it in try/catch, per the rule that a capture failure must never
  *  fail the action that caused it. */
 const capture = createCapture({ dir: WORLD_DIR })
+
+/** "Since the last sweep" is the newest `sweep` entry in the capture log, not a
+ *  new file for one timestamp. A marker lost to rotation, or older than the
+ *  newest thousand entries, widens the window: the export over-includes, which
+ *  for a review is the safe direction to be wrong in. */
+const lastSweepAt = () => capture.read({ limit: 1000 }).filter((e) => e.kind === 'sweep').at(-1)?.t ?? 0
 
 /** What one session learned that changes another session's work
  *  AUTHORITATIVE like
@@ -329,11 +510,36 @@ const capture = createCapture({ dir: WORLD_DIR })
  *  time either could run, the record is already on disk. */
 const findings = createFindings({ file: FINDINGS_FILE })
 
+/** The pattern pass's memory: proposals waiting to be rated or prepped
+ *  (skills-queue.mjs). AUTHORITATIVE like `findings` just above, for the same
+ *  reason -- a write-up exists nowhere else. Created before `createOrchestrator`
+ *  below, which reads `skills.lastPassAt()` at construction. */
+const skills = createSkillsQueue({ file: SKILLS_FILE })
+
 /** A session card's own outline colour, set from the drawer (cards.mjs).
  *  AUTHORITATIVE like `findings` just above and write-through for the same
  *  reason: a colour is picked at human pace, and a relay killed right after
  *  the pick should not lose it waiting on the 4 s world tick. */
 const cards = createCards({ file: CARDS_FILE })
+
+/** The pasteboard. AUTHORITATIVE like `findings` and `cards` above, and
+ *  write-through for the same reason and then some: the moment the band
+ *  cancelled the submission, the relay held the only copy of something a
+ *  person had typed. */
+const pasteboard = createPasteboard({ file: PASTEBOARD_FILE })
+
+/** The sandbox gallery's ledger. AUTHORITATIVE like `pasteboard` just above
+ *  and write-through for the same reason: a judgement typed at human pace
+ *  has nowhere else it lives. */
+const sandbox = createSandbox({ file: SANDBOX_FILE })
+
+/** Session-space buckets. AUTHORITATIVE like `sandbox` just above and
+ *  write-through for the same reason: a saved shape has nowhere else it
+ *  lives. `pushGroups` reaches `broadcast` only when called, well after it is
+ *  assigned below. */
+const GROUPS_PATH = join(WORLD_DIR, GROUPS_FILE)
+const groupsStore = createGroups({ file: GROUPS_PATH })
+const pushGroups = () => broadcast('groups', { groups: groupsStore.all() })
 
 /** The after-reset queue: work waiting on the account's 5h/7d usage window to
  *  roll over. Authoritative like `requests` just above, for the same reason
@@ -347,6 +553,15 @@ setInterval(() => { try { afterReset.flush() } catch (e) { process.stderr.write(
 const scanner = createScanner({ registerFile: TASKS_FILE })
 let projects = []
 let projectsJson = '[]'
+/** What the panes are SENT: one digest per project, sized by projects and
+ *  worktrees rather than by plans or steps. Everything in this process reads
+ *  `projects`; only the snapshot and the `projects` frame read the digest, and
+ *  only the document routes read `projectsDocs`. */
+let projectsDigest = []
+let projectsDocs = []
+/** The change stamp's own previous result, handed back to it every pass so a
+ *  project whose document did not change keeps its `changedAt`. */
+let projectsStamp = null
 
 // Ordering here has no independent safety net -- each callee must stay
 // self-guarded (saveWorld() already swallows its own errors). requests.flush()
@@ -356,10 +571,16 @@ let projectsJson = '[]'
 const shutdown = () => {
   scoper.killAll()
   orchestrator.killAll()
+  // A refine child left running would go on spending after the relay exits.
+  chains.killAll()
   voice.stop()
   saveWorld()
   try { requests.flush() } catch (e) { process.stderr.write(`dispatch save failed on shutdown: ${e.message}\n`) }
+  try { fanoutStore.flush() } catch (e) { process.stderr.write(`fanout save failed on shutdown: ${e.message}\n`) }
+  try { orchThreads.flush() } catch (e) { process.stderr.write(`orchestrator threads save failed on shutdown: ${e.message}\n`) }
   try { afterReset.flush() } catch (e) { process.stderr.write(`after-reset save failed on shutdown: ${e.message}\n`) }
+  try { peerLink.flush() } catch (e) { process.stderr.write(`peer asks save failed on shutdown: ${e.message}\n`) }
+  try { chains.flush() } catch (e) { process.stderr.write(`chain save failed on shutdown: ${e.message}\n`) }
   process.exit(0)
 }
 process.on('SIGTERM', shutdown)
@@ -374,12 +595,85 @@ const live = () => {
   return [...sessions.values()].sort((a, b) => a.startedAt - b.startedAt)
 }
 
+/** The session list as it leaves the relay: each session a peer's applied
+ *  action put to work carries `forPeer`, read from the tag the ledger row, the
+ *  request or the session record stored at apply time. */
+const withForPeer = (list) => {
+  const idx = forPeerIndex({ spawnedBy: world.canvas.spawnedBy, requests: requests.all(), sessions: list })
+  return idx.size ? list.map((s) => (idx.has(s.id) ? { ...s, forPeer: idx.get(s.id) } : s)) : list
+}
+
+/** The tag an apply stores, resolved from the ask the pane named through the
+ *  peering engine's own log -- the pane never names a peer. A tag is a label:
+ *  one that resolves to nothing is said once on stderr, and the action still
+ *  applies, untagged. */
+const forPeerOf = (body, route) => {
+  const forPeer = typeof body.forAsk === 'string' && body.forAsk ? peerLink.tagFor(body.forAsk) : null
+  if (body.forAsk !== undefined && !forPeer) {
+    process.stderr.write(`${route}: forAsk names no incoming ask; applied untagged\n`)
+  }
+  return forPeer
+}
+
+// ---- the tmux listing -------------------------------------------------------
+
+/** How long GET /api/tmux holds one listing, so a pane polling it does not
+ *  fork tmux on every read. An apply never reads the held one: it takes its
+ *  own listing inside the request that acts on it. */
+const TMUX_CACHE_MS = 2000
+let tmuxCache = { at: 0, panes: [] }
+
+/** A fresh `tmux list-panes -a`, or [] when tmux is absent or has no server:
+ *  "no tmux here" is a normal answer, not an error. Never rejects.
+ *
+ *  `-u` first: for a client it does not believe is UTF-8, tmux prints every
+ *  tab in a format as `_`, and the listing's fields are tab-separated. A relay
+ *  started without a UTF-8 locale would otherwise parse no pane at all, with
+ *  tmux exiting 0. */
+const readTmuxPanes = async () => {
+  const out = await realRun(TMUX_BIN, ['-u', ...listArgv()], { timeout: 4000 }).catch(() => null)
+  return out && out.code === 0 ? listPanes(out.stdout) : []
+}
+
+/** Each pane, with `sessionId` set when it IS a live board session's pane.
+ *  Matched on the pane id alone: `%N` is unique across a tmux server and
+ *  survives the pane moving to another window, while the target a session
+ *  recorded names the window it started in -- exactly what a group apply
+ *  changes. An empty or unparseable `tmux` field never matches. */
+const withSessionIds = (panes) => {
+  const byPane = new Map()
+  for (const s of live()) {
+    const t = parseTmuxTarget(tmuxOfPid({ pid: s.pid, dir: SESSIONS_DIR, readFile: (f) => readFileSync(f, 'utf8') }))
+    if (t && !byPane.has(t.pane)) byPane.set(t.pane, s.id)
+  }
+  return panes.map((p) => ({ ...p, sessionId: byPane.get(p.pane) ?? null }))
+}
+
+/** The one prompt a files bucket sends: every path on its own line, under a
+ *  plain statement that naming a file grants nothing. */
+const filesPrompt = (paths) => [
+  'These files are named for you to look at. Naming them grants no permission you do not already have.',
+  '',
+  ...paths,
+].join('\n')
+
+/** A path check that can never throw into a route. */
+const pathExists = (p) => { try { return existsSync(p) } catch { return false } }
+
 /** What the pane sees: the persisted canvas plus the two things only the relay
  *  can supply. `live` is the count that must never be quiet: nothing refuses
  *  a spawn, so the count is the tab's only guard. `home`
  *  is where the spawn form's directory field starts when nothing better is
  *  known; the pane cannot work it out, since it has no filesystem. */
 const canvasPayload = () => ({ ...world.canvas, live: liveSpawnCount(world.canvas.spawnedBy, now()), home: CANVAS_HOME })
+
+/** The favourites, for the command bar's deck. A PROJECTION, not the store:
+ *  cards.json holds one entry per name ever coloured and is deliberately
+ *  uncapped, while this object goes to every pane on connect, so it is cut to
+ *  the first FAVOURITES_IN_SNAPSHOT by name. The colour rides along because a
+ *  favourite whose session is not running has no session record to carry it. */
+const FAVOURITES_IN_SNAPSHOT = 24
+const favouritePayload = () => cards.favourites().slice(0, FAVOURITES_IN_SNAPSHOT)
 
 // ---- the gear's Spinner control -------------------------------------------
 //
@@ -434,16 +728,120 @@ const writeHudSpinner = (id) => {
   renameSync(tmp, HUD_CONFIG_FILE)
 }
 
+// ---- session presets -------------------------------------------------------
+//
+// The store is authoritative (see agent-templates.mjs's header). Personas --
+// the generated plugin that lets a spawn name a preset on `--agent` -- are
+// gated on one setting, `settings.agentTemplates.personas` in the same HUD
+// config file the spinner pin lives in, absent meaning off: the plugin lands
+// in the user's own skills directory, so it is written only once somebody
+// has switched it on. Boot writes and removes nothing.
+const templates = createTemplates({ file: AGENT_TEMPLATES_FILE, now })
+
+/** Read on every call, never cached: the file is hand-edited. */
+const personasEnabled = () => {
+  const s = readHudConfig().settings
+  const at = s && typeof s === 'object' ? s.agentTemplates : null
+  return !!(at && typeof at === 'object' && at.personas === true)
+}
+
+/** writeHudSpinner's atomic contract, merging `personas` into
+ *  `settings.agentTemplates` and carrying every other key through. One step
+ *  stricter: a file that exists but will not parse as an object is REFUSED,
+ *  never replaced -- readHudConfig reads such a file as `{}`, and writing that
+ *  back would destroy the hotkeys and every other setting in it. */
+const writeHudPersonas = (enabled) => {
+  if (existsSync(HUD_CONFIG_FILE)) {
+    let raw
+    try { raw = JSON.parse(readFileSync(HUD_CONFIG_FILE, 'utf8')) } catch { raw = null }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return { ok: false, error: `${HUD_CONFIG_FILE} would not parse; refusing to overwrite it` }
+    }
+  }
+  const doc = readHudConfig()
+  const settings = { ...(doc.settings && typeof doc.settings === 'object' ? doc.settings : {}) }
+  const cur = settings.agentTemplates
+  settings.agentTemplates = { ...(cur && typeof cur === 'object' && !Array.isArray(cur) ? cur : {}), personas: enabled === true }
+  const next = { ...doc, settings }
+  mkdirSync(dirname(HUD_CONFIG_FILE), { recursive: true })
+  const tmp = `${HUD_CONFIG_FILE}.tmp-${process.pid}-${now()}`
+  writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n')
+  renameSync(tmp, HUD_CONFIG_FILE)
+  return { ok: true }
+}
+
+/** How many personas are on disk right now: the agent files under a directory
+ *  whose manifest names this plugin, else 0. Read from the disk rather than
+ *  from the last write's answer, because a refused or rolled-back write leaves
+ *  the previous plugin exactly where it was. */
+const countPersonas = (dir) => {
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, '.claude-plugin', 'plugin.json'), 'utf8'))
+    if (manifest?.name !== AGENT_PLUGIN_NAME) return 0
+    return readdirSync(join(dir, 'agents')).filter((n) => n.endsWith('.md')).length
+  } catch { return 0 }
+}
+
+/** What the pane reads. Replaced whole on every change, never mutated. */
+let personaState = { enabled: personasEnabled(), dir: AGENT_PLUGIN_DIR, count: countPersonas(AGENT_PLUGIN_DIR), error: null }
+
+/** The part of the template list the personas plugin is generated from. Two
+ *  lists with the same signature produce the same plugin, so a write that
+ *  leaves it unchanged (a rename of a persona-less preset, a reorder) never
+ *  pays for a rewrite and a validation. */
+const personaSignature = (list) => JSON.stringify((list ?? [])
+  .filter((t) => typeof t?.agentDef === 'string' && t.agentDef.trim())
+  .map((t) => [t.id, t.name, t.agentDef]))
+
+// One personas write at a time: two overlapping writes would each remove and
+// rename the same directory, and the loser's rename fails half-way.
+let personasQueue = Promise.resolve()
+
+/** Generate (or, with an empty list, remove) the personas plugin, record the
+ *  outcome, and on success re-probe the roster so a spawn made next can name
+ *  an agent that has just appeared. A throw is recorded, never raised. */
+const syncPersonas = (list) => {
+  const job = personasQueue.then(async () => {
+    let out
+    try {
+      out = await writePersonas({ templates: list, dir: AGENT_PLUGIN_DIR, run: realRun, claudeBin: CLAUDE_BIN })
+    } catch (err) {
+      out = { ok: false, error: String(err?.message ?? err) }
+    }
+    if (out.ok) {
+      try { DISPATCH_OPTIONS = await probeDispatchOptions(CLAUDE_BIN, realRun) } catch {}
+    }
+    personaState = { enabled: personasEnabled(), dir: AGENT_PLUGIN_DIR, count: countPersonas(AGENT_PLUGIN_DIR), error: out.ok ? null : String(out.error ?? 'personas write failed') }
+  })
+  personasQueue = job.catch(() => {})
+  return job
+}
+
+/** After a create, update or delete: rewrite the plugin only when the setting
+ *  is on AND the persona set actually changed. */
+const personasAfterWrite = async (before) => {
+  if (personasEnabled() && personaSignature(templates.all()) !== before) await syncPersonas(templates.all())
+}
+
 const snapshot = () => ({
+  // First, so `curl /api/state | head -c 40` answers the question without jq.
+  payloadVersion: PAYLOAD_VERSION,
   t: now(),
-  sessions: live(),
+  // What the byte budget shed from this frame; shedToBudget writes it.
+  // Declared here so the payload's key list stays in one place.
+  shed: [],
+  sessions: withForPeer(live()),
   events: events.slice(-EVENT_CAP),
   questions,
   approvals,
   links,
-  projects,
+  projects: projectsDigest,
   canvas: canvasPayload(),
   dispatch: { requests: requests.all() },
+  fanout: { runs: fanoutStore.all() },
+  // Session presets and the personas plugin's state. A relay predating this
+  // field serves a pane that reads it, so every client takes it with a default.
+  agentTemplates: { items: templates.all(), personas: personaState },
   dispatchOptions: DISPATCH_OPTIONS,
   // `usage` is the parsed reading itself (usage.mjs's parseUsage shape);
   // `usageHistory` is the ring of changed readings the sparkline draws from;
@@ -451,15 +849,53 @@ const snapshot = () => ({
   // named `usage` never has to also mean "the whole usage-window feature".
   usage: currentUsage,
   usageHistory,
-  afterReset: { queue: afterReset.all() },
+  afterReset: { queue: afterReset.all(), night: nightPayload(), resume: resumePayload() },
   steering: { custom: steering.all() },
+  // Bounded, not the whole store: this object goes to every pane on connect
+  // and on every /api/state. Oldest-first, like `events`. The full store is
+  // GET /api/findings?limit=200.
+  findings: findings.read({ limit: FINDINGS_IN_SNAPSHOT }),
+  // The quiet window a sweep waits for, as THIS relay resolved it, so the
+  // pane's gate line never restates a different number.
+  sweepQuietMs: SWEEP_QUIET,
+  // Bounded, not the whole store, the same reason `findings` just above is:
+  // this object goes to every pane on connect. The full store is one GET
+  // (/api/skills). One getter, so the three fields cannot come from three
+  // different moments.
+  skillsQueue: {
+    proposals: skills.read({ limit: PROPOSALS_IN_SNAPSHOT }),
+    pass: orchestrator.passState(),
+  },
+  // The platform's own model calls: a digest of a few hundred bytes, never
+  // records. The call list is one GET (/api/spend).
+  spend: spend.digest(),
+  // Prompts stashed with the band's marker. A relay predating this field
+  // serves a pane that reads it, so every client takes it with `?? []`.
+  pasteboard: pasteboard.all(),
+  // Which session names are favourites, for the command bar's deck. A relay
+  // predating this field serves a pane that reads it, so every client takes it
+  // with a default.
+  favourites: favouritePayload(),
+  // The gallery's ledger. A relay predating this field serves a pane that
+  // reads it, so every client takes it with `?? []`.
+  sandbox: sandbox.all(),
+  // Every session's topic chain, compact -- block titles and states, never
+  // summaries or turn heads. The full chain is one GET away. Which chains ride
+  // here is the store's call: a session that has ended is out of the map within
+  // its TTL, and its chain is worth reading for a while after that.
+  chains: chains.payload(live().map((s) => s.id)),
+  // The session-space buckets. A relay predating this field serves a pane
+  // that reads it, so every client takes it with `?? []`.
+  groups: groupsStore.all(),
   voice: voicePayload(),
   hud: hudPayload(),
-  // The orchestrator agent's blurb. `orchestrator` is referenced here only
-  // inside this function body,
-  // called well after its `const` is assigned below -- same TDZ-safe pattern
-  // as `voicePayload()` just above.
-  orchestrator: orchestrator.state(),
+  // The orchestrator agent's blurb, plus the conversation HEADERS -- never the
+  // turns. This frame goes in full to every pane that connects, so it must not
+  // grow with conversation length; the pane fetches the current thread's turns
+  // with one GET after it hydrates. Same TDZ-safe lazy-closure pattern as
+  // `voicePayload()` above: `orchestrator` and `orchThreads` are referenced
+  // only inside this body, called well after both are assigned below.
+  orchestrator: { ...orchestrator.state(), threads: orchThreads.headers(), currentId: orchThreads.currentId() },
   viewers: panes.size,
   // The gear's password section reads this rather than getting its own
   // endpoint: `enabled` is false either when no password is configured yet
@@ -467,6 +903,12 @@ const snapshot = () => ({
   // set -- both mean "no control here can do anything", so they collapse to
   // one flag rather than two the UI would have to reason about separately.
   auth: { enabled: Boolean(auth) && !AUTH_OFF },
+  // Peering's state for the pane; built field by field, it carries no pairing secret, peer address or pairing code.
+  peers: peerLink.payload(),
+  // The wire log's digest and the redaction switch. Rows are paged from
+  // /api/peer-wire; its own key, because `peers` is replaced whole on every
+  // peers event and a field nested there would vanish.
+  peerWire: { digest: wireLog.digest(), redactOff: wireSettings.off(), selfIsHostname: selfIsHostname() },
 })
 
 /** Removes one SSE client, once, and says why on stderr. Called from the
@@ -484,7 +926,20 @@ const dropPane = (res, reason) => {
   broadcast('viewers', { viewers: panes.size })
 }
 
+/** Panes dropped for not draining what they were sent -- a buffered-bytes drop
+ *  or a write that threw, never an ordinary close. /api/health reports it. */
+let droppedPanes = 0
+/** `{ t, frame }`: the snapshot frame last built, while now() still reads its `t`. */
+let frameMemo = null
+/** `{ bytes, shed, sections }` of the snapshot frame last built, for /api/health. */
+let lastFrame = null
+
 const broadcast = (type, data) => {
+  // A change is on its way to the panes, so a frame built before it is stale.
+  // `viewers` alone leaves the memo: its own event follows every connect with
+  // the count, and clearing on it would re-serialise the snapshot once per
+  // pane in a burst of connects.
+  if (type !== 'viewers') frameMemo = null
   const frame = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`
   for (const res of panes) {
     try {
@@ -494,10 +949,45 @@ const broadcast = (type, data) => {
       // after every frame, not on a timer, so a stalled client is caught the
       // broadcast cycle it falls behind on, not one scan interval later.
       if (res.writableLength > SSE_MAX_BUFFERED_BYTES) {
+        if (panes.has(res)) droppedPanes++
         dropPane(res, `${res.writableLength} bytes buffered`)
       }
-    } catch { dropPane(res, 'write threw') }
+    } catch {
+      if (panes.has(res)) droppedPanes++
+      dropPane(res, 'write threw')
+    }
   }
+}
+
+/** The snapshot as it leaves this relay: measured, and shed to SNAPSHOT_BUDGET.
+ *  `/api/stream`, `/api/state` and `/api/health` all read it through here. The
+ *  memo serves a burst of reads inside one millisecond from one serialisation;
+ *  a broadcast or a finished write request clears it, since either can change
+ *  the state inside that same millisecond. */
+const snapshotFrame = () => {
+  if (frameMemo && frameMemo.t === now()) return frameMemo.frame
+  const frame = shedToBudget(snapshot(), { budget: SNAPSHOT_BUDGET })
+  frameMemo = { t: frame.frame.t, frame }
+  lastFrame = { bytes: frame.bytes, shed: frame.shed, sections: frame.sections }
+  return frame
+}
+
+/** The id set of the last `sessions` frame actually sent. The expiry sweep
+ *  compares against THIS rather than against sessions.size before and after its
+ *  own live() call: rescan() calls live() every 4 s and prunes first, so by the
+ *  time the sweep ran the map had already shrunk and the comparison saw nothing
+ *  to report. It only ever bit when the board emptied COMPLETELY -- any other
+ *  beating session's /api/stats broadcasts anyway -- and then every pane kept
+ *  ghosts until a reload. Comparing the set is immune to which caller did the
+ *  pruning. */
+let lastSessionIds = ''
+const idsKey = (list) => list.map((s) => s.id).join(' ')
+/** The ONE way a `sessions` frame leaves this relay, so nothing can emit one
+ *  without recording what it said. */
+const broadcastSessions = () => {
+  const list = live()
+  lastSessionIds = idsKey(list)
+  broadcast('sessions', withForPeer(list))
 }
 
 /** Every canvas write goes through here: the persisted state is dirty, and
@@ -505,15 +995,21 @@ const broadcast = (type, data) => {
  *  alone rather than everything the relay persists. */
 const canvasChanged = () => { worldDirty = true; broadcast('canvas', canvasPayload()) }
 
+// Its own `agentTemplates` SSE event, never the whole snapshot -- same
+// discipline as `canvasChanged` and `hudChanged`.
+const templatesChanged = () => broadcast('agentTemplates', { items: templates.all(), personas: personaState })
+
 // The Dispatch tab's scoping engine: spawns and manages headless `claude -p`
 // children. Constructed here, after `broadcast`, rather than beside the
 // `requests` store above — it closes over `broadcast`, which is a `const`
 // declared below that point and is not yet initialised there.
 // `claudeBin` is the capability-resolved one, so the Dispatch tab and the
-// canvas cannot disagree about which `claude` is meant. Both modules
-// already took the parameter; they were simply never given it. `|| 'claude'`
-// keeps their own default when nothing resolved -- their failure mode is
-// theirs to own, and neither is this branch's file to change.
+// canvas cannot disagree about which `claude` is meant. It is passed through
+// exactly as resolved -- CLAUDE_BIN, never a `|| 'claude'` construction-site
+// fallback -- so a missing binary reaches a module as null rather than as a
+// bare `claude` off PATH, which a background tick would otherwise spawn for
+// real. Each module refuses to spawn on a null claudeBin itself, the same
+// outcome its HTTP routes already answer with a 503.
 // Voice input: `ready` is computed HERE, not in voice.mjs --
 // createVoice's own state() only knows about voice.json, the venv and the
 // model on disk, and the worker's own reported liveness, never how those
@@ -541,21 +1037,104 @@ const voicePayload = () => {
 const voiceChanged = () => broadcast('voice', voicePayload())
 const voice = createVoice({ dir: WORLD_DIR, uvBin: UV_BIN, workerPy: VOICE_WORKER_PY, broadcast: voiceChanged })
 
-const scoper = createScoper({ store: requests, broadcast, claudeBin: CLAUDE_BIN || 'claude', safeMode: CLAUDE_SAFE_MODE })
+// The platform's own model calls. Built after `broadcast`, which its
+// change handler closes over, and before the three modules that record
+// into it. The tick re-digests so `today` and the rolling week move on
+// with no new call, and broadcasts only when the digest actually changed.
+let spendJson = ''
+const spendChanged = (d) => { spendJson = JSON.stringify(d); broadcast('spend', d) }
+const spend = createSpend({ dir: WORLD_DIR, onChange: spendChanged })
+spendJson = JSON.stringify(spend.digest())
+setInterval(() => {
+  try { const d = spend.digest(); if (JSON.stringify(d) !== spendJson) spendChanged(d) } catch (e) { process.stderr.write(`spend tick failed: ${e?.stack || e}\n`) }
+}, SPEND_TICK_MS).unref?.()
+
+// The topic chains. Built here, after `broadcast` exists, never up beside
+// `findings`, where `broadcast` and `live` are still in the temporal dead
+// zone. The store raises its own `chain` event, `{ sessionId, chain }` with the
+// chain compact, so `broadcast` is handed over as it is.
+// `realSpawn`, never `realRun`: the refiner reads the child's streams and kills
+// it on a timeout, and realRun only ever hands back a finished result.
+const chains = createChains({
+  dir: WORLD_DIR, run: CLAUDE_BIN ? realSpawn : null, claudeBin: CLAUDE_BIN || 'claude', safeMode: CLAUDE_SAFE_MODE,
+  model: CHAIN_MODEL, dayUsd: CHAIN_DAY_USD, idleMs: CHAIN_IDLE_MS, everyTurns: CHAIN_EVERY,
+  capture, broadcast, spend,
+})
+// One relay-wide tick. Which chains are due, and whether anything spawns, is
+// the store's decision; this only asks often enough.
+setInterval(() => {
+  try { chains.tick() } catch (e) { process.stderr.write(`chain tick failed: ${e?.stack || e}\n`) }
+}, CHAIN_TICK_MS).unref?.()
+
+const scoper = createScoper({
+  store: requests, broadcast, claudeBin: CLAUDE_BIN, safeMode: CLAUDE_SAFE_MODE,
+  run: realRun,
+  // An arrow, not `enqueue` itself: that is a `const` declared further down
+  // this file, still uninitialised when this line runs.
+  enqueue: (id, cmd) => enqueue(id, cmd),
+  hasSession: (id) => sessions.has(id),
+  // Read at spawn time, not now: `boundPort` is assigned in server.listen.
+  relayInfo: () => ({ relayPort: boundPort, relayToken: TOKEN }),
+  projectsDir: CLAUDE_PROJECTS_DIR,
+  fanoutStore,
+  spend,
+})
 
 // The Dispatch tab's dispatcher: git worktrees and background `claude`
 // sessions. Same TDZ reason as `scoper` just above -- it closes over
 // `broadcast`, so it is built here, after `broadcast` exists, not beside the
 // `requests` store.
-const dispatcher = createDispatcher({ store: requests, broadcast, claudeBin: CLAUDE_BIN || 'claude',
+const dispatcher = createDispatcher({ store: requests, broadcast, claudeBin: CLAUDE_BIN,
   // Read at dispatch time, not now: `boundPort` is assigned in server.listen,
   // long after this line runs. The canvas reads it at call time in its handler
   // for the same reason.
-  relayInfo: () => ({ relayPort: boundPort, relayToken: TOKEN }) })
+  relayInfo: () => ({ relayPort: boundPort, relayToken: TOKEN }),
+  // A request's preset, looked up at dispatch time: the stored template as it
+  // is then, the roster as last probed, and the personas setting as the file
+  // says now. A preset deleted since the request was made means no preset.
+  templateAgent: (r) => {
+    const t = templates.get(r.dispatch?.templateId)
+    return t ? templateArgv(t, { roster: DISPATCH_OPTIONS?.agents ?? [], personas: personasEnabled() }).agent : null
+  },
+  templateTools: (r) => templates.get(r.dispatch?.templateId)?.allowedTools ?? [] })
+
+// Night hours' acting half: a worktree, a branch and one background session
+// per armed plan, plus the runaway watchdog. `relayInfo` is a thunk for the
+// same reason as the dispatcher's just above.
+const nightRunner = createNightRunner({
+  run: realRun, canvas: world.canvas, claudeBin: CLAUDE_BIN, now,
+  relayInfo: () => ({ relayPort: boundPort, relayToken: TOKEN }),
+  pluginDir: SPAWN_PLUGIN_DIR,
+})
 // one subprocess per pass, not one per session.
 setInterval(() => {
   dispatcher.poll().catch((e) => process.stderr.write(`dispatch poll failed: ${e?.stack || e}\n`))
 }, 5000).unref?.()
+
+// Live scoping conversations: one listing per pass fills each session's id
+// and state, parked turns are delivered, replies are read back off the
+// transcript, and a conversation past its age ceiling is ended. Its own
+// re-entrancy flag, the canvasTick shape: a listing slower than the interval
+// must never overlap the one still running.
+let scopePolling = false
+setInterval(async () => {
+  if (scopePolling) return
+  scopePolling = true
+  try { await scoper.pass() } catch (e) {
+    process.stderr.write(`scoping poll failed: ${e?.stack || e}\n`)
+  } finally { scopePolling = false }
+}, SCOPE_POLL_MS).unref?.()
+
+// Authoritative and write-through: a conversation exists nowhere else once
+// its --resume pointer is lost.
+const orchThreads = createThreadStore({ file: ORCH_THREADS_FILE })
+
+// The header list, rebroadcast after anything that changes it: the five
+// thread routes, an ask (the auto-title, the turn count, a thread created
+// when none was current) and clear (a new current thread). Declared once,
+// after both `broadcast` and `orchThreads`, and called only from request
+// handlers, so no route can reach it before it exists.
+const threadsChanged = () => broadcast('orchestrator', { threads: orchThreads.headers(), currentId: orchThreads.currentId() })
 
 // The orchestrator agent. Same TDZ
 // reasoning as `scoper`/`dispatcher` just above -- it closes over `broadcast`
@@ -564,9 +1143,14 @@ setInterval(() => {
 // called until well after every module-level `const` here has run, the same
 // lazy-closure trick `voicePayload` already relies on for `voice`.
 const orchestrator = createOrchestrator({
-  broadcast, capture, findings, claudeBin: CLAUDE_BIN || 'claude', safeMode: CLAUDE_SAFE_MODE,
+  broadcast, capture, findings, skills, claudeBin: CLAUDE_BIN, safeMode: CLAUDE_SAFE_MODE,
+  threads: orchThreads,
   snapshot: () => snapshot(), panesSize: () => panes.size,
   askModel: ORCH_MODEL, blurbModel: ORCH_BLURB_MODEL, blurbMinMs: ORCH_BLURB_MIN_MS,
+  patternModel: PATTERN_MODEL, patternBudgetUsd: PATTERN_BUDGET_USD, patternMinMs: PATTERN_MIN_MS,
+  patternDayUsd: PATTERN_DAY_USD,
+  bundleChains: CHAIN_BUNDLE,
+  spend,
 })
 // the timer trigger. Its own gates (a pane connected, the board having
 // changed, the 10-minute floor) live inside refreshBlurb() itself; this tick
@@ -576,6 +1160,67 @@ const orchestrator = createOrchestrator({
 setInterval(() => {
   orchestrator.refreshBlurb().catch((e) => process.stderr.write(`orchestrator blurb tick failed: ${e?.stack || e}\n`))
 }, ORCH_BLURB_TICK_MS).unref?.()
+
+// The pattern pass's own tick. Its own gates (the floor, enough new
+// material, the shared slot) live inside patternPass itself, so this only
+// has to run often enough that none of them goes stale.
+setInterval(() => {
+  orchestrator.patternPass().catch((e) => process.stderr.write(`pattern pass tick failed: ${e?.stack || e}\n`))
+}, PATTERN_TICK_MS).unref?.()
+
+// A drop's paths must resolve inside a root this relay already knows: every
+// project's main checkout, every one of its worktrees, and every live
+// session's own root -- never read at construction time, since only a fresh
+// call sees what the scanner and the board currently hold. Each is
+// `realpath`-resolved before it becomes a root a path is checked against; one
+// that no longer resolves is left out rather than trusted as typed.
+const dropRoots = () => {
+  const found = new Set()
+  for (const p of projects) {
+    if (typeof p?.mainRoot === 'string') found.add(p.mainRoot)
+    for (const w of p?.worktrees ?? []) if (typeof w?.path === 'string') found.add(w.path)
+  }
+  for (const s of live()) if (typeof s?.root === 'string') found.add(s.root)
+  const resolved = new Set()
+  for (const p of found) {
+    try { resolved.add(realpathSync(p)) } catch {}
+  }
+  return [...resolved]
+}
+
+// The wire log and its tap: every body sent to a peer is redacted first and
+// every exchange is logged, at the two functions any peer byte passes through.
+// Registered before the link starts, so its first heartbeat is covered. The
+// redaction context is rebuilt when the password changes and once a minute,
+// so a new network address is picked up without a restart.
+const wireSettings = createWireSettings({ dir: WORLD_DIR })
+const wireLog = createWireLog({ dir: WORLD_DIR, onAppend: (row, digest) => broadcast('peerwire', { digest, row }) })
+let redactCache = null
+const redactContextNow = () => {
+  const key = `${auth?.hash ?? ''}|${Math.floor(Date.now() / 60_000)}`
+  if (redactCache?.key !== key) {
+    redactCache = {
+      key,
+      ctx: redactionContext(hostParts({ env: process.env, token: TOKEN, auth, os: { homedir, userInfo, hostname: osHostname, networkInterfaces }, realpath: realpathSync })),
+    }
+  }
+  return redactCache.ctx
+}
+const peerNameByFingerprint = (fp) => {
+  try { return peerLink.payload().list.find((p) => p.fingerprint === fp)?.name ?? null } catch { return null }
+}
+setWireTap(createWireTap({ log: wireLog, settings: wireSettings, context: redactContextNow, peerNameOf: peerNameByFingerprint }))
+const selfIsHostname = () => {
+  try { return peerLink.payload().self === selfNameFrom(osHostname()) } catch { return false }
+}
+
+// Peering: a second, TLS-only listener with its own route table, built
+// only while peering is enabled. It shares nothing with the server below --
+// not the handler, not the gate, not a prefix -- so no route added there can
+// ever be reached from it. Same ordering reason as `orchestrator` just above:
+// it closes over `broadcast`, `live` and `orchestrator`.
+const peerLink = createPeerLink({ dir: WORLD_DIR, run: realRun, sessions: () => withForPeer(live()), broadcast, orchestrator, dropRoots })
+peerLink.start().catch((e) => process.stderr.write(`peering failed to start: ${e?.stack || e}\n`))
 
 // The canvas's spawn ledger: one `claude agents --json --all` per pass, only
 // while some record is still worth asking about, folded onto the ledger (spec
@@ -630,6 +1275,8 @@ const canvasPass = async () => {
   }
   const pruned = pruneNodes(world.canvas.nodes, new Set(sessions.keys()), now())
   if (pruned.changed) { world.canvas.nodes = pruned.nodes; changed = true }
+  const unpromised = dropExpiredLinks(world.canvas.spawnedBy, now())
+  if (unpromised.changed) { world.canvas.spawnedBy = unpromised.spawnedBy; changed = true }
   const liveNow = liveSpawnCount(world.canvas.spawnedBy, now())
   if (changed || liveNow !== lastLive) { lastLive = liveNow; canvasChanged() }
 }
@@ -657,6 +1304,7 @@ let needsListFailed = false
 // would start another child on top of the stuck one until the box gave out.
 // Skipping a tick costs nothing: the next one reads current state anyway.
 let needsInFlight = false
+let lastAgents = { at: 0, rows: [] }
 const needsTick = async () => {
   if (!CLAUDE_BIN || sessions.size === 0 || needsInFlight) return
   needsInFlight = true
@@ -681,6 +1329,11 @@ const needsPass = async () => {
     return
   }
   needsListFailed = false
+  // The same listing the waiting flags come from, kept so a decision taken on
+  // another timer reads Claude Code's own knowledge without shelling out a
+  // second time. Its age is what makes a decision fail closed rather than
+  // guess.
+  lastAgents = { at: now(), rows: agents }
   const byId = new Map()
   for (const a of agents) if (a && typeof a.sessionId === 'string') byId.set(a.sessionId, a)
   let changed = false
@@ -721,7 +1374,7 @@ const needsPass = async () => {
     if (jc !== (s.jump ?? '')) changed = true
     s.jump = jc
   }
-  if (changed) broadcast('sessions', live())
+  if (changed) broadcastSessions()
 }
 setInterval(() => {
   needsTick().catch((e) => process.stderr.write(`needs poll failed: ${e?.stack || e}\n`))
@@ -739,6 +1392,32 @@ const enqueue = (sessionId, command) => {
   const q = commands.get(sessionId) ?? []
   q.push({ id: uid(), t: now(), ...command })
   commands.set(sessionId, q)
+}
+
+/** What opening a channel from A to B IS, in one place. Two callers reach it:
+ *  /api/link (a wire landed on an existing node) and /api/register (a wire a
+ *  spawn promised, claimed the moment its child reports in). They were written
+ *  as one function rather than two so the second can never drift from the
+ *  first -- a link that records but does not brief, or briefs but is not
+ *  drawn, is the kind of half-state nothing on the board would reveal.
+ *
+ *  `note === null` means WIRE ONLY: record it, draw it, interrupt nobody. Every
+ *  other note -- including '' -- costs the SOURCE a queued command, a tool call
+ *  and a turn, which is exactly why the two values are kept apart. */
+const openChannel = ({ fromId, toId, kind = 'brief', note = '' }) => {
+  const from = sessions.get(fromId), to = sessions.get(toId)
+  if (!from || !to) return { ok: false, error: 'unknown session' }
+  const link = { id: uid(), t: now(), from: fromId, to: toId, kind }
+  links = [...links.filter((l) => !(l.from === fromId && l.to === toId)), link]
+  if (note !== null) {
+    enqueue(fromId, {
+      verb: 'send-message',
+      payload: { toName: to.agentName || to.name || to.id, toId: to.id, kind, note },
+    })
+  }
+  try { capture.append('link', fromId, { to: toId, linkKind: kind }) } catch {}
+  broadcast('links', links)
+  return { ok: true, link }
 }
 
 /** The body of /api/implement, factored out so the after-reset scheduler
@@ -776,6 +1455,8 @@ const implementIds = (ids) => {
 // whole thing would make every tick look "changed" and defeat the point of
 // entirely.
 let currentUsage = { fiveHour: null, sevenDay: null, observedAt: null, stale: true }
+// The last non-null window per key, carrying the reading's own `observedAt`.
+let lastSeenWindows = { fiveHour: null, sevenDay: null }
 let usageHistory = []      // ring of { t, usage }: changed readings only, for the sparkline
 let usageSignature = null  // the last BROADCAST reading's comparable key, not the last computed one
 
@@ -790,13 +1471,205 @@ const usageKey = (u) => JSON.stringify({
  *  a `crossed` array on top (see usageTick) -- a GET has no "since when" to
  *  compare against, so a crossing is only ever something that just happened
  *  on a broadcast, never a fact a poll can ask for at rest. */
-const usagePayload = () => ({ usage: currentUsage, history: usageHistory, queue: afterReset.all() })
+const usagePayload = () => ({ usage: currentUsage, history: usageHistory, queue: afterReset.all(), night: nightPayload(), resume: resumePayload() })
+
+/** The night policy as the panel reads it: the stored settings, whether it is
+ *  night right now, and -- from the same autoArmDecision the scheduler acts on
+ *  -- either when a plan arms or why nothing does. Reads the scanner's cached
+ *  `projects` rather than rescanning: this runs on every usage broadcast. */
+const nightPayload = () => {
+  const settings = afterReset.settings()
+  const d = autoArmDecision({
+    usage: currentUsage, queue: afterReset.all(), settings,
+    projects, sessions: live(), now: now(),
+  })
+  const win = currentUsage.fiveHour
+  return {
+    ...settings.night,
+    active: inNightWindow(now(), settings.night),
+    nextResetAt: win?.resetsAt ?? null,
+    armsAt: d.arm ? (win?.resetsAt ?? null) : null,
+    armed: afterReset.all().find((e) => e.kind === 'plan' && e.state === 'pending')?.id ?? null,
+    held: d.arm ? null : d.reason,
+    eligible: eligiblePlans(projects).slice(0, 20),
+  }
+}
+
+// What the last reset actually did, so the panel can say so after the rows
+// have cleared. Declared above its reader: `resumePayload` only reads it when
+// called, but a reader above its own declaration is a trap for the next edit.
+let lastFire = null
+// The disrupted list as it stood at the last broadcast, so a change to it can
+// be told apart from a tick where nothing moved.
+let lastResumeKey = null
+
+/** The standing resume arm as the panel reads it: the stored settings, the
+ *  open episode, and every session the relay currently believes the limit
+ *  stopped -- each with the sentence that admitted it. `held` is the relay's
+ *  own account of why nothing would fire; a bare false would make "not armed",
+ *  "no reading" and "no listing" look identical on the panel. */
+const resumePayload = () => {
+  const r = afterReset.settings().resume
+  const d = disruptedSessions({
+    sessions: live(), agents: lastAgents.rows, agentsAt: lastAgents.at,
+    episode: r.episode, excluded: r.excluded, fired: afterReset.all(), now: now(),
+    minFrozenMs: MIN_FROZEN_MS,
+  })
+  return {
+    ...r,
+    disrupted: d.rows.slice(0, 40),
+    held: !r.armed ? 'not armed' : d.held,
+    lastFire,
+  }
+}
+
+// Ids fireEntry is part-way through. A plan's fire awaits git and a spawn, and
+// the entry stays `pending` until it settles, so without this a scheduler tick
+// and a fire-now landing in that gap would each start a session.
+const firing = new Set()
+
+/** The ONE firing path. The scheduler calls it for a due entry and the route
+ *  calls it for "fire now" -- two callers, never two code paths, because two
+ *  paths that must behave identically will not, and the divergence is
+ *  invisible until the night it matters. Marks the entry itself, fired or
+ *  failed, and never throws. */
+const fireEntry = async (entry) => {
+  if (firing.has(entry.id)) return
+  firing.add(entry.id)
+  try {
+    if (entry.kind === 'prompt') {
+      if (!entry.target || !sessions.has(entry.target)) {
+        throw new Error('target session is not registered with this relay')
+      }
+      enqueue(entry.target, { verb: 'prompt', payload: { text: String(entry.payload?.text ?? '') } })
+    } else if (entry.kind === 'resume') {
+      // The prompt branch's twin, and deliberately so: a resume reaches a
+      // session that is still here, through the queue it already polls. It
+      // shells out to nothing.
+      if (!entry.target || !sessions.has(entry.target)) {
+        throw new Error('target session is not registered with this relay')
+      }
+      enqueue(entry.target, { verb: 'prompt', payload: { text: RESUME_PROMPT } })
+    } else if (entry.kind === 'spawn') {
+      if (!CLAUDE_BIN) throw new Error('no usable claude binary was found')
+      const p = entry.payload ?? {}
+      // The canvas's own spawn path, not a second one: argv array, prompt last
+      // behind the end-of-options sentinel, the child's environment stripped,
+      // and this relay's own coordinates on --settings. None of that is
+      // reimplemented here and none of it may be.
+      const out = await spawnSession({
+        canvas: world.canvas, run: realRun, now, claudeBin: CLAUDE_BIN,
+        relayPort: boundPort, relayToken: TOKEN, pluginDir: SPAWN_PLUGIN_DIR,
+        hasSession: (id) => sessions.has(id),
+        body: { cwd: p.cwd, prompt: p.prompt, name: p.name ?? '', model: p.model, effort: p.effort },
+      })
+      if (out.changed) canvasChanged()
+      if (out.status !== 200) throw new Error(out.body?.error ?? `spawn failed (${out.status})`)
+      afterReset.markFired(entry.id, { ok: true, payload: {
+        spawn: { shortId: out.body.shortId, name: out.body.name, cwd: out.body.cwd, spawnedAt: now() },
+      } })
+      return
+    } else if (entry.kind === 'implement') {
+      const ids = Array.isArray(entry.payload?.ids) ? entry.payload.ids : []
+      if (!ids.length) throw new Error('no ids to implement')
+      // implementIds SKIPS a request that is not `planned`, has no sessionId,
+      // or whose session is no longer registered here -- which at 03:00 is
+      // the normal case, because the planning session is gone. Throwing its
+      // answer away and recording `fired` is a confident green for work
+      // nothing did.
+      const { queued, skipped } = implementIds(ids)
+      if (!queued.length) throw new Error(`no request could be green-lit: ${skipped.join(', ')}`)
+      if (skipped.length) afterReset.markFired(entry.id, { ok: true, payload: { skipped } })
+      else afterReset.markFired(entry.id, { ok: true })
+      return
+    } else if (entry.kind === 'plan') {
+      if (!CLAUDE_BIN) throw new Error('no usable claude binary was found')
+      const night = afterReset.settings().night
+      const budgetUsd = Number(entry.payload?.budgetUsd) > 0 ? Number(entry.payload.budgetUsd) : night.budgetUsd
+      let out
+      try {
+        out = await nightRunner.fire(entry, { budgetUsd, maxBudgetFlag: MAX_BUDGET_FLAG })
+      } finally {
+        // A spawn writes the canvas ledger whether or not it succeeds.
+        canvasChanged()
+      }
+      if (!out.ok) throw new Error(out.error)
+      afterReset.markFired(entry.id, { ok: true, payload: { spawn: out.spawn, budgetUsd } })
+      return
+    } else {
+      // An unknown kind is refused at creation, in both the route and the
+      // store -- this branch is unreachable except via a hand-edited
+      // after-reset.json, and even then it fails loudly rather than silently
+      // doing nothing.
+      throw new Error(`unrecognised kind: ${entry.kind}`)
+    }
+    afterReset.markFired(entry.id, { ok: true })
+  } catch (e) {
+    afterReset.markFired(entry.id, { ok: false, error: e?.message || String(e) })
+  } finally {
+    firing.delete(entry.id)
+  }
+}
+
+/** Ends the exclusions a reset honoured. An exclusion is made against one
+ *  reset, and its `until` alone cannot end it: an episode can close on a moved
+ *  boundary before that time comes, and an exclusion left standing would
+ *  silently suppress the next reset. Only the exclusions the pass read are
+ *  ended -- one set again with a new `until` while the pass awaited stands. */
+const endExclusions = (read) => {
+  const current = afterReset.settings().resume.excluded
+  for (const e of read) {
+    if (current.some((c) => c.id === e.id && c.until === e.until)) afterReset.setResume({ include: e.id })
+  }
+}
+
+/** Create and fire one resume per disrupted session, once per episode.
+ *
+ *  The entry is the record: it names the episode it answered, so a morning
+ *  reading the queue sees which reset prompted whom and what failed. De-dup is
+ *  a query over the store's own items rather than new bookkeeping, so it
+ *  survives a restart for free. Every exclusion the pass read ends with it,
+ *  armed or not. */
+const resumePass = async (episode, t) => {
+  const r = afterReset.settings().resume
+  if (!episode) return false
+  try {
+    if (!r.armed) return false
+    const { rows } = disruptedSessions({
+      sessions: live(), agents: lastAgents.rows, agentsAt: lastAgents.at,
+      episode, excluded: r.excluded, fired: afterReset.all(), now: t,
+      minFrozenMs: MIN_FROZEN_MS,
+    })
+    const targets = rows.filter((row) => row.eligible)
+    // A reset that resumed nobody is still a reset the relay saw: without this
+    // the morning panel could not tell "nothing was eligible" from "no reset".
+    if (!targets.length) {
+      lastFire = { at: t, resetsAt: episode.resetsAt, fired: 0, failed: 0 }
+      return true
+    }
+    let ok = 0, failed = 0
+    for (const row of targets) {
+      const entry = afterReset.create({
+        window: episode.window, kind: 'resume', target: row.id,
+        armedResetsAt: episode.resetsAt,
+        payload: { auto: true, reason: row.reason, sessionName: row.name, episode },
+      })
+      await fireEntry(entry)
+      if (afterReset.get(entry.id)?.state === 'fired') ok++; else failed++
+    }
+    lastFire = { at: t, resetsAt: episode.resetsAt, fired: ok, failed }
+    return true
+  } finally {
+    endExclusions(r.excluded)
+  }
+}
 
 // Re-entrancy guard, same reason canvasTick/needsTick carry one: a slow read
 // of STATUSLINE_DIR must not stack a second tick on top of a still-running
-// one every USAGE_POLL_MS.
+// one every USAGE_POLL_MS. It also covers the awaited spawn inside a plan's
+// fire, which is why `usagePolling` clears in the `finally`.
 let usagePolling = false
-const usageTick = () => {
+const usageTick = async () => {
   if (usagePolling) return
   usagePolling = true
   try {
@@ -818,39 +1691,72 @@ const usageTick = () => {
     // `currentUsage` on a "change" would serve a stale `resetsInMs` between
     // broadcasts even though nothing here is actually cached across calls.
     currentUsage = next
+    // When the limit stops every session no statusline runs and the reading
+    // goes dark, so the episode is followed from the last window the relay saw
+    // for each key, and the clock proves the reset.
+    for (const w of ['fiveHour', 'sevenDay']) {
+      if (next[w]) lastSeenWindows[w] = { ...next[w], observedAt: next.observedAt }
+    }
+    const known = {
+      ...currentUsage,
+      fiveHour: currentUsage.fiveHour ?? lastSeenWindows.fiveHour,
+      sevenDay: currentUsage.sevenDay ?? lastSeenWindows.sevenDay,
+    }
     if (changed) {
       usageSignature = key
       usageHistory = [...usageHistory, { t, usage: next }].slice(-USAGE_RING_CAP)
     }
+    let fired = false
+
+    // One episode at a time, persisted, and closed by the same proofs a
+    // queued entry's fire uses: a moved boundary, or the clock. An open episode is
+    // followed to its own end; with none open, the armed windows are tried in
+    // order, so the five-hour window is preferred when both are armed.
+    const res = afterReset.settings().resume
+    const watching = res.episode ? [res.episode.window] : res.windows
+    let closed = null
+    for (const w of watching) {
+      const ep = limitEpisode(res.episode, known, w, t, RESET_GRACE)
+      if (JSON.stringify(ep ?? null) === JSON.stringify(res.episode ?? null)) continue
+      if (ep === null && res.episode) closed = res.episode
+      afterReset.setEpisode(ep)
+      fired = true
+      break
+    }
+    // A session already mid-task is worth more than a new night run, so the
+    // fleet is restarted before anything else is armed on top of it -- which
+    // also lets the night decision's "still running" refusal see the truth.
+    if (closed && await resumePass(closed, t)) fired = true
+    // The disrupted list moves on the needs poll, not on a reading, so a
+    // change to it is news of its own; without this the panel keeps showing
+    // the list as it stood at the last reading.
+    const rp = resumePayload()
+    const resumeKey = JSON.stringify([rp.held, rp.disrupted.map((d) => [d.id, d.eligible, d.excluded])])
+    if (resumeKey !== lastResumeKey) { lastResumeKey = resumeKey; fired = true }
 
     // The scheduler: same 15s poll as the reading itself, so a reset is
     // noticed no later than the reading that proves it. usage.mjs's
     // dueEntries does the deciding; this only acts on what it returns.
-    const due = dueEntries(afterReset.all(), currentUsage, t)
-    let fired = false
-    for (const entry of due) {
+    const due = dueEntries(afterReset.all(), currentUsage, t, RESET_GRACE)
+    for (const entry of due) { fired = true; await fireEntry(entry) }
+
+    // One plan per qualifying reset, never two, and never on top of a session
+    // waiting on a human. autoArmDecision does ALL the deciding -- this only
+    // acts on what it returns, and nightPayload publishes its refusal reason.
+    const settings = afterReset.settings()
+    const decision = autoArmDecision({
+      usage: currentUsage, queue: afterReset.all(), settings,
+      projects, sessions: live(), now: t,
+    })
+    if (decision.arm) {
+      const p = decision.plan
+      afterReset.create({
+        window: 'fiveHour', kind: 'plan', target: p.rel,
+        armedResetsAt: currentUsage.fiveHour?.resetsAt ?? null,
+        payload: { mainRoot: p.mainRoot, project: p.project, planName: p.name,
+                   planTitle: p.title, auto: true, budgetUsd: settings.night.budgetUsd },
+      })
       fired = true
-      try {
-        if (entry.kind === 'prompt') {
-          if (!entry.target || !sessions.has(entry.target)) {
-            throw new Error('target session is not registered with this relay')
-          }
-          enqueue(entry.target, { verb: 'prompt', payload: { text: String(entry.payload?.text ?? '') } })
-        } else if (entry.kind === 'implement') {
-          const ids = Array.isArray(entry.payload?.ids) ? entry.payload.ids : []
-          if (!ids.length) throw new Error('no ids to implement')
-          implementIds(ids)
-        } else {
-          // refuses 'resume' and every other kind at creation, in both the
-          // route and the store -- this branch is unreachable except via a
-          // hand-edited after-reset.json, and even then it fails loudly
-          // rather than silently doing nothing.
-          throw new Error(`unrecognised kind: ${entry.kind}`)
-        }
-        afterReset.markFired(entry.id, { ok: true })
-      } catch (e) {
-        afterReset.markFired(entry.id, { ok: false, error: e?.message || String(e) })
-      }
     }
 
     if (changed || fired || crossed.length) broadcast('usage', { ...usagePayload(), crossed })
@@ -860,7 +1766,40 @@ const usageTick = () => {
     usagePolling = false
   }
 }
+// Nothing awaits the returned promise, and usageTick catches everything
+// itself, so an async tick is safe to hand to setInterval.
 setInterval(usageTick, USAGE_POLL_MS).unref?.()
+
+// The runaway watchdog: its own interval and its own re-entrancy guard, since
+// a stop awaits a subprocess. night.mjs decides and stops; only the relay
+// writes the store, recording a successful stop on the entry so the panel
+// can say when and why. A failed stop is not recorded -- the next pass tries
+// again -- and goes to stderr.
+let nightWatching = false
+const nightWatchTick = async () => {
+  if (nightWatching) return
+  nightWatching = true
+  try {
+    const stopped = await nightRunner.watch({
+      entries: afterReset.all(), sessions: live(),
+      settings: afterReset.settings(), now,
+    })
+    for (const s of stopped) {
+      if (s.ok) {
+        afterReset.annotate(s.id, { stoppedAt: now(), stopReason: s.reason })
+        process.stderr.write(`night: stopped ${s.id} — ${s.reason}\n`)
+      } else {
+        process.stderr.write(`night: failed to stop ${s.id} (${s.reason}): ${s.error}\n`)
+      }
+    }
+    if (stopped.some((s) => s.ok)) broadcast('usage', { ...usagePayload(), crossed: [] })
+  } catch (e) {
+    process.stderr.write(`night watch failed: ${e?.stack || e}\n`)
+  } finally {
+    nightWatching = false
+  }
+}
+setInterval(() => { nightWatchTick() }, NIGHT_WATCH_MS).unref?.()
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -888,6 +1827,45 @@ const json = (res, code, body) => {
   res.end(JSON.stringify(body))
 }
 
+const PAGE_DEFAULT = 500
+const PAGE_MAX = 2000
+/** `offset` and `limit` as a browser sends them. Absent, blank, negative and
+ *  non-numeric all mean the default, and an over-large limit clamps rather
+ *  than refusing -- a paged read is a convenience, not a gate. An offset past
+ *  the end is not an error either: it answers an empty page and the real
+ *  total, which is how a caller learns it walked off the end. */
+const pageOf = (params) => {
+  const num = (raw) => { const x = Number(raw); return Number.isFinite(x) ? Math.floor(x) : null }
+  const off = num(params.get('offset'))
+  const lim = num(params.get('limit'))
+  return {
+    offset: off !== null && off > 0 ? off : 0,
+    limit: lim !== null && lim > 0 ? Math.min(PAGE_MAX, lim) : PAGE_DEFAULT,
+  }
+}
+
+/** The plan and backlog routes' one rule: a page of a scanned record's items,
+ *  the record's other fields whole, the total, and the stamp of the project
+ *  that owns the worktree. `find` matches both parameters against the scan
+ *  and builds no path. A worktree the scan does not hold is refused before a
+ *  file is looked for, so the caller learns which of the two it got wrong, and
+ *  both are a 400: the caller asked wrongly, which a relay with no such route
+ *  -- a 404 -- must never be mistaken for. */
+const itemsPage = (res, url, find, field) => {
+  const wt = url.searchParams.get('wt')
+  const owner = wt ? projects.find((p) => (p?.worktrees ?? []).some((w) => w.path === wt)) : null
+  if (!owner) return json(res, 400, { error: 'unknown worktree' })
+  const record = find(projects, wt, url.searchParams.get('path'))
+  if (!record) return json(res, 400, { error: 'unknown file' })
+  const { offset, limit } = pageOf(url.searchParams)
+  const items = Array.isArray(record.items) ? record.items : []
+  return json(res, 200, {
+    [field]: { ...record, items: items.slice(offset, offset + limit) },
+    offset, limit, total: items.length,
+    changedAt: projectsStamp?.changedAt.get(owner.key) ?? null,
+  })
+}
+
 const redirect = (res, location) => { res.writeHead(302, { location }); res.end() }
 
 // Reads login.html fresh each call rather than caching it -- this route is
@@ -911,6 +1889,10 @@ const authed = (req, url, body) =>
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`)
   const path = url.pathname
+
+  // A write can change what the snapshot says inside the millisecond its memo
+  // is keyed on, so the memo goes once any write has answered.
+  if (req.method !== 'GET' && req.method !== 'HEAD') res.on('finish', () => { frameMemo = null })
 
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end() }
 
@@ -964,7 +1946,7 @@ const server = http.createServer(async (req, res) => {
       connection: 'keep-alive',
     })
     res.write(`retry: 1000\n\n`)
-    res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot())}\n\n`)
+    res.write(`event: snapshot\ndata: ${snapshotFrame().json}\n\n`)
     panes.add(res)
     broadcast('viewers', { viewers: panes.size })
     const beat = setInterval(() => { try { res.write(': beat\n\n') } catch {} }, 15_000)
@@ -983,8 +1965,30 @@ const server = http.createServer(async (req, res) => {
   // `boundPort`, not PORT: with SZG_PORT=0 they differ, and a health check that
   // reports the port it was ASKED for rather than the one it is answering on is
   // worse than no port at all.
-  if (reading && path === '/api/health') return json(res, 200, { ok: true, port: boundPort, sessions: sessions.size })
-  if (reading && path === '/api/state') return json(res, 200, snapshot())
+  if (reading && path === '/api/health') {
+    // /api/health is the one route auth.mjs's gate() allows unconditionally,
+    // so this diagnostic works on a password-protected pane from a terminal
+    // with no cookie. That is why the stamp lives here and not on /api/state.
+    // `snapshot` is the frame last sent -- its size, the budget, what was shed
+    // and what each key cost -- built first when nothing has been sent yet.
+    // `droppedPanes` counts panes dropped for not draining, never a close.
+    if (!lastFrame) snapshotFrame()
+    return json(res, 200, {
+      ok: true, port: boundPort, sessions: sessions.size,
+      payloadVersion: PAYLOAD_VERSION,
+      build: { sha: BUILD_SHA, startedAt: STARTED_AT },
+      snapshot: {
+        bytes: lastFrame.bytes, budgetBytes: SNAPSHOT_BUDGET,
+        overBudget: lastFrame.bytes > SNAPSHOT_BUDGET,
+        shed: lastFrame.shed, sections: lastFrame.sections, droppedPanes,
+      },
+    })
+  }
+  if (reading && path === '/api/state') {
+    const frame = snapshotFrame()
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+    return res.end(frame.json)
+  }
   if (reading && path === '/api/replay') return json(res, 200, { events: replay })
   // The orchestrator agent's memory (capture.mjs). GET/HEAD-only, below the
   // auth gate, beside the other read-only branches -- a method-agnostic
@@ -1003,6 +2007,85 @@ const server = http.createServer(async (req, res) => {
   if (reading && path === '/api/findings') {
     return json(res, 200, { findings: findings.read({ limit: Number(url.searchParams.get('limit')) }) })
   }
+  // The proposals store. Same read-only, below-the-gate placement and the
+  // same reasoning as /api/findings just above -- a method-agnostic
+  // `path ===` check here would intercept the POSTs further down that WRITE
+  // the queue, and answer them 200 without ever reaching authed().
+  if (reading && path === '/api/skills') {
+    const n = Number(url.searchParams.get('limit'))
+    const limit = Number.isFinite(n) && n > 0 ? Math.min(PROPOSALS_MAX, Math.floor(n)) : PROPOSALS_MAX
+    return json(res, 200, { proposals: skills.read({ limit }) })
+  }
+  // The spend ledger's call list. Same read-only, below-the-gate placement
+  // and the same reasoning as /api/findings: a method-agnostic check here
+  // would intercept the POST further down that records a call.
+  if (reading && path === '/api/spend') {
+    const num = (k) => { const v = url.searchParams.get(k); return v === null || v === '' ? NaN : Number(v) }
+    return json(res, 200, spend.read({ kind: url.searchParams.get('kind') ?? '', since: num('since'), before: num('before'), limit: num('limit') }))
+  }
+  // The peer wire log. Same read-only, below-the-gate placement and the same
+  // reasoning as /api/spend: a method-agnostic check here would intercept the
+  // POST further down that flips a peer's redaction switch.
+  if (reading && path === '/api/peer-wire') {
+    const id = url.searchParams.get('id')
+    if (id !== null) {
+      const row = wireLog.get(Number(id))
+      return row ? json(res, 200, { row }) : json(res, 404, { error: 'no such exchange' })
+    }
+    const num = (k) => { const v = url.searchParams.get(k); return v === null || v === '' ? NaN : Number(v) }
+    const str = (k) => url.searchParams.get(k) ?? ''
+    return json(res, 200, wireLog.read({ before: num('before'), since: num('since'), kind: str('kind'), peer: str('peer'), q: str('q'), limit: num('limit') }))
+  }
+  // The pasteboard. Same read-only, BELOW-the-gate placement and the same
+  // reasoning as /api/findings just above: a method-agnostic `path ===` check
+  // here would intercept the POSTs further down that WRITE the board, and
+  // answer them 200 without ever reaching authed().
+  if (reading && path === '/api/pasteboard') {
+    return json(res, 200, { pasteboard: pasteboard.all() })
+  }
+  // The tmux pane listing, derived and never stored. Same read-only,
+  // BELOW-the-gate placement and the same reasoning as /api/pasteboard just
+  // above: a method-agnostic `path ===` check here would intercept a POST
+  // further down, and answer it without ever reaching authed().
+  if (reading && path === '/api/tmux') {
+    const t = now()
+    if (t - tmuxCache.at > TMUX_CACHE_MS) tmuxCache = { at: t, panes: withSessionIds(await readTmuxPanes()) }
+    return json(res, 200, { ok: true, at: tmuxCache.at, panes: tmuxCache.panes })
+  }
+  // The gallery's ledger. Same read-only, BELOW-the-gate placement and the
+  // same reasoning as /api/pasteboard just above: a method-agnostic
+  // `path ===` check here would intercept the POSTs further down that WRITE a
+  // mark, and answer them 200 without ever reaching authed().
+  if (reading && path === '/api/sandbox') {
+    return json(res, 200, { sandbox: sandbox.all() })
+  }
+  // The topic chains. Same read-only, BELOW-the-gate placement and the same
+  // reasoning as /api/pasteboard just above: a method-agnostic check here
+  // would intercept the POSTs further down that WRITE a chain, and answer them
+  // 200 without ever reaching authed(). The export is matched first, by its
+  // whole path: it does not start with the one-chain prefix, and keeping the
+  // two apart means a later reader never confuses them.
+  if (reading && path === '/api/chains/export') {
+    return json(res, 200, chains.exportAll({ since: Number(url.searchParams.get('since')) }))
+  }
+  // One chain in full. The id is one path segment: an id carrying a `/` is a
+  // 404 rather than a lookup, so this prefix can never shadow a sibling route
+  // added later.
+  if (reading && path.startsWith(CHAIN_PREFIX)) {
+    // A malformed escape is a 404, never a throw: this branch sits outside the
+    // POST ladder's try, and an unhandled rejection would take the relay down.
+    // The store read is guarded for the same reason.
+    let id = ''
+    try { id = decodeURIComponent(path.slice(CHAIN_PREFIX.length)) } catch { return json(res, 404, { error: 'unknown session' }) }
+    if (!chainIdOk(id)) return json(res, 404, { error: 'unknown session' })
+    let chain = null
+    try { chain = chains.get(id) } catch (e) {
+      process.stderr.write(`chain read failed for ${id}: ${e?.message || e}\n`)
+      return json(res, 500, { error: 'unreadable chain' })
+    }
+    if (!chain) return json(res, 404, { error: 'unknown session' })
+    return json(res, 200, { chain })
+  }
   // The orchestrator's blurb. Same read-only, below-the-gate placement as
   // /api/capture just above. "With no CLAUDE_BIN, every route here answers
   // 503" applies even to this GET: there is no binary to ever
@@ -1011,6 +2094,60 @@ const server = http.createServer(async (req, res) => {
   if (reading && path === '/api/orchestrator/blurb') {
     if (!CLAUDE_BIN) return json(res, 503, NO_CLAUDE)
     return json(res, 200, orchestrator.state())
+  }
+  // Every project's document: the digest's fields with every effort, plus the
+  // plan and backlog folds, the features, the specs and the lists the digest
+  // only counts. The snapshot carries the digest instead, so a view showing a
+  // project's contents asks for them, and asks again when that project's
+  // changedAt moves. GET/HEAD-only and below the auth gate, like its siblings;
+  // matched whole, ahead of every route beneath the same prefix.
+  if (reading && path === '/api/projects') return json(res, 200, { projects: projectsDocs })
+  // One page of a scanned plan's steps, or of a scanned task file's items,
+  // with their history and diff labels. The digest carries counts and the
+  // document carries the folds, so a view asks for the items of the one plan
+  // or task file it opens. GET/HEAD-only and below the auth gate, like its
+  // siblings. Both parameters must name what the scan already holds -- `wt` a
+  // scanned worktree's path, `path` one of that worktree's rels -- so nothing
+  // a browser sends is ever turned into a file to read.
+  if (reading && path === '/api/projects/plan') return itemsPage(res, url, planRecord, 'plan')
+  if (reading && path === '/api/projects/backlog') return itemsPage(res, url, backlogRecord, 'file')
+  // One project's git graph, from the full scan. Not paged: it is already
+  // bounded by commits per branch and by branches. A null graph is passed
+  // through -- the project is not a repository, or git could not be asked --
+  // because that is a different fact from a project this relay does not hold.
+  if (reading && path === '/api/projects/graph') {
+    const key = url.searchParams.get('key')
+    const project = key ? projects.find((p) => p?.key === key) : null
+    if (!project) return json(res, 404, { error: 'unknown project' })
+    return json(res, 200, { gitGraph: project.gitGraph ?? null, changedAt: projectsStamp?.changedAt.get(key) ?? null })
+  }
+  // One project's document, by key. After every named projects route, so a
+  // key can never shadow one. A key is a filesystem path, so it travels
+  // encoded as ONE segment: the literal-slash test runs on the raw path, where
+  // an encoded slash is still `%2F`, and only then is the key decoded. A
+  // malformed escape is a 404, never a throw: this branch sits outside the
+  // POST ladder's try, and an unhandled rejection would take the relay down.
+  if (reading && path.startsWith(PROJECT_PREFIX) && !path.slice(PROJECT_PREFIX.length).includes('/')) {
+    let key = ''
+    try { key = decodeURIComponent(path.slice(PROJECT_PREFIX.length)) } catch { return json(res, 404, { error: 'unknown project' }) }
+    const project = key ? projectsDocs.find((p) => p.key === key) : null
+    if (!project) return json(res, 404, { error: 'unknown project' })
+    return json(res, 200, { project })
+  }
+  // One thread in full. GET/HEAD-only and BELOW the auth gate, beside
+  // /api/capture -- a method-agnostic `path.startsWith` here would intercept
+  // the five POSTs further down that write, and answer them 200 without ever
+  // reaching authed(). The id is one path segment: an id carrying a `/` is a
+  // 404 rather than a lookup, so this prefix can never shadow a sibling route
+  // added later.
+  if (reading && path.startsWith(ORCH_THREAD_PREFIX)) {
+    // A malformed escape is a 404, never a throw: this branch sits outside the
+    // POST ladder's try, and an unhandled rejection would take the relay down.
+    let id = ''
+    try { id = decodeURIComponent(path.slice(ORCH_THREAD_PREFIX.length)) } catch { return json(res, 404, { error: 'unknown thread' }) }
+    const t = id && !id.includes('/') ? orchThreads.get(id) : null
+    if (!t) return json(res, 404, { error: 'unknown thread' })
+    return json(res, 200, { thread: publicThread(t) })
   }
   // Reads, unauthenticated -- consistent with the four just above on a relay
   // bound to 127.0.0.1 only. Guarded by method, not just path: a bare
@@ -1157,8 +2294,29 @@ const server = http.createServer(async (req, res) => {
     // handler and take the whole relay process down -- every session's
     // dashboard with it. No future handler bug should be able to do that.
     try {
+      // Every peering control route, sub-routed inside peer-link.mjs, so this is one
+      // block rather than a branch per route. authed() has already passed above.
+      if (path.startsWith('/api/peer/')) {
+        const out = await peerLink.local(path.slice('/api/peer/'.length), body)
+        return json(res, out.status, out.json)
+      }
+      // The per-peer redaction switch. Only the local pane can reach this: the
+      // peer listener has no route to it. Not under /api/peer/, whose every
+      // POST the block above hands to the peering engine.
+      if (path === '/api/peer-wire/redact') {
+        const fp = typeof body.fingerprint === 'string' ? body.fingerprint : ''
+        if (typeof body.redact !== 'boolean' || !/^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){31}$/.test(fp)) {
+          return json(res, 400, { error: 'a fingerprint and redact (true or false) are required' })
+        }
+        const redactOff = wireSettings.set(fp, body.redact)
+        broadcast('peerwire', { digest: wireLog.digest(), redactOff })
+        return json(res, 200, { ok: true, redactOff })
+      }
       if (path === '/api/register') {
-        const s = body.session ?? {}
+        // `forPeer` is never taken from a registering session: a tag comes only
+        // from an apply the relay resolved. Dropped before the merge, so a tag
+        // the record already carries survives a re-registration.
+        const { forPeer: _forPeer, ...s } = body.session ?? {}
         if (!s.id) return json(res, 400, { error: 'session.id required' })
         const prior = sessions.get(s.id)
         sessions.set(s.id, {
@@ -1217,6 +2375,49 @@ const server = http.createServer(async (req, res) => {
           const inh = inheritPosition(world.canvas.nodes, { id: s.id, name: s.name }, live())
           if (inh.from) { world.canvas.nodes = inh.nodes; canvasChanged() }
         }
+        // A restarted terminal continues its own topic chain. The refusal rules
+        // are the claim inheritance's: never from a session that is still live,
+        // and never when two stale chains share a name, because every unnamed
+        // session in a worktree wears the same one. The store adds its own:
+        // never over a chain this id already has, and never under a default
+        // name. A failure here is logged and never fails the register, which has
+        // already stored the session above. The save raises the `chain` event.
+        if (chainIdOk(s.id)) {
+          try {
+            const inh = chains.inherit(
+              { sessionId: s.id, ...chainMetaOf(sessions.get(s.id)) },
+              new Set([...sessions.keys()].filter((id) => id !== s.id)),
+            )
+            if (inh.from) process.stdout.write(`chain: ${s.id} continues the chain of ${inh.from}\n`)
+          } catch (e) {
+            process.stderr.write(`chain inheritance failed for ${s.id}: ${e?.message || e}\n`)
+          }
+        }
+        // A session the canvas spawned with a link parked on its ledger row
+        // claims it here -- the child's id is not knowable anywhere else. The
+        // match rules are resolvePendingLink's: the listing's sessionId when
+        // it has one, otherwise the name under inheritPosition's two refusals.
+        // The promise is attempted ONCE, kept or not: pendingLink is deleted
+        // either way, so a source that has since expired cannot make every
+        // later registration retry it.
+        {
+          // The STORED startedAt, which is the first one this relay heard for
+          // this id -- a re-registration cannot make a session look younger.
+          const claim = resolvePendingLink(world.canvas.spawnedBy,
+            { id: s.id, name: s.name, startedAt: sessions.get(s.id)?.startedAt }, live(), now())
+          if (claim.reason === 'ambiguous') {
+            process.stderr.write(`canvas: a parked link matches more than one candidate for "${s.name}"; linking nothing\n`)
+          } else if (claim.record) {
+            const parked = claim.record.pendingLink
+            delete claim.record.pendingLink
+            worldDirty = true
+            if (claim.reason !== 'expired') {
+              const out = openChannel({ fromId: parked.from, toId: s.id, kind: 'brief', note: parked.note })
+              if (!out.ok) process.stderr.write(`canvas: could not open the link parked from ${parked.from}: ${out.error}\n`)
+            }
+            canvasChanged()
+          }
+        }
         // A restarted terminal keeps its own card colour by NAME too
         // (cards.mjs), same refusal rule as the position inheritance just
         // above: never when this name is currently worn by more than one
@@ -1241,7 +2442,7 @@ const server = http.createServer(async (req, res) => {
           const rec = pushRecent(world.canvas.recents, validateCwd(s.root).cwd ?? s.root)
           if (rec.changed) { world.canvas.recents = rec.recents; canvasChanged() }
         }
-        broadcast('sessions', live())
+        broadcastSessions()
         return json(res, 200, { ok: true, token: undefined })
       }
 
@@ -1274,6 +2475,11 @@ const server = http.createServer(async (req, res) => {
           // sends an empty string and the board groups it under 'no tmux
           // session', which is a case, not a failure.
           tmux: body.tmux ?? s.tmux,
+          // The path to this session's own transcript, as the band found it.
+          // Sticky, and on the heartbeat rather than only in the register body:
+          // the band registers before it has looked for the file, and a later
+          // empty value must never erase a path already known.
+          transcript: (typeof body.transcript === 'string' && body.transcript) || s.transcript || '',
           spin: body.spin ?? s.spin,
           name: body.name ?? s.name,
           branch: body.branch ?? s.branch,
@@ -1313,7 +2519,7 @@ const server = http.createServer(async (req, res) => {
           s.series = [...(s.series ?? []), body.point].slice(-SERIES_CAP)
         }
         pushEvents(body.events, body.id)
-        broadcast('sessions', live())
+        broadcastSessions()
         return json(res, 200, { ok: true })
       }
 
@@ -1348,10 +2554,146 @@ const server = http.createServer(async (req, res) => {
       }
 
       // ---- from the pane ----------------------------------------------------
-      if (path === '/api/command') {       // steering: pane → a session
-        if (!sessions.has(body.targetId)) return json(res, 404, { error: 'unknown session' })
-        enqueue(body.targetId, { verb: body.verb, payload: body.payload ?? {} })
+      // Steering: pane -> one session, a chosen subset, or every session.
+      // resolveTargets (fleet.mjs) owns which, and refuses the whole request
+      // rather than fanning out partially -- see its header. enqueue() is a
+      // push onto an in-memory Map and cannot fail, so once validation passes
+      // there is no partial state and nothing to report per target.
+      if (path === '/api/command') {
+        // live(), not sessions.keys(): the Map still holds sessions whose TTL
+        // has lapsed until live() prunes them, and its insertion order is not
+        // the board's. `all` over expired ids would queue commands nobody will
+        // ever drain and report them as queued.
+        const t = resolveTargets({ body, ids: live().map((s) => s.id) })
+        if (!t.ok) return json(res, t.status, { error: t.error })
+        const forPeer = forPeerOf(body, path)
+        const queued = t.ids.map((id) => {
+          enqueue(id, { verb: body.verb, payload: body.payload ?? {} })
+          // A prompt a peer's ask sent tags the session it lands on, unless
+          // that session already works for someone: the origin wins.
+          const rec = sessions.get(id)
+          if (body.verb === 'prompt' && forPeer && rec && !rec.forPeer) rec.forPeer = forPeer
+          return { id, name: rec?.name ?? '' }
+        })
+        // ONE entry for the fan-out, not one per target: the orchestrator
+        // mines this log, and eight identical lines would read as eight
+        // decisions. Captured for a single target too -- /api/request/create's
+        // comment states the invariant that every applied action is captured,
+        // and the orchestrator's `prompt` action applies through THIS route.
+        try {
+          const names = queued.map((q) => q.name || q.id.slice(0, 8))
+          capture.append('command', '', {
+            verb: String(body.verb ?? ''),
+            label: String(body.label ?? '').slice(0, 60),
+            scope: t.scope, n: queued.length,
+            targets: names.length > 12 ? [...names.slice(0, 12), `+${names.length - 12} more`] : names,
+            ...(forPeer ? { forPeer } : {}),
+          })
+        } catch {}
+        return json(res, 200, { ok: true, scope: t.scope, n: queued.length, queued })
+      }
+
+      // ---- the pasteboard ----------------------------------------------------
+      // Inside the ladder, below the gate. A route added ABOVE it re-opens the
+      // hole where a POST reached a read-only branch that never checked the
+      // caller, so an unauthenticated request was answered.
+      const pushPasteboard = () => broadcast('pasteboard', { pasteboard: pasteboard.all() })
+
+      if (path === '/api/pasteboard/create') {
+        const r = pasteboard.add({
+          sessionId: typeof body.sessionId === 'string' ? body.sessionId : null,
+          sessionName: String(body.sessionName ?? ''),
+          text: String(body.text ?? ''),
+          title: typeof body.title === 'string' ? body.title : undefined,
+          scope: body.scope === 'global' ? 'global' : 'session',
+        })
+        // The error is named, not generic: hud.tsx turns it into the sentence
+        // the user reads where their prompt would have gone, and "the board is
+        // full" and "that text is too long" want different next actions.
+        if (!r.ok) return json(res, 400, { error: r.error })
+        pushPasteboard()
+        return json(res, 200, { ok: true, entry: r.entry, index: r.index, count: r.count })
+      }
+
+      if (path === '/api/pasteboard/delete') {
+        if (!pasteboard.remove(String(body.id ?? ''))) return json(res, 404, { error: 'unknown entry' })
+        pushPasteboard()
         return json(res, 200, { ok: true })
+      }
+
+      if (path === '/api/pasteboard/reorder') {
+        const okRe = Array.isArray(body.ids)
+          ? pasteboard.reorder(body.ids.map(String))
+          : (body.dir === 'up' || body.dir === 'down')
+            ? pasteboard.move(String(body.id ?? ''), body.dir)
+            : null
+        if (okRe === null) return json(res, 400, { error: 'ids, or id and dir, required' })
+        if (!okRe) return json(res, 404, { error: 'unknown entry' })
+        pushPasteboard()
+        return json(res, 200, { ok: true })
+      }
+
+      // Reload an entry into a session's composer. The caller sends an ID, not
+      // the text: the text then lives in exactly one place, a stale client
+      // cannot enqueue arbitrary text under the pasteboard's name, and a large
+      // entry never makes a round trip it does not need.
+      if (path === '/api/pasteboard/fill') {
+        const entry = pasteboard.get(String(body.id ?? ''))
+        if (!entry) return json(res, 404, { error: 'unknown entry' })
+        if (!sessions.has(body.targetId)) return json(res, 404, { error: 'unknown session' })
+        enqueue(body.targetId, { verb: 'fill', payload: { text: entry.text } })
+        return json(res, 200, { ok: true })
+      }
+
+      // ---- the topic chains ----------------------------------------------------
+      // Inside the ladder, below the gate, for the pasteboard's reason: a route
+      // added ABOVE the gate re-opens the hole where a POST reached a read-only
+      // branch that never checked the caller, so an unauthenticated request was
+      // answered. Every write raises the `chain` event from inside the store.
+      if (path === '/api/chain/turn') {
+        const id = typeof body.sessionId === 'string' ? body.sessionId : ''
+        const rec = chainIdOk(id) ? sessions.get(id) : null
+        if (!rec) return json(res, 404, { error: 'unknown session' })
+        const t = body.turn
+        if (!t || typeof t !== 'object' || Array.isArray(t) || typeof t.id !== 'string' || !t.id) {
+          return json(res, 400, { error: 'turn.id required' })
+        }
+        const r = chains.turn(id, { ...t, at: Number.isFinite(t.at) ? t.at : undefined }, chainMetaOf(rec))
+        if (!r.ok) return json(res, 400, { error: r.error })
+        return json(res, 200, r)
+      }
+      if (path.startsWith(CHAIN_PREFIX)) {
+        // `/api/chain/turn` above is ONE segment; everything here is two, so a
+        // session whose id is literally "turn" cannot collide with it.
+        const parts = path.slice(CHAIN_PREFIX.length).split('/')
+        if (parts.length !== 2) return json(res, 404, { error: 'no such endpoint' })
+        let id = ''
+        try { id = decodeURIComponent(parts[0]) } catch { return json(res, 404, { error: 'unknown session' }) }
+        // Checked AFTER decoding: `%2F` is a real slash by now.
+        if (!chainIdOk(id)) return json(res, 404, { error: 'unknown session' })
+        const verb = parts[1]
+        if (verb === 'refine' || verb === 'rebuild') {
+          // The two that need a binary. With none, 503 says this cannot work
+          // on this relay at all, which a 400 would misreport as a fault in
+          // the chain. A rebuild spawns nothing itself, but the pass that
+          // follows it does.
+          if (!CLAUDE_BIN) return json(res, 503, NO_CLAUDE)
+          if (verb === 'refine' && chains.busy(id)) return json(res, 409, { error: 'already refining' })
+          const r = await (verb === 'refine' ? chains.refine(id, { force: true }) : chains.rebuild(id))
+          return json(res, r.ok ? 200 : 400, r.ok ? r : { error: r.error, ...(r.reason ? { reason: r.reason } : {}) })
+        }
+        // pin, merge, split and retitle need no binary: a chain can still be
+        // reorganised by hand on a relay with no usable `claude`, which is the
+        // point of the heuristic layer.
+        const edit =
+          verb === 'pin' ? () => chains.pin(id, body.blockId, !!body.pinned)
+          : verb === 'merge' ? () => chains.merge(id, body.blockId, body.into === 'next' ? 'next' : 'prev')
+          : verb === 'split' ? () => chains.split(id, body.blockId, body.atTurnId)
+          : verb === 'retitle' ? () => chains.retitle(id, body.blockId, String(body.title ?? ''))
+          : null
+        if (!edit) return json(res, 404, { error: 'no such endpoint' })
+        const r = edit()
+        return json(res, r.ok ? 200 : 400, r.ok ? r : { error: r.error })
       }
 
       // Rename a session for real -- the plugin runs Claude Code's own
@@ -1412,7 +2754,7 @@ const server = http.createServer(async (req, res) => {
           // worked; if the process survives, its next heartbeat re-registers
           // it, which is the honest correction rather than a lie either way.
           sessions.delete(body.id)
-          broadcast('sessions', live())
+          broadcastSessions()
         }
         return json(res, out.status, out.body)
       }
@@ -1429,9 +2771,20 @@ const server = http.createServer(async (req, res) => {
         if (!r.ok) return json(res, 400, { error: r.error })
         s.color = r.color
         cards.set(s.name, s.id, r.color)
+        if (cards.all()[s.name]?.favourite) broadcast('favourites', { favourites: favouritePayload() })
         try { capture.append('color', body.id, { name: s.name ?? '', color: r.color }) } catch {}
-        broadcast('sessions', live())
+        broadcastSessions()
         return json(res, 200, { ok: true, color: r.color })
+      }
+
+      if (path === '/api/session/favourite') {
+        const s = sessions.get(body.id)
+        if (!s) return json(res, 404, { error: 'unknown session' })
+        const r = cards.setFavourite(s.name, s.id, body.favourite)
+        if (!r.ok) return json(res, 400, { error: r.error })
+        try { capture.append('favourite', body.id, { name: s.name ?? '', favourite: r.favourite }) } catch {}
+        broadcast('favourites', { favourites: favouritePayload() })
+        return json(res, 200, { ok: true, favourite: r.favourite })
       }
 
       if (path === '/api/rename') {
@@ -1447,18 +2800,13 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (path === '/api/link') {          // drag A → B: A SendMessages B
-        const from = sessions.get(body.from)
-        const to = sessions.get(body.to)
-        if (!from || !to) return json(res, 404, { error: 'unknown session' })
-        const link = { id: uid(), t: now(), from: body.from, to: body.to, kind: body.kind ?? 'brief' }
-        links = [...links.filter((l) => !(l.from === link.from && l.to === link.to)), link]
-        enqueue(body.from, {
-          verb: 'send-message',
-          payload: { toName: to.agentName || to.name || to.id, toId: to.id, kind: link.kind, note: body.note ?? '' },
-        })
-        try { capture.append('link', body.from, { to: body.to, linkKind: link.kind }) } catch {}
-        broadcast('links', links)
-        return json(res, 200, { ok: true, link })
+        // `body.note ?? ''`, exactly as before, which can never be null: this
+        // route's contract is unchanged to the byte -- a link made here always
+        // briefs. Wire-only is /api/spawn's `link.note: null`, and nothing
+        // else reaches it (no String(), which would change a non-string).
+        const out = openChannel({ fromId: body.from, toId: body.to, kind: body.kind ?? 'brief', note: body.note ?? '' })
+        if (!out.ok) return json(res, 404, { error: out.error })
+        return json(res, 200, { ok: true, link: out.link })
       }
 
       if (path === '/api/unlink') {
@@ -1535,20 +2883,132 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, await completeDirs(body?.path))
       }
 
+      // ---- session presets ------------------------------------------------
+      // Every write answers the store's own refusal as a 400, broadcasts the
+      // list on its own event, and -- only when the personas setting is on and
+      // the persona set changed -- regenerates the personas plugin first, so
+      // the answer already carries the plugin's new state.
+      if (path === '/api/templates/create') {
+        // `token` is how the plugin authenticates, in the body. The store keeps
+        // unknown fields on purpose, so it is taken out before it could be
+        // written into a hand-editable file.
+        const { token: _token, ...fields } = body ?? {}
+        const before = personaSignature(templates.all())
+        const out = templates.create(fields)
+        if (!out.ok) return json(res, 400, { error: out.error })
+        await personasAfterWrite(before)
+        templatesChanged()
+        return json(res, 200, { ok: true, template: out.template, personas: personaState })
+      }
+      if (path === '/api/templates/update') {
+        const before = personaSignature(templates.all())
+        const out = templates.update(String(body.id ?? ''), body.patch)
+        if (!out.ok) return json(res, 400, { error: out.error })
+        await personasAfterWrite(before)
+        templatesChanged()
+        return json(res, 200, { ok: true, template: out.template, personas: personaState })
+      }
+      if (path === '/api/templates/delete') {
+        const before = personaSignature(templates.all())
+        if (!templates.remove(String(body.id ?? ''))) return json(res, 404, { error: 'no such template' })
+        await personasAfterWrite(before)
+        templatesChanged()
+        return json(res, 200, { ok: true, personas: personaState })
+      }
+      if (path === '/api/templates/reorder') {
+        // Order is not part of a persona, so a reorder never touches the plugin.
+        if (!templates.reorder(body.ids)) return json(res, 400, { error: 'ids must name every template exactly once' })
+        templatesChanged()
+        return json(res, 200, { ok: true, items: templates.all() })
+      }
+      // `enabled` present switches the setting and brings the plugin in line
+      // with it: on writes and validates it, off removes the directory (only
+      // if it is this plugin's). Absent is the manual retry: regenerate when
+      // the setting is on, otherwise only re-read the setting.
+      if (path === '/api/templates/personas') {
+        const has = !!body && Object.prototype.hasOwnProperty.call(body, 'enabled')
+        if (has && typeof body.enabled !== 'boolean') return json(res, 400, { error: 'enabled must be a boolean' })
+        if (has) {
+          const w = writeHudPersonas(body.enabled)
+          if (!w.ok) return json(res, 409, { error: w.error })
+          await syncPersonas(body.enabled ? templates.all() : [])
+        } else if (personasEnabled()) {
+          await syncPersonas(templates.all())
+        } else {
+          personaState = { ...personaState, enabled: false, count: countPersonas(AGENT_PLUGIN_DIR) }
+        }
+        templatesChanged()
+        return json(res, 200, { ok: true, count: personaState.count, error: personaState.error, personas: personaState })
+      }
+
       // A real `claude --bg -n <name> --permission-mode auto`
       // session in a CHOSEN directory. Not dispatch: no worktree, no branch,
       // no git. Everything that decides is in canvas.mjs and tested there;
       // this is the only place a real `claude` is ever run for the canvas.
       if (path === '/api/spawn') {
         if (!CLAUDE_BIN) return json(res, 503, NO_CLAUDE)
+        // A well-formed templateId must name a stored preset; a malformed one
+        // is left to spawnRequest, whose refusal says what is wrong with it.
+        let preset = { agent: null, allowedTools: null, skipped: null }
+        if (typeof body.templateId === 'string' && SLUG_RE.test(body.templateId)) {
+          const tpl = templates.get(body.templateId)
+          if (!tpl) return json(res, 400, { error: 'unknown template' })
+          preset = templateArgv(tpl, { roster: DISPATCH_OPTIONS?.agents ?? [], personas: personasEnabled() })
+        }
+        const forPeer = forPeerOf(body, path)
         const out = await spawnSession({
           canvas: world.canvas, body, run: realRun, now, claudeBin: CLAUDE_BIN,
           // The port BOUND, never PORT: with SZG_PORT=0 they differ, and the
           // child would be told to register somewhere nothing is listening.
           relayPort: boundPort, relayToken: TOKEN, pluginDir: SPAWN_PLUGIN_DIR,
+          // A link may only name a session THIS relay has registered: the
+          // send-message it will queue is addressed through this map.
+          hasSession: (id) => sessions.has(id),
+          agent: preset.agent, allowedTools: preset.allowedTools,
+          // An option, never a body field: resolved above from the ask log.
+          forPeer,
         })
         if (out.changed) canvasChanged()
         if (out.status === 200) { try { capture.append('spawn', '', { name: out.body.name, cwd: out.body.cwd }) } catch {} }
+        // The CLI's own answer to an unknown --agent is a warning nothing reads,
+        // so a persona the roster lacks is reported here instead, for the pane.
+        if (out.status === 200 && preset.skipped) {
+          out.body.warning = 'persona ' + preset.skipped + ' is not in this CLI\'s agent roster yet — started without it'
+        }
+        return json(res, out.status, out.body)
+      }
+
+      // The architecture sweep: one fresh session, its own worktree, the
+      // findings store as its brief. 503 with no capable binary, exactly as
+      // /api/spawn answers. Gated on the board being quiet -- see
+      // fleet.mjs's sweepGate -- and the gate's reason is the 409 body, so a
+      // refused sweep always says why.
+      if (path === '/api/sweep') {
+        if (!CLAUDE_BIN) return json(res, 503, NO_CLAUDE)
+        const vp = validateProject(body.project)
+        if (!vp.ok || !vp.project) return json(res, 400, { error: vp.error || 'project is required' })
+        // Resolved to the project's MAIN root: `git worktree add` runs there,
+        // and a path resolving to no known project is refused rather than
+        // guessed at (dispatch-badges.js's rule).
+        const proj = projects.find((p) => p.mainRoot === vp.project || p.worktrees?.some((w) => w.path === vp.project))
+        if (!proj) return json(res, 400, { error: `not a project this relay knows: ${vp.project}` })
+        const override = body.override === true
+        const since = lastSweepAt()
+        const gate = sweepGate({
+          sessions: live(), requests: requests.all(), spawnedBy: world.canvas.spawnedBy,
+          now: now(), quietMs: SWEEP_QUIET, override,
+        })
+        const out = await runSweep({
+          project: proj.mainRoot, findings: findings.all(), since, override, gate,
+          run: realRun, now, exists: existsSync, date: new Date(now()).toISOString().slice(0, 10),
+          writeFile: (p, text) => writeFileSync(p, text), mkdir: (p) => mkdirSync(p, { recursive: true }),
+          // The port BOUND, never PORT, for the reason /api/spawn gives.
+          claudeBin: CLAUDE_BIN, relayPort: boundPort, relayToken: TOKEN, pluginDir: SPAWN_PLUGIN_DIR,
+          model: body.model ?? undefined, effort: body.effort ?? undefined,
+        })
+        if (out.status === 200) {
+          try { capture.append('sweep', '', { ...out.body, project: proj.mainRoot }) } catch {}
+        }
         return json(res, out.status, out.body)
       }
 
@@ -1562,18 +3022,44 @@ const server = http.createServer(async (req, res) => {
 
       // ---- the dispatch queue ------------------------------------------------
       const pushDispatch = () => broadcast('dispatch', { requests: requests.all() })
+      const pushFanout = () => broadcast('fanout', { runs: fanoutStore.all() })
+      const saveFanout = () => {
+        try { fanoutStore.flush() } catch (e) { process.stderr.write(`fanout save failed: ${e.message}\n`) }
+      }
 
       if (path === '/api/request/create') {
-        if (!body.title) return json(res, 400, { error: 'title required' })
+        // A title may be left blank when there is an ask to derive one from;
+        // the derived title is marked automatic so a later refine may replace
+        // it, and a typed one never is.
+        const typedTitle = String(body.title ?? '').trim()
+        const ask = String(body.ask ?? '')
+        if (!typedTitle && !ask.trim()) return json(res, 400, { error: 'a title or an ask is required' })
+        const title = typedTitle || proposeTitle(ask)
+        const titleSource = typedTitle ? 'manual' : 'auto'
         // A project becomes a spawn's cwd and a `tmux new-window -c`. Refused
         // HERE, at creation, with the value named -- not left to fail later as
         // a `spawn ... ENOENT` that reads like a missing binary.
         const vp = validateProject(body.project)
         if (!vp.ok) return json(res, 400, { error: vp.error })
+        // Refused here rather than dropped by the store's merge: a request that
+        // silently lost its preset would dispatch as a plain session.
+        const hasTemplate = body.templateId != null && body.templateId !== ''
+        if (hasTemplate && (typeof body.templateId !== 'string' || !SLUG_RE.test(body.templateId))) {
+          return json(res, 400, { error: 'templateId must be a slug' })
+        }
+        if (hasTemplate && !templates.get(body.templateId)) return json(res, 400, { error: 'unknown template' })
+        // `body.fanout` is never passed: a fan-out group is minted by
+        // /api/fanout/accept from a real run, and a browser must not be able
+        // to forge one onto a hand-made request. `forPeer` is the same: the
+        // relay resolves it from the ask log, never from the body.
+        const forPeer = forPeerOf(body, path)
         const r = requests.create({
-          title: String(body.title), project: vp.project,
-          ask: String(body.ask ?? ''), brief: body.brief ?? null,
+          title, titleSource, project: vp.project,
+          ask, brief: body.brief ?? null,
+          relatesTo: body.relatesTo,
           model: body.model, effort: body.effort,
+          templateId: hasTemplate ? body.templateId : undefined,
+          forPeer,
         })
         // Captured because this is now an ACTION apply path (`dispatch`
         // kind), and the invariant is that every applied action is captured.
@@ -1581,7 +3067,14 @@ const server = http.createServer(async (req, res) => {
         // identically -- the log records what happened, not who asked.
         try { capture.append('request', '', { title: r.title, project: r.project }) } catch {}
         pushDispatch()
-        return json(res, 200, { ok: true, request: r })
+        json(res, 200, { ok: true, request: r })
+        // After the answer, never before: the refine is a model call that
+        // takes seconds, and creating a request must not wait on it.
+        if (r.titleSource === 'auto') {
+          void scoper.proposeAndRefine(r.id)
+            .catch((e) => process.stderr.write(`title refine failed: ${e?.stack || e}\n`))
+        }
+        return
       }
 
       if (path === '/api/request/update') {
@@ -1598,7 +3091,9 @@ const server = http.createServer(async (req, res) => {
         // `sessionName` get silently dropped from an already-dispatched request.
         const p = (body.patch && typeof body.patch === 'object') ? body.patch : {}
         const patch = {}
-        for (const k of ['title', 'ask', 'project', 'brief']) if (k in p) patch[k] = p[k]
+        // `relatesTo` is shape-checked by the store, which keeps the previous
+        // value when a patch's reference is malformed.
+        for (const k of ['title', 'ask', 'project', 'brief', 'relatesTo']) if (k in p) patch[k] = p[k]
         // Same gate as create's, and for the same reason: this is the route
         // that REPAIRS a bad project, so it must not be a way to write one.
         if ('project' in patch) {
@@ -1613,6 +3108,11 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (path === '/api/request/delete') {
+        // Before the removal: endScoping reads the live session synchronously,
+        // before its first await, so the stop still reaches a session whose
+        // request is about to disappear. It resolves quietly for an unknown id.
+        void scoper.endScoping(body.id, 'deleted')
+          .catch((e) => process.stderr.write(`scoping end failed: ${e?.stack || e}\n`))
         if (!requests.remove(body.id)) return json(res, 404, { error: 'unknown request' })
         pushDispatch()
         return json(res, 200, { ok: true })
@@ -1640,13 +3140,22 @@ const server = http.createServer(async (req, res) => {
         // artifacts.planPath to already be on the record, which only
         // dispatch.mjs's poll() (an in-process store.transition() call, not
         // this endpoint) ever sets.
+        let r
         try {
-          const r = requests.transition(body.id, String(body.to), {})
-          pushDispatch()
-          return json(res, 200, { ok: true, request: r })
+          r = requests.transition(body.id, String(body.to), {})
         } catch (e) {
           return json(res, 409, { error: e.message })
         }
+        pushDispatch()
+        // A request that is banked, cancelled or failed has no more use for
+        // its scoping conversation, and a live one would otherwise idle until
+        // the age ceiling. Not awaited: `claude stop` is not this answer.
+        const to = String(body.to)
+        if (to === 'queued' || to === 'cancelled' || to === 'failed') {
+          void scoper.endScoping(r.id, to === 'queued' ? 'banked' : to)
+            .catch((e) => process.stderr.write(`scoping end failed: ${e?.stack || e}\n`))
+        }
+        return json(res, 200, { ok: true, request: r })
       }
 
       if (path === '/api/steering') {
@@ -1665,8 +3174,10 @@ const server = http.createServer(async (req, res) => {
       if (path === '/api/scope') {
         const r = requests.get(body.id)
         if (!r) return json(res, 404, { error: 'unknown request' })
-        if (!body.text) return json(res, 400, { error: 'text required' })
-        const out = await scoper.start(r.id, String(body.text), r.project || process.cwd())
+        // A blank turn is refused inside startScoping, which alone knows that a
+        // restart may be sent with no text.
+        const out = await scoper.startScoping(r.id, String(body.text ?? ''), r.project || process.cwd(),
+          { restart: body.restart === true })
         return json(res, out.ok ? 200 : (out.code ?? 400), out)
       }
 
@@ -1682,6 +3193,98 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { ok: scoper.kill(body.id) })
       }
 
+      // Ends a live scoping conversation by hand: `claude stop`, and the
+      // session is marked ended with the reason.
+      if (path === '/api/scope/end') {
+        const r = requests.get(body.id)
+        if (!r) return json(res, 404, { error: 'unknown request' })
+        await scoper.endScoping(r.id, 'ended by hand')
+        return json(res, 200, { ok: true })
+      }
+
+      // ---- fan-out -------------------------------------------------------------
+      // One rambling ask, split by one headless call into drafts a person then
+      // reshapes, accepts as ordinary requests, or discards. One run at a time.
+      if (path === '/api/fanout') {
+        const ask = String(body.ask ?? '')
+        if (!ask.trim()) return json(res, 400, { error: 'ask required' })
+        if (ask.length > FANOUT_ASK_MAX) {
+          return json(res, 400, { error: `ask is longer than ${FANOUT_ASK_MAX} characters` })
+        }
+        if (!CLAUDE_BIN) return json(res, 503, NO_CLAUDE)
+        const set = fanoutProjects(projects, { check: validateProject })
+        const out = fanoutStore.start({ ask, projects: set })
+        if (!out.ok) return json(res, 409, { error: out.error })
+        saveFanout()
+        pushFanout()
+        // Not awaited: the split takes as long as the model does, and the run's
+        // own state carries the result. fanout() resolves rather than rejects.
+        void scoper.fanout(out.run.id, out.run.ask, out.run.projects)
+          .then(() => { saveFanout(); pushFanout() })
+          .catch((e) => process.stderr.write(`fanout failed: ${e?.stack || e}\n`))
+        return json(res, 200, { ok: true, run: out.run })
+      }
+
+      if (path === '/api/fanout/assign') {
+        const run = fanoutStore.get(String(body.runId ?? ''))
+        if (!run) return json(res, 404, { error: 'unknown run' })
+        if (run.state !== 'ready') return json(res, 409, { error: `run is ${run.state}` })
+        const next = fanoutStore.assign(run.id, String(body.draftId), Number(body.index), String(body.mode))
+        if (!next) return json(res, 400, { error: 'bad assignment' })
+        saveFanout()
+        pushFanout()
+        return json(res, 200, { ok: true, run: next })
+      }
+
+      if (path === '/api/fanout/accept') {
+        const run = fanoutStore.get(String(body.runId ?? ''))
+        if (!run) return json(res, 404, { error: 'unknown run' })
+        if (run.state !== 'ready') return json(res, 409, { error: `run is ${run.state}` })
+        const ids = Array.isArray(body.draftIds) ? body.draftIds.map(String) : []
+        const known = new Set(run.drafts.map((d) => d.id))
+        if (!ids.length || !ids.every((id) => known.has(id))) {
+          return json(res, 400, { error: 'draftIds must name drafts on this run' })
+        }
+        // In run order, not click order: `n` is a draft's place in the split.
+        const wanted = new Set(ids)
+        const accepted = run.drafts.filter((d) => wanted.has(d.id))
+        const of = accepted.length
+        const made = accepted.map((draft, i) => {
+          const entry = run.projects.find((p) => p.key && p.key === draft.projectKey)
+          // A root that stopped being a directory since the split becomes no
+          // project rather than a request that fails later on its cwd.
+          const vp = entry ? validateProject(entry.root) : null
+          const project = vp?.ok ? vp.project : ''
+          const title = draft.title || proposeTitle(draft.ask)
+          const r = requests.create({
+            title, titleSource: 'auto', project, ask: draft.ask,
+            brief: { ...requests.emptyBrief(), goal: draft.goal ?? '', openQuestions: draft.openQuestions ?? [] },
+            fanout: { id: run.id, n: i + 1, of },
+          })
+          try { capture.append('request', '', { title: r.title, project: r.project }) } catch {}
+          return r
+        })
+        fanoutStore.finish(run.id, 'accepted')
+        try { requests.flush() } catch (e) { process.stderr.write(`dispatch save failed: ${e.message}\n`) }
+        saveFanout()
+        pushDispatch()
+        pushFanout()
+        return json(res, 200, { ok: true, requests: made })
+      }
+
+      if (path === '/api/fanout/discard') {
+        const run = fanoutStore.get(String(body.runId ?? ''))
+        if (!run) return json(res, 404, { error: 'unknown run' })
+        if (run.state !== 'running' && run.state !== 'ready') return json(res, 409, { error: `run is ${run.state}` })
+        // The child first, so a split that lands after the discard has nothing
+        // left to write into; fanout() also leaves a no-longer-running run alone.
+        if (run.state === 'running') scoper.kill('fanout:' + run.id)
+        fanoutStore.finish(run.id, 'discarded')
+        saveFanout()
+        pushFanout()
+        return json(res, 200, { ok: true, run })
+      }
+
       // ---- take-over ---------------------------------------------------------
       // Opens a real interactive session in a new tmux window. Reports success
       // only on a window tmux actually created; the pane always also shows the
@@ -1689,8 +3292,17 @@ const server = http.createServer(async (req, res) => {
       if (path === '/api/takeover') {
         const r = requests.get(body.id)
         if (!r) return json(res, 404, { error: 'unknown request' })
-        const sessionId = body.kind === 'session' ? r.session?.shortId : r.scoping?.sessionId
-        if (!sessionId) return json(res, 409, { error: 'nothing to take over yet' })
+        const isSession = body.kind === 'session'
+        // A scoping conversation is taken over one of two ways. A live `--bg`
+        // scoping session is ATTACHED: the terminal joins the very session the
+        // pane talks to, so turns from either side reach the same conversation.
+        // An older record that only carries a `sessionId` from a one-shot call
+        // has no live session to join, so it is resumed into a new process.
+        const scopeSession = !isSession && r.scoping?.session && typeof r.scoping.session === 'object'
+          && !r.scoping.session.endedAt && r.scoping.session.shortId ? r.scoping.session : null
+        const legacyId = !isSession && !scopeSession ? r.scoping?.sessionId : null
+        const target = isSession ? r.session?.shortId : (scopeSession?.shortId ?? legacyId)
+        if (!target) return json(res, 409, { error: 'nothing to take over yet' })
         // CLAUDE_BIN, not a bare `claude`. An older build that wins PATH in
         // some shells has no `attach` subcommand at all, so a bare name here
         // opened a window that died instantly and reported success.
@@ -1701,27 +3313,31 @@ const server = http.createServer(async (req, res) => {
         const vp = validateProject(r.project)
         if (!vp.ok) return json(res, 409, { error: vp.error })
         const cwd = vp.project || process.cwd()
-        const inner = body.kind === 'session'
-          ? [CLAUDE_BIN, 'attach', sessionId]
-          : [CLAUDE_BIN, '--resume', sessionId]
+        const inner = legacyId
+          ? [CLAUDE_BIN, '--resume', String(target)]
+          : [CLAUDE_BIN, 'attach', String(target)]
         const name = `szg-${r.slug}`.slice(0, 60)
         const out = await new Promise((resolve) => {
-          execFile('tmux', ['new-window', '-d', '-n', name, '-c', cwd, ...inner],
+          execFile(TMUX_BIN, ['new-window', '-d', '-n', name, '-c', cwd, ...inner],
             { timeout: 6000 }, (err, stdout, stderr) => resolve({ err, stderr: String(stderr || '') }))
         })
         if (out.err) {
           const why = out.stderr.trim().slice(0, 200) || 'tmux is not running'
           return json(res, 409, { error: `${why} — use the command shown instead`, command: inner.join(' ') })
         }
-        // Taking over a SCOPING conversation forks it: scoping runs as one-shot
-        // `claude -p` calls that exit after each turn, so this resumes the
-        // saved transcript into a NEW process and from then on terminal turns
-        // never reach the relay and pane turns never reach the terminal. That
-        // was silent. Record it so the panel can say so and stop offering
-        // turns that would go nowhere. The real fix -- scoping as a live `--bg`
-        // session -- is deliberately not built here.
-        if (body.kind !== 'session' && r.scoping) {
-          requests.update(r.id, { scoping: { ...r.scoping, continuedInTerminal: { at: now(), window: name } } })
+        const cur = requests.get(r.id)
+        if (scopeSession && cur?.scoping?.session) {
+          // Attaching forks nothing, so nothing is marked as continued
+          // elsewhere; the session only records when and where it was joined.
+          requests.update(r.id, {
+            scoping: { ...cur.scoping, session: { ...cur.scoping.session, attachedAt: now(), window: name } },
+          })
+          pushDispatch()
+        } else if (legacyId && cur?.scoping) {
+          // Resuming DOES fork: from here on terminal turns never reach the
+          // relay and pane turns never reach the terminal. Recorded so the
+          // panel can say so and stop offering turns that would go nowhere.
+          requests.update(r.id, { scoping: { ...cur.scoping, continuedInTerminal: { at: now(), window: name } } })
           pushDispatch()
         }
         return json(res, 200, { ok: true, window: name, cwd })
@@ -1757,15 +3373,13 @@ const server = http.createServer(async (req, res) => {
         // layer. Both spellings are accepted at this boundary and normalised
         // inward; neither caller has to know about the other's.
         const window = WINDOW_ALIASES[rawWindow] ?? rawWindow
-        // refused HERE, at creation, with a 400 that names the kind and
-        // the reason -- recognised, not unknown -- so nothing sits in the
-        // queue that could never fire. `claude --bg --resume` cannot be
-        // exercised without consuming a usage window -- the very thing this
-        // feature exists to protect -- and a mocked subprocess cannot verify a
-        // command line either way, so it is not supported in this release.
+        // Recognised, and still refused here: a resume entry's episode, reason
+        // and auto flag are facts the relay establishes, so one supplied by a
+        // caller would record a decision nobody made. The arm route creates
+        // them; `prompt` is the kind for a message you wrote yourself.
         if (kind === 'resume') {
           return json(res, 400, {
-            error: "kind 'resume' is not supported in this release; use 'prompt' or 'implement'",
+            error: "kind 'resume' is created by the relay when a usage limit resets; use 'prompt' to send your own text, or arm resume on the usage panel",
           })
         }
         // The store's create() also guards window/kind (defence in depth),
@@ -1774,15 +3388,48 @@ const server = http.createServer(async (req, res) => {
         if (!['fiveHour', 'sevenDay'].includes(window)) {
           return json(res, 400, { error: 'window must be five_hour or seven_day (fiveHour/sevenDay also accepted)' })
         }
-        if (!['prompt', 'implement'].includes(kind)) return json(res, 400, { error: 'kind must be prompt or implement' })
+        if (!['prompt', 'implement', 'plan', 'spawn'].includes(kind)) return json(res, 400, { error: 'kind must be prompt, implement, plan or spawn' })
+        // Written by the relay alone. Without this, a duplicate of a fired
+        // entry would carry its predecessor's spawn record and the panel
+        // would show a night run linked to a session it never started.
+        const clean = payload && typeof payload === 'object' && !Array.isArray(payload) ? { ...payload } : {}
+        delete clean.auto; delete clean.spawn; delete clean.skipped; delete clean.stoppedAt; delete clean.stopReason
+        delete clean.episode; delete clean.reason; delete clean.byHand
+        if (clean.budgetUsd !== undefined) {
+          const b = Number(clean.budgetUsd)
+          clean.budgetUsd = Number.isFinite(b) && b > 0 && b <= 500 ? b : afterReset.settings().night.budgetUsd
+        }
+        if (kind === 'plan') {
+          if (typeof target !== 'string' || !target.trim()) {
+            return json(res, 400, { error: "kind 'plan' needs target: the plan's path inside its project", field: 'target' })
+          }
+          if (typeof clean.mainRoot !== 'string' || !clean.mainRoot.trim()) {
+            return json(res, 400, { error: "kind 'plan' needs payload.mainRoot: the project's main checkout", field: 'payload.mainRoot' })
+          }
+        }
+        if (kind === 'spawn') {
+          // Resolved and checked NOW, not at three in the morning: a directory
+          // that has moved by then is a failure with a reason on the row, but
+          // a relative path typed into the form is a mistake worth refusing
+          // while the person is still looking at it.
+          const v = validateCwd(clean.cwd)
+          if (!v.ok) return json(res, 400, { error: v.error, field: 'payload.cwd' })
+          clean.cwd = v.cwd
+          if (typeof clean.prompt !== 'string' || !clean.prompt.trim()) {
+            return json(res, 400, { error: "kind 'spawn' needs payload.prompt", field: 'payload.prompt' })
+          }
+        }
         // Armed against the CURRENT reading's boundary for this window. A
         // reading that is stale or missing that window gets no armed
         // boundary at all -- the same "hand-edited" fallback dueEntries
         // documents for, reached honestly here instead of guessed at.
         const armedResetsAt = !currentUsage.stale ? (currentUsage[window]?.resetsAt ?? null) : null
-        const entry = afterReset.create({ window, kind, target, payload, armedResetsAt })
+        const entry = afterReset.create({ window, kind, target, payload: clean, armedResetsAt })
+        // "Fire now" is a second CALLER of the scheduler's own function,
+        // never a second code path.
+        if (body.now === true) await fireEntry(entry)
         broadcast('usage', usagePayload())
-        return json(res, 200, { ok: true, entry })
+        return json(res, 200, { ok: true, entry: afterReset.get(entry.id) })
       }
 
       // a POST, not a DELETE. In this file the authed check and the
@@ -1805,6 +3452,53 @@ const server = http.createServer(async (req, res) => {
         if (!found) return json(res, 404, { error: 'no such entry' })
         broadcast('usage', usagePayload())
         return json(res, 200, { ok: true })
+      }
+
+      // The night policy. Only the known fields are passed on: the body
+      // always carries `token` too, and setNight refuses a key it does not
+      // know. A rejected field names itself and nothing is persisted.
+      if (path === '/api/night') {
+        const { enabled, start, end, budgetUsd, maxHours } = body
+        const r = afterReset.setNight({ enabled, start, end, budgetUsd, maxHours })
+        if (!r.ok) return json(res, 400, { error: r.error, field: r.field })
+        broadcast('usage', usagePayload())
+        return json(res, 200, { ok: true, night: nightPayload() })
+      }
+
+      // The standing resume arm, and one immediate resume. Both are POSTs
+      // inside this block for the reason every other write here is: the authed
+      // check and the try/catch that turns a throw into a 500 both live here,
+      // and a route outside inherits neither.
+      if (path === '/api/resume') {
+        const { armed, windows, exclude, include, by } = body
+        const r = afterReset.setResume({ armed, windows, exclude, include, by })
+        if (!r.ok) return json(res, 400, { error: r.error, field: r.field })
+        broadcast('usage', usagePayload())
+        return json(res, 200, { ok: true, resume: resumePayload() })
+      }
+
+      // "Resume this one now": the entry is still created and still fired by
+      // fireEntry, so a hand-picked resume and a scheduled one are one code
+      // path and cannot drift.
+      if (path === '/api/resume/fire') {
+        const id = String(body.id ?? '')
+        if (!id) return json(res, 400, { error: 'id required' })
+        if (!sessions.has(id)) return json(res, 400, { error: 'that session is not registered with this relay' })
+        const r = afterReset.settings().resume
+        const episode = r.episode ?? (body.force === true
+          ? { window: 'fiveHour', resetsAt: currentUsage.fiveHour?.resetsAt ?? 0, spentAt: now(), pct: 0 }
+          : null)
+        if (!episode) return json(res, 400, { error: 'no limit episode is open' })
+        const already = afterReset.all().some(
+          (e) => e.kind === 'resume' && e.target === id && e.armedResetsAt === episode.resetsAt)
+        if (already) return json(res, 400, { error: 'that session has already been resumed for this reset' })
+        const entry = afterReset.create({
+          window: episode.window, kind: 'resume', target: id, armedResetsAt: episode.resetsAt,
+          payload: { byHand: true, reason: 'resumed by hand', sessionName: sessions.get(id)?.name ?? '', episode },
+        })
+        await fireEntry(entry)
+        broadcast('usage', usagePayload())
+        return json(res, 200, { ok: true, entry: afterReset.get(entry.id) })
       }
 
       // ---- voice input ------------------------------------------------------
@@ -1928,7 +3622,16 @@ const server = http.createServer(async (req, res) => {
         if (!CLAUDE_BIN) return json(res, 503, NO_CLAUDE)
         const text = typeof body.text === 'string' ? body.text.trim().slice(0, PROMPT_MAX) : ''
         if (!text) return json(res, 400, { error: 'text required' })
-        const out = await orchestrator.ask(text)
+        const threadId = typeof body.threadId === 'string' && body.threadId ? body.threadId : null
+        // Optional and shape-checked: it reaches a bundle builder, so a
+        // caller-supplied object is narrowed to the one field that is read.
+        const scope = body.scope && typeof body.scope.project === 'string'
+          ? { project: body.scope.project }
+          : null
+        const out = await orchestrator.ask(text, { threadId, scope })
+        // An ask moves the headers too: the auto-title, the turn count, and a
+        // thread created when none was current.
+        if (out.ok) threadsChanged()
         return json(res, out.ok ? 200 : (out.code ?? 400), out)
       }
 
@@ -1942,18 +3645,167 @@ const server = http.createServer(async (req, res) => {
         const rec = findings.add(body)
         if (!rec) return json(res, 400, { error: 'a finding needs a non-empty `surprise`' })
         try { capture.append('finding', rec.session, { project: rec.project, surprise: rec.surprise.slice(0, 200) }) } catch {}
-        broadcast('findings', { findings: findings.all() })
+        // The SAME bounded read snapshot() uses, so the event and the snapshot
+        // field can never drift into different shapes -- usagePayload()'s rule.
+        // The Findings panel is this event's first listener, which is why
+        // narrowing it costs no existing reader anything.
+        broadcast('findings', { findings: findings.read({ limit: FINDINGS_IN_SNAPSHOT }) })
         return json(res, 200, { ok: true, finding: rec })
+      }
+
+      // A call the band made through the plugin API, which reports no usage:
+      // the band sends estimated tokens and no cost. `t` is the ledger's to stamp.
+      // A body with no kind is refused rather than recorded: the store would
+      // file it as an empty `other` call, a phantom row in a figure read as
+      // honest. An unknown but non-empty kind still records, as `other`.
+      if (path === '/api/spend') {
+        const isRecord = body !== null && typeof body === 'object' && !Array.isArray(body) &&
+          typeof body.kind === 'string' && body.kind !== ''
+        if (!isRecord) return json(res, 400, { error: 'a spend record must be an object with a kind' })
+        const { token: _token, ...rest } = body
+        if (!spend.record(rest)) return json(res, 400, { error: 'a spend record must be an object with a kind' })
+        return json(res, 200, { ok: true })
       }
 
       if (path === '/api/findings/delete') {
         if (!findings.remove(String(body.id ?? ''))) return json(res, 404, { error: 'unknown finding' })
-        broadcast('findings', { findings: findings.all() })
+        // The SAME bounded read snapshot() uses, so the event and the snapshot
+        // field can never drift into different shapes -- usagePayload()'s rule.
+        // The Findings panel is this event's first listener, which is why
+        // narrowing it costs no existing reader anything.
+        broadcast('findings', { findings: findings.read({ limit: FINDINGS_IN_SNAPSHOT }) })
         return json(res, 200, { ok: true })
       }
 
+      // ---- sandbox ------------------------------------------------------
+      // `cycle` and `mark` are alternatives: the cycle's order lives in the
+      // store so two panes advancing at once cannot disagree about what
+      // comes next. A refused mark writes nothing at all -- an entry created
+      // and then rejected would leave a component in the ledger nobody judged.
+      if (path === '/api/sandbox/mark') {
+        const component = String(body.component ?? '')
+        if (!component) return json(res, 400, { error: 'component required' })
+        const out = sandbox.mark(component, { mark: body.mark, cycle: body.cycle === true })
+        if (!out.ok) return json(res, 400, { error: out.error })
+        broadcast('sandbox', { sandbox: sandbox.all() })
+        return json(res, 200, { ok: true, entry: out.entry })
+      }
+
+      if (path === '/api/sandbox/params') {
+        const component = String(body.component ?? '')
+        if (!component) return json(res, 400, { error: 'component required' })
+        const out = sandbox.params(component, body.params)
+        if (!out.ok) return json(res, 400, { error: out.error })
+        broadcast('sandbox', { sandbox: sandbox.all() })
+        return json(res, 200, { ok: true, entry: out.entry })
+      }
+
+      // ---- the proposals queue -------------------------------------------
+      // Proposals are AUTHORITATIVE and nothing is ever removed, so there is
+      // no delete branch here to match findings'.
+      const pushSkills = () => broadcast('skillsQueue', {
+        proposals: skills.read({ limit: PROPOSALS_IN_SNAPSHOT }),
+      })
+
+      if (path === '/api/skills/propose') {
+        const out = skills.ingest(body, { source: body.source === 'pass' ? 'pass' : 'session' })
+        if (!out.ok) return json(res, /rated proposals/.test(out.error) ? 409 : 400, { error: out.error })
+        try { capture.append('proposal', out.proposal.sessions?.[0] ?? '', { title: out.proposal.title, merged: out.merged }) } catch {}
+        pushSkills()
+        return json(res, 200, { ok: true, proposal: out.proposal, merged: out.merged })
+      }
+
+      if (path === '/api/skills/mark') {
+        const out = skills.mark(String(body.id ?? ''), { mark: body.mark, cycle: body.cycle })
+        // Narrower than /unknown/: the store's OTHER refusal, an unrecognised
+        // mark value, is also worded "unknown mark: <value>" and must stay a
+        // 400, not a 404 that reads as "no such proposal".
+        if (!out.ok) return json(res, /unknown proposal/.test(out.error) ? 404 : 400, { error: out.error })
+        try { capture.append('proposal-mark', '', { id: out.proposal.id, mark: out.proposal.mark }) } catch {}
+        pushSkills()
+        return json(res, 200, { ok: true, proposal: out.proposal })
+      }
+
+      if (path === '/api/skills/prep') {
+        const p = skills.get(String(body.id ?? ''))
+        if (!p) return json(res, 404, { error: 'unknown proposal' })
+        if (p.requestId) return json(res, 409, { error: `already prepped as ${p.requestId}` })
+        // Refused HERE, with the value named, for the reason
+        // /api/request/create gives: a project becomes a spawn's cwd.
+        const vp = validateProject(body.project)
+        if (!vp.ok) return json(res, 400, { error: vp.error })
+        const { title, ask, brief } = prepBrief(p)
+        const r = requests.create({ title, project: vp.project, ask, brief })
+        // Written now, not on the 4 s tick: the proposal is about to point at
+        // this request, and prep refuses twice, so a request lost to a crash
+        // would leave the proposal unpreppable forever.
+        requests.flush()
+        const out = skills.prep(p.id, { requestId: r.id })
+        if (!out.ok) return json(res, 409, { error: out.error })
+        let request = r
+        if (body.queue === true) {
+          try { request = requests.transition(r.id, 'queued', {}); requests.flush() }
+          catch (e) { return json(res, 409, { error: e.message }) }
+        }
+        try { capture.append('proposal-prep', '', { id: p.id, requestId: r.id, queued: body.queue === true }) } catch {}
+        pushSkills()
+        pushDispatch()
+        return json(res, 200, { ok: true, proposal: out.proposal, request })
+      }
+
+      if (path === '/api/skills/pass') {
+        const out = await orchestrator.patternPass({ override: body.override === true })
+        if (!out.ok) return json(res, out.code ?? 409, { error: out.error })
+        pushSkills()
+        return json(res, 200, out)
+      }
+
       if (path === '/api/orchestrator/clear') {
-        return json(res, 200, orchestrator.clear())
+        const out = orchestrator.clear()
+        threadsChanged()
+        return json(res, 200, out.thread ? { ...out, thread: publicThread(out.thread) } : out)
+      }
+
+      // Every one of these broadcasts the new header list afterwards, so a
+      // second pane follows along. A no-op rename broadcasts too: the cost is
+      // one small frame and the alternative is a divergence nobody can see.
+      if (path === '/api/orchestrator/thread/new') {
+        const t = orchThreads.create({ title: typeof body.title === 'string' ? body.title : '' })
+        threadsChanged()
+        return json(res, 200, { ok: true, thread: publicThread(t) })
+      }
+
+      if (path === '/api/orchestrator/thread/select') {
+        const t = orchThreads.select(String(body.id ?? ''))
+        if (!t) return json(res, 404, { error: 'unknown thread' })
+        threadsChanged()
+        return json(res, 200, { ok: true, thread: publicThread(t) })
+      }
+
+      if (path === '/api/orchestrator/thread/pin') {
+        const t = orchThreads.setPinned(String(body.id ?? ''), !!body.pinned)
+        if (!t) return json(res, 404, { error: 'unknown thread' })
+        threadsChanged()
+        return json(res, 200, { ok: true, thread: publicThread(t) })
+      }
+
+      if (path === '/api/orchestrator/thread/rename') {
+        if (typeof body.title !== 'string') return json(res, 400, { error: 'title must be a string' })
+        const t = orchThreads.rename(String(body.id ?? ''), body.title)
+        if (!t) return json(res, 404, { error: 'unknown thread' })
+        threadsChanged()
+        return json(res, 200, { ok: true, thread: publicThread(t) })
+      }
+
+      if (path === '/api/orchestrator/thread/delete') {
+        const id = String(body.id ?? '')
+        // Refused mid-answer: the turn in flight is about to append to this
+        // thread, and silently appending to one that no longer exists is the
+        // confident wrong answer this codebase refuses everywhere else.
+        if (orchestrator.activeThreadId?.() === id) return json(res, 409, { error: 'that conversation is mid-answer' })
+        if (!orchThreads.remove(id)) return json(res, 404, { error: 'unknown thread' })
+        threadsChanged()
+        return json(res, 200, { ok: true })
       }
 
       if (path === '/api/orchestrator/blurb/refresh') {
@@ -1965,6 +3817,109 @@ const server = http.createServer(async (req, res) => {
         // construction above).
         const out = await orchestrator.refreshBlurb({ force: true })
         return json(res, out.ok ? 200 : (out.code ?? 400), out)
+      }
+
+      // ---- session space ------------------------------------------------------
+      // Inside the ladder, below the gate. A route added ABOVE it re-opens the
+      // hole where a POST reached a read-only branch that never checked the
+      // caller, so an unauthenticated request was answered.
+      //
+      // A groups file that would not parse blocks every write here with 409,
+      // rather than a fresh store being written over the only copy of it.
+      const groupsBroken = () =>
+        json(res, 409, { error: `${GROUPS_PATH} would not parse; refusing to write until it is fixed by hand` })
+
+      if (path === '/api/groups/save') {
+        if (groupsStore.broken()) return groupsBroken()
+        const g = body.group
+        if (!g || typeof g !== 'object' || Array.isArray(g)) return json(res, 400, { error: 'group must be an object' })
+        const r = groupsStore.save(g)
+        if (!r.ok) return json(res, 400, { error: r.error })
+        pushGroups()
+        return json(res, 200, { ok: true, group: r.group })
+      }
+
+      if (path === '/api/groups/delete') {
+        if (groupsStore.broken()) return groupsBroken()
+        if (!groupsStore.remove(String(body.id ?? ''))) return json(res, 404, { error: 'unknown group' })
+        pushGroups()
+        return json(res, 200, { ok: true })
+      }
+
+      // Re-apply a bucket. What it does is decided by the STORED bucket's kind,
+      // never by anything in the body: the body only names what it acts on.
+      if (path === '/api/groups/apply') {
+        if (groupsStore.broken()) return groupsBroken()
+        const group = groupsStore.get(String(body.id ?? ''))
+        if (!group) return json(res, 404, { error: 'unknown group' })
+
+        // Every successful apply ends here: the timestamp, one frame, and ONE
+        // capture line however many targets it reached. A failure to record
+        // the timestamp is logged, not answered: the apply itself has happened.
+        const finish = ({ applied, skipped = [], window }) => {
+          try { groupsStore.markApplied(group.id) } catch (e) { process.stderr.write(`groups: recording an apply failed: ${e.message}\n`) }
+          pushGroups()
+          try {
+            const names = applied.map((a) => a.name || a.id)
+            capture.append('group-apply', '', {
+              kind: group.kind, group: group.name, n: applied.length,
+              targets: names.length > 12 ? [...names.slice(0, 12), `+${names.length - 12} more`] : names,
+            })
+          } catch {}
+          return json(res, 200, { ok: true, kind: group.kind, applied, skipped, ...(window !== undefined ? { window } : {}) })
+        }
+
+        if (group.kind === 'prompt' || group.kind === 'files') {
+          let text = group.text
+          if (group.kind === 'prompt' && !text) return json(res, 400, { error: `${group.name} has no text to send` })
+          if (group.kind === 'files') {
+            if (!group.paths.length) return json(res, 400, { error: `${group.name} has no paths to name` })
+            const norm = normalizePaths(group.paths, { home: homedir(), realpath: realpathSync, exists: pathExists })
+            if (!norm.ok) return json(res, 400, { error: norm.error })
+            text = filesPrompt(norm.paths)
+          }
+          // resolveTargets refuses the whole request on one unknown id, before
+          // the first enqueue, so there is never a partial fan-out to report.
+          const t = resolveTargets({ body: { targetIds: body.targetIds }, ids: live().map((s) => s.id) })
+          if (!t.ok) return json(res, t.status, { error: t.error })
+          const applied = t.ids.map((id) => {
+            enqueue(id, { verb: 'prompt', payload: { text } })
+            return { id, name: sessions.get(id)?.name ?? '' }
+          })
+          return finish({ applied })
+        }
+
+        if (group.kind === 'tmux-group') {
+          if (!Array.isArray(body.panes) || body.panes.length === 0) {
+            return json(res, 400, { error: '`panes` must be a non-empty array of pane ids' })
+          }
+          if (body.panes.length > MEMBERS_MAX) return json(res, 400, { error: `too many panes (max ${MEMBERS_MAX})` })
+          // A FRESH listing, never the held one: a pane id reaches an argv only
+          // if tmux listed it inside this same request, and the destination
+          // session and its working directory come from that listing too.
+          const known = await readTmuxPanes()
+          const plan = groupPlan({ want: body.panes, known, name: group.tmuxName || 'szg-group' })
+          const out = await runGroup({ plan, run: realRun, tmuxBin: TMUX_BIN })
+          // Whatever ran may have moved panes, so the held listing is stale.
+          tmuxCache = { at: 0, panes: [] }
+          if (!out.ok) return json(res, 502, { ok: false, kind: group.kind, error: out.error, skipped: out.skipped })
+          const byPane = new Map(known.map((p) => [p.pane, p]))
+          return finish({
+            applied: out.joined.map((id) => ({ id, name: byPane.get(id)?.target ?? id })),
+            skipped: out.skipped,
+            window: out.window,
+          })
+        }
+
+        if (group.kind === 'together') {
+          const t = resolveTargets({ body: { targetIds: body.targetIds }, ids: live().map((s) => s.id) })
+          if (!t.ok) return json(res, t.status, { error: t.error })
+          const r = groupsStore.save({ id: group.id, members: t.ids.map((id) => ({ id, name: sessions.get(id)?.name ?? '' })) })
+          if (!r.ok) return json(res, 400, { error: r.error })
+          return finish({ applied: r.group.members })
+        }
+
+        return json(res, 400, { error: `a ${group.kind} group cannot be applied` })
       }
 
       return json(res, 404, { error: 'no such endpoint' })
@@ -2022,12 +3977,13 @@ server.listen(PORT, '127.0.0.1', () => {
 })
 server.on('error', (e) => { process.stderr.write(`relay failed: ${e.message}\n`); process.exit(1) })
 
-// Expire dead sessions so the board does not accumulate ghosts.
+// Expire dead sessions so the board does not accumulate ghosts. Compared
+// against the ids last BROADCAST, not against sessions.size around live():
+// rescan() prunes on its own 4 s cadence, so the size was already current by
+// the time this ran and the board emptying was never announced.
 setInterval(() => {
-  const before = sessions.size
-  live()
-  if (sessions.size !== before) broadcast('sessions', live())
-}, 10_000).unref?.()
+  if (idsKey(live()) !== lastSessionIds) broadcastSessions()
+}, SWEEP_MS).unref?.()
 
 
 // Scan project task files on their own cadence and broadcast only on change.
@@ -2043,11 +3999,30 @@ const rescan = async () => {
   scanning = true
   try {
     const next = await scanner.scan(live(), now())
-    const json = JSON.stringify(next)
-    if (json === projectsJson) return
+    // The relay's own readers always get the newest scan. The change check is
+    // on the digest the panes are sent, never on the full scan: the task
+    // register keeps a bounded number of entries, a board of a dozen worktrees
+    // carries several times that, and every pass re-creates the evicted ones
+    // with a fresh firstSeen -- so the full scan differed on every pass and the
+    // whole payload was re-sent every scan interval. The documents are stamped
+    // first and the stamp rides the digest, so a document that changed without
+    // moving a count -- a step edited, which moves its plan copy's mtimeMs --
+    // still changes the digest, and a pane showing that project gets the frame
+    // that tells it to refetch. The documents are replaced every pass, since
+    // the routes must answer from the newest scan whether or not a frame goes.
     projects = next
+    const at = now()
+    const docs = documentProjects(next, { now: at })
+    projectsStamp = stampChanged(projectsStamp, docs, at)
+    const stamps = projectsStamp.changedAt
+    for (const d of docs) d.changedAt = stamps.get(d.key) ?? null
+    projectsDocs = docs
+    const digest = digestProjects(next, { now: at }).map((d) => ({ ...d, changedAt: stamps.get(d.key) ?? null }))
+    const json = JSON.stringify(digest)
+    if (json === projectsJson) return
     projectsJson = json
-    broadcast('projects', next)
+    projectsDigest = digest
+    broadcast('projects', projectsDigest)
   } catch (e) {
     process.stderr.write('projects scan failed: ' + e.message + '\n')
   } finally {

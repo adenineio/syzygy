@@ -73,6 +73,8 @@ func (m Model) Render() string {
 		body = m.viewGridForm(f)
 	case m.showHelp:
 		body = m.helpBody(f)
+	case m.showBank:
+		body = m.bankBody(f)
 	}
 	body = m.scrollBody(body, budget)
 
@@ -118,6 +120,9 @@ func (m Model) maxScroll(f Frame) int {
 	body := m.body(f, budget)
 	if m.showHelp {
 		body = m.helpBody(f)
+	}
+	if m.showBank {
+		body = m.bankBody(f)
 	}
 	return maxInt(0, len(body)-budget)
 }
@@ -191,6 +196,10 @@ func (m Model) body(f Frame, budget int) []string {
 		return m.viewGrid(f, stale, budget)
 	case ModeMine:
 		return m.viewMine(f)
+	case ModePaste:
+		return m.viewPaste(f)
+	case ModeChain:
+		return m.viewChain(f)
 	case ModeHotkeys:
 		return m.viewHotkeys(f)
 	default:

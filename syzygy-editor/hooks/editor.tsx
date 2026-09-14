@@ -15,7 +15,7 @@
 //               relative to the working directory, so `util.js` in two folders
 //               are two different, unambiguous references.
 //
-// **Zero model calls.** The reference detector is a regex and a `$.fs.exists`
+// **Zero model calls.** The reference detector is a regex and a `$.fs.stat`
 // filter; the relative-path rule is an INSTRUCTION in the conversation's
 // context, not a classification. `just validate` prints the call inventory:
 // no `$.model.*` line appears there.
@@ -43,9 +43,13 @@
 //     over — by message text, and by path with a short TTL — because the hook
 //     fires ~10×/s per message and a transcript re-renders every message.
 
-import type { EngineInterface, Register, RenderNode, ToolSpec } from 'claude-code'
+import type { EngineInterface, FsStat, Register, RenderNode, ToolSpec } from 'claude-code'
 
 type Dollar = EngineInterface
+
+/** What `$.fs.stat` says a path is. `null`, everywhere below, means ABSENT —
+ *  which is what the boolean `false` meant while this was an existence check. */
+export type FsKind = FsStat['kind']
 
 // ---------------------------------------------------------------- constants
 
@@ -68,9 +72,12 @@ const PARSE_CACHE_MAX = 240
  *  becomes a candidate. Masked with spaces so every index stays true. */
 const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi
 
-/** A candidate run: path characters, optional `:line` or `:line:col`. Broad on
- *  purpose — `looksLikePath` and then `$.fs.exists` do the refusing. */
-const CAND_RE = /(?:~\/|\.{0,2}\/)?(?:[A-Za-z0-9_.@+~-]+\/)*[A-Za-z0-9_.@+~-]+(?::\d+(?::\d+)?)?/g
+/** A candidate run: path characters, an optional trailing `/` (a folder is a
+ *  legitimate reference written either way, and `docs/` would otherwise scan
+ *  as the bare word `docs` and be dropped for having no slash), then an
+ *  optional `:line` or `:line:col`. Broad on purpose — `looksLikePath` and
+ *  then the existence check do the refusing. */
+const CAND_RE = /(?:~\/|\.{0,2}\/)?(?:[A-Za-z0-9_.@+~-]+\/)*[A-Za-z0-9_.@+~-]+\/?(?::\d+(?::\d+)?)?/g
 
 /** Trailing prose punctuation to shed: `see src/a.ts.` is a reference to
  *  `src/a.ts`, and `(src/a.ts)` is too. */
@@ -100,6 +107,11 @@ export type Config = {
    *  dim row beneath it. `inline` boxes each reference where it stands, at the
    *  cost of the reply's markdown (see the header note 2). */
   box: 'row' | 'inline'
+  /** What pressing a FOLDER does. `finder` opens a Finder window with `open`
+   *  (macOS only; off macOS the value is inert and the editor opens, since
+   *  `open` is not there to run). `editor` keeps the pre-folders behaviour:
+   *  the directory goes to the editor pane, where nvim draws netrw. */
+  folders: 'finder' | 'editor'
 }
 
 export const DEFAULTS: Config = {
@@ -108,6 +120,7 @@ export const DEFAULTS: Config = {
   split: 'below',
   size: '40%',
   box: 'row',
+  folders: 'finder',
 }
 
 /** The instruction, verbatim. An INSTRUCTION the model reads, not a model
@@ -122,13 +135,21 @@ const TOOL: ToolSpec = {
   description:
     'Open a file in the editor pane: a tmux split beneath this session running ' +
     "the user's editor, which closes itself when the editor exits. Use it when " +
-    'the user asks to open, edit or look at a file in their editor. The path is ' +
-    'relative to the working directory, or absolute.',
+    'the user asks to open, edit or look at a file in their editor. A folder ' +
+    'opens in a Finder window on macOS instead, unless `in` says otherwise. ' +
+    'The path is relative to the working directory, or absolute.',
   inputSchema: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'The file to open, relative to the working directory or absolute.' },
+      path: { type: 'string', description: 'The file or folder to open, relative to the working directory or absolute.' },
       line: { type: 'number', description: 'Optional line to put the cursor on.' },
+      in: {
+        type: 'string',
+        enum: ['finder', 'editor'],
+        description:
+          "Where to open a FOLDER: 'finder' for a Finder window (macOS), 'editor' for the editor pane. " +
+          'Ignored for a file, and off macOS.',
+      },
     },
     required: ['path'],
   },
@@ -147,7 +168,7 @@ export type Ref = {
    *  command line short. This is what feeds `editArgv`, so the VALUE the
    *  editor opens is always this, never the raw `~`. */
   rel: string
-  /** Resolved against the working directory; what `$.fs.exists` is asked. */
+  /** Resolved against the working directory; what `$.fs.stat` is asked. */
   abs: string
   /** The line, when the token carried one. */
   line?: number
@@ -155,6 +176,12 @@ export type Ref = {
   start: number
   end: number
 }
+
+/** A `Ref` the existence filter has answered for. Always a SHALLOW COPY of the
+ *  cached `Ref`, never the cached object with a field written onto it:
+ *  `M.parsed` holds those for the life of a message's text, and a kind written
+ *  there would outlive the 5 s TTL the kind is supposed to obey. */
+export type LiveRef = Ref & { kind: FsKind }
 
 /** Module scope, because `$` may never be bound: the helpers take `($: Dollar,
  *  …)` and read what they need from here. */
@@ -168,10 +195,14 @@ const M: {
    *  `--session` so it can do the same lookup as a fallback. */
   sessionId: string
   cfg: Config
+  /** `darwin` only when `uname` said exactly that. Read ONCE at session.start:
+   *  it cannot change while a session runs, and a press must not pay a
+   *  subprocess before doing its work. */
+  os: 'darwin' | 'other'
   /** text → the refs parsed out of it. Bounded, oldest-first. */
   parsed: Map<string, Ref[]>
-  /** abs path → [exists, when]. */
-  seen: Map<string, [boolean, number]>
+  /** abs path → [kind, when]. `null` is "absent", what `false` used to mean. */
+  seen: Map<string, [FsKind | null, number]>
   /** Counters the harness asserts against: one parse per distinct text. */
   parses: number
   opens: number
@@ -182,6 +213,7 @@ const M: {
   pane: '',
   sessionId: '',
   cfg: { ...DEFAULTS },
+  os: 'other',
   parsed: new Map(),
   seen: new Map(),
   parses: 0,
@@ -201,12 +233,17 @@ export const maskUrls = (text: string): string =>
   text.replace(URL_RE, (m) => ' '.repeat(m.length))
 
 /** Is this candidate shaped like a path at all? The cheap half of the filter;
- *  `$.fs.exists` is the expensive, authoritative half. */
+ *  `$.fs.stat` (with an `$.fs.exists` fallback) is the expensive, authoritative
+ *  half. */
 export const looksLikePath = (token: string): boolean => {
   if (token.length < 3 || token.length > 400) return false
   if (token.includes('//')) return false
   if (token.startsWith('-')) return false
-  if (token.endsWith('/')) return false
+  // `../` and `./` become candidates once a trailing slash is allowed, and
+  // `../` RESOLVES -- to the parent directory, which exists, so the existence
+  // filter would box it and label it `/`. "Up one" is navigation, not a place
+  // the model named.
+  if (/^[./]+$/.test(token)) return false
   if (token.includes('/')) return true
   // Slashless: only a real extension saves it. `e.g` and `v1.2` die here.
   return BARE_EXT_RE.test(token)
@@ -304,8 +341,10 @@ export const refsOf = (text: string, cwd: string, home: string): Ref[] => {
  *  is cosmetic ONLY — derived straight from `abs`/`home`, never from `rel` —
  *  the VALUE fed to the argv (`ref.rel`) is always the absolute path for a
  *  home reference (see `scanRefs`), because nothing downstream expands a
- *  literal `~`. */
-export const label = (cwd: string, home: string, ref: Ref): string => {
+ *  literal `~`. A directory's label carries a trailing `/` so a folder reads
+ *  as one — the only thing that distinguishes the two before you press,
+ *  since the terminal has no hover. */
+export const label = (cwd: string, home: string, ref: Ref, kind?: FsKind | null): string => {
   const inside = cwd !== '' && ref.abs.startsWith(`${cwd}/`)
   let path: string
   if (inside) {
@@ -315,7 +354,9 @@ export const label = (cwd: string, home: string, ref: Ref): string => {
   } else {
     path = ref.abs
   }
-  return ref.line === undefined ? path : `${path}:${ref.line}`
+  // A line number in a directory is nonsense; the suffix is for folders only.
+  if (ref.line !== undefined) return `${path}:${ref.line}`
+  return kind === 'dir' ? `${path}/` : path
 }
 
 /** The argv `bin/syzygy-edit` is invoked with. Pure, and an ARRAY: the path is
@@ -392,6 +433,7 @@ export const parseConfig = (text: string): Config => {
   if (o.split === 'below' || o.split === 'right') cfg.split = o.split
   if (typeof o.size === 'string' && /^\d{1,3}%?$/.test(o.size.trim())) cfg.size = o.size.trim()
   if (o.box === 'row' || o.box === 'inline') cfg.box = o.box
+  if (o.folders === 'finder' || o.folders === 'editor') cfg.folders = o.folders
   return cfg
 }
 
@@ -417,6 +459,26 @@ export const styleSpans = (text: string): Span[] => {
   return out.map((s) => ({ ...s, text: s.bold || s.code ? s.text : s.text.replace(/\*\*|`/g, '') })).filter((s) => s.text !== '')
 }
 
+/** What a press — or the `open_in_editor` tool — should do with a reference.
+ *
+ *  Pure, and the ONE place this is decided: the press, the tool and anything
+ *  later all ask here. The order matters. A non-directory and a non-macOS
+ *  machine are settled BEFORE the setting or a caller's `want`, so `in:
+ *  'finder'` can never hand a FILE to `open` (which would launch whatever
+ *  application owns that file type) and can never run a command that is not on
+ *  the machine. */
+export const folderAction = (
+  cfg: Config,
+  os: 'darwin' | 'other',
+  kind: FsKind | null,
+  want?: 'finder' | 'editor',
+): 'finder' | 'editor' => {
+  if (kind !== 'dir') return 'editor'
+  if (os !== 'darwin') return 'editor'
+  if (want === 'finder' || want === 'editor') return want
+  return cfg.folders === 'editor' ? 'editor' : 'finder'
+}
+
 // ------------------------------------------------------------ $ : discovery
 
 const readConfig = async ($: Dollar): Promise<void> => {
@@ -427,6 +489,18 @@ const readConfig = async ($: Dollar): Promise<void> => {
   const res = await $.process.run(['cat', `${M.home}/${CONFIG_PATH}`], { timeoutMs: 4000 }).catch(() => null)
   if (!res || res.exitCode !== 0) return
   M.cfg = parseConfig(res.stdout)
+}
+
+/** `uname`, once. Bare, not `uname -a`: the long form also prints the machine's
+ *  HOSTNAME, so the test would become a substring search across a string a
+ *  host called `foo-darwin` would pass. Reset to `'other'` first, then raised
+ *  only on an exact match: every failure means today's behaviour rather than a
+ *  wrong one. The reset matters only to a harness driving several sessions
+ *  through one module; in production `discover` runs once per session. */
+const detectOs = async ($: Dollar): Promise<void> => {
+  M.os = 'other'
+  const res = await $.process.run(['uname'], { timeoutMs: 4000 }).catch(() => null)
+  if (res && res.exitCode === 0 && res.stdout.trim().toLowerCase() === 'darwin') M.os = 'darwin'
 }
 
 /** Where the plugin's own script is. `$.plugin.root` is absolute and already
@@ -456,28 +530,37 @@ const discover = async ($: Dollar): Promise<void> => {
       .catch(() => null)
     if (panes && panes.exitCode === 0) M.pane = attachPaneFor(M.sessionId, panes.stdout)
   }
+  await detectOs($)
   await readConfig($)
 }
 
-/** Does this path exist, cached for EXISTS_TTL_MS?
+/** What is at this path, cached for EXISTS_TTL_MS? `null` means nothing is.
  *
- *  `$.fs.exists` survived the 2.1.269 rename and answers for paths outside the
- *  working directory (probed). A rejection is a `false`, never a throw: the
- *  render path must not have an exception in it. */
-const existsCached = async ($: Dollar, abs: string): Promise<boolean> => {
+ *  `$.fs.stat` gives the kind, which is what tells a folder from a file — but
+ *  it REJECTS on a missing path (the declarations say so) where `$.fs.exists`
+ *  never rejects, and it has never been probed against a path OUTSIDE the
+ *  working directory the way `$.fs.exists` has.
+ *  A stat that
+ *  rejected for any other reason would silently unbox every reference in the
+ *  transcript, so `exists` gets the last word: present but unknown is `other`,
+ *  which routes to the editor exactly as this plugin behaved before folders. */
+const kindCached = async ($: Dollar, abs: string): Promise<FsKind | null> => {
   const now = $.clock.now()
   const hit = M.seen.get(abs)
   if (hit && now - hit[1] < EXISTS_TTL_MS) return hit[0]
-  const ok = await $.fs.exists(abs).catch(() => false)
-  M.seen.set(abs, [ok, now])
-  return ok
+  const st = await $.fs.stat(abs).catch(() => null)
+  let kind: FsKind | null = st === null ? null : st.kind
+  if (kind === null && (await $.fs.exists(abs).catch(() => false))) kind = 'other'
+  M.seen.set(abs, [kind, now])
+  return kind
 }
 
-/** The refs in `text` that exist on disk, in order. */
-const liveRefs = async ($: Dollar, text: string): Promise<Ref[]> => {
-  const out: Ref[] = []
+/** The refs in `text` that exist on disk, in order, each with its kind. */
+const liveRefs = async ($: Dollar, text: string): Promise<LiveRef[]> => {
+  const out: LiveRef[] = []
   for (const ref of refsOf(text, M.cwd, M.home)) {
-    if (await existsCached($, ref.abs)) out.push(ref)
+    const kind = await kindCached($, ref.abs)
+    if (kind !== null) out.push({ ...ref, kind })
   }
   return out
 }
@@ -504,12 +587,33 @@ const openPath = async ($: Dollar, rel: string, line?: number): Promise<string> 
   return `opened ${rel} in the editor pane`
 }
 
+/** Open a directory in a Finder window. macOS only — `folderAction` has
+ *  already established that, and this is never reached otherwise.
+ *
+ *  `open` returns as soon as it has handed the path to the window server, so
+ *  one-shot is right here for the same reason it is right for `tmux
+ *  split-window`. The ABSOLUTE path, never `ref.rel`: `open` inherits the
+ *  ENGINE's working directory, which is not guaranteed to be the session's. */
+const openFolder = async ($: Dollar, abs: string): Promise<string> => {
+  M.opens++
+  const res = await $.process.run(['open', abs], { timeoutMs: 10000 }).catch(() => null)
+  if (!res) return `could not run open ${abs}`
+  if (res.exitCode !== 0) return `open failed: ${(res.stderr || res.stdout).trim()}`
+  return `opened ${abs} in Finder`
+}
+
+/** What a pressed box does. One decision (`folderAction`), two routes. */
+const openRef = async ($: Dollar, ref: LiveRef): Promise<string> => {
+  if (folderAction(M.cfg, M.os, ref.kind) === 'finder') return openFolder($, ref.abs)
+  return openPath($, ref.rel, ref.line)
+}
+
 /** The last turn's referenced-and-existing paths, for a pane or band that wants
  *  to list them. Written under `syzygy-editor:<sessionId>:recent`; `$.store` is
  * shared across sessions, hence the session-id key. */
 const recordRecent = async ($: Dollar, text: string): Promise<void> => {
   const refs = await liveRefs($, text)
-  const paths = refs.map((r) => label(M.cwd, M.home, r))
+  const paths = refs.map((r) => label(M.cwd, M.home, r, r.kind))
   await $.store
     .set(`syzygy-editor:${$.session.id()}:recent`, { cwd: M.cwd, pane: M.pane, at: $.clock.now(), paths })
     .catch(() => {})
@@ -522,8 +626,11 @@ const serveTool = async ($: Dollar, input: unknown): Promise<string> => {
   const path = typeof o.path === 'string' ? o.path.trim() : ''
   if (path === '') return 'open_in_editor needs a path.'
   const line = typeof o.line === 'number' && Number.isFinite(o.line) ? Math.trunc(o.line) : undefined
+  const want = o.in === 'finder' || o.in === 'editor' ? o.in : undefined
   const abs = resolvePath(M.cwd, M.home, path)
-  if (!(await existsCached($, abs))) return `no such file: ${path}`
+  const kind = await kindCached($, abs)
+  if (kind === null) return `no such file: ${path}`
+  if (folderAction(M.cfg, M.os, kind, want) === 'finder') return openFolder($, abs)
   // Same expansion as scanRefs: a hand-typed ~ must not reach the argv
   // unexpanded, or bin/syzygy-edit's exec'd (no-shell) argv opens it as a
   // same-named relative file instead of the file this call means.
@@ -557,7 +664,7 @@ export const register: Register = (on) => {
 
   on('tool.call', { tool: /^mcp__syzygy-editor__open_in_editor$/ }, async ($, e, next) => {
     const text = await serveTool($, e).catch((err: unknown) => `open_in_editor failed: ${String(err)}`)
-    return { result: { text } } as never
+    return { result: text }
   })
 
   // The box. Terminal only; every other surface passes straight through.
@@ -572,12 +679,12 @@ export const register: Register = (on) => {
 
       // `onPress` is built HERE, inline, because `$` may never be stashed for a
       // top-level handler to use.
-      const button = (ref: Ref, i: number): RenderNode => (
+      const button = (ref: LiveRef, i: number): RenderNode => (
         <t.Button
           key={`szg-${i}-${ref.abs}`}
-          label={label(M.cwd, M.home, ref)}
+          label={label(M.cwd, M.home, ref, ref.kind)}
           onPress={() => {
-            void openPath($, ref.rel, ref.line).then((line) => $.ui.toast(line))
+            void openRef($, ref).then((line) => $.ui.toast(line))
           }}
         />
       )

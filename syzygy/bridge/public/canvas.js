@@ -24,9 +24,10 @@
 const MCC = (() => {
   let C = null            // { S, post, toast, el, ago, openDrawer, openLinkDialog }
   let active = false
-  let stage, nodesEl, wiresEl, wctx, form, emptyEl
+  let stage, nodesEl, wiresEl, wctx, form, emptyEl, plusEl
   let slots = {}          // the default layout for the current session set
   let drag = null         // { kind: 'move', id, dx, dy, x, y, sx, sy, moved } | { kind: 'wire', from, x, y }
+  let swallowClick = false  // the click a drag's own pointerup synthesises (see finish)
 
   const $ = (id) => document.getElementById(id)
   const S = () => C.S
@@ -63,6 +64,10 @@ const MCC = (() => {
       // The stopped ring, same rule as .cneed: built once here, toggled with
       // MCX.show in update. The switchboard draws the identical glyph.
       r1.appendChild(C.el('span', 'cstop', '\u25cb'))
+      // Who this session is working for, when a peer's ask put it here. Built
+      // once and hidden with MCX.show, never added and removed -- this node is
+      // reused.
+      r1.appendChild(C.el('span', 'cpeer'))
       n.appendChild(r1)
       n.appendChild(C.el('div', 'cmeta'))
       n.appendChild(C.el('div', 'ccwd'))
@@ -95,6 +100,17 @@ const MCC = (() => {
       const stopped = C.stoppedOf ? C.stoppedOf(s) : 0
       MCX.toggle(n, 'stopped', !!stopped)
       MCX.show(n.querySelector('.cstop'), !!stopped)
+      const peerFor = typeof s.forPeer?.peer === 'string' ? s.forPeer.peer : ''
+      MCX.show(n.querySelector('.cpeer'), !!peerFor)
+      if (peerFor) MCX.setText(n.querySelector('.cpeer'), 'for ' + peerFor)
+      // Subagents, mirrored from the switchboard card. Same three values, same
+      // rule, computed here rather than shared through a helper because it is
+      // one filter and a helper would be a second file to keep in step for no
+      // saving. No chip and no count on a node: it is 232x126 with four rows
+      // already spoken for, and the ring is the whole ask.
+      const agents = s.agents || []
+      const agentsRunning = agents.filter((a) => a.status === 'running').length
+      MCX.setAttr(n, 'data-agents', agentsRunning ? 'running' : agents.length ? 'idle' : 'none')
       MCX.setAttr(n, 'title', need || (stopped ? 'stopped ' + C.ago(stopped) + ' ago' : ''))
       const bits = [s.model || 'model ?']
       if (s.branch) bits.push('⎇ ' + s.branch)
@@ -221,6 +237,40 @@ const MCC = (() => {
     drawWires()
   }
 
+  // --- the plus gutter --------------------------------------------------------
+  // Visible only while a WIRE drag is live. A MOVE drag never shows it:
+  // dragging a node to the right edge is how a board gets laid out, and a spawn
+  // form opening on that would be a trap. It is static markup rather than part
+  // of the reconciled node tree, so its classes are toggled directly here --
+  // the header's className rule is about MCX's tree and does not reach it.
+
+  const layoutPlus = () => {
+    if (!plusEl || plusEl.hidden) return
+    const r = MCL.plusRect({
+      scrollLeft: stage.scrollLeft, scrollTop: stage.scrollTop,
+      clientWidth: stage.clientWidth, clientHeight: stage.clientHeight,
+    })
+    plusEl.style.left = r.left + 'px'; plusEl.style.top = r.top + 'px'
+    plusEl.style.width = r.width + 'px'; plusEl.style.height = r.height + 'px'
+  }
+
+  /** Which legend rows are lit, from whatever event is to hand -- pointermove,
+   *  keydown and keyup all carry the modifier flags. */
+  const markPlus = (ev) => {
+    if (!plusEl || plusEl.hidden) return
+    const m = MCL.dropMode(ev)
+    plusEl.classList.toggle('inherit', m.inherit)
+    plusEl.classList.toggle('quiet', !m.brief)
+  }
+
+  const showPlus = (on, ev) => {
+    if (!plusEl) return
+    plusEl.hidden = !on
+    plusEl.classList.remove('hot')
+    if (on) { layoutPlus(); markPlus(ev || {}) }
+    else { plusEl.classList.remove('inherit'); plusEl.classList.remove('quiet') }
+  }
+
   // --- gestures: move and wire ------------------------------------------------
 
   const stagePoint = (ev) => {
@@ -240,6 +290,7 @@ const MCC = (() => {
       if (ev.target.closest('.cgrip')) {
         drag = { kind: 'wire', from: id, x: p.x, y: p.y }
         n.classList.add('wiring')
+        showPlus(true, ev)
       } else {
         const s = sessionOf(id)
         const at = s ? posOf(s) : { x: 0, y: 0 }
@@ -267,8 +318,14 @@ const MCC = (() => {
         n.style.top = drag.y + 'px'
       } else {
         drag.x = p.x; drag.y = p.y
-        const over = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.cnode')
+        // ONE hit test, and the gutter is asked first: while it is up, the
+        // right-hand strip means "new session" even over a node beneath it.
+        const hit = document.elementFromPoint(ev.clientX, ev.clientY)
+        const onPlus = !!hit?.closest('.cplus')
         clearTargets()
+        if (plusEl) plusEl.classList.toggle('hot', onPlus)
+        markPlus(ev)
+        const over = onPlus ? null : hit?.closest('.cnode')
         if (over && over !== n) over.classList.add('target')
       }
       drawWires()
@@ -280,8 +337,17 @@ const MCC = (() => {
       if (!drag) return
       const d = drag
       drag = null
+      // A pointerup is followed by a `click`, and after pointer capture the
+      // browser may target it at #cstage -- the common ancestor of the grip and
+      // wherever the pointer landed -- with ⌥ still held from an ⌥-drop. The
+      // stage's ⌥-click listener would then reopen the spawn form WITHOUT the
+      // link, silently discarding the wire. Swallow that one click; cleared on
+      // the next task in case the browser sends none.
+      swallowClick = true
+      setTimeout(() => { swallowClick = false }, 0)
       n.classList.remove('dragging'); n.classList.remove('wiring')
       clearTargets()
+      showPlus(false)
       let pending = null      // the move to post, once the DOM is settled
       if (d.kind === 'move') {
         if (!cancelled && d.moved) {
@@ -295,10 +361,17 @@ const MCC = (() => {
           C.openDrawer(d.id)
         }
       } else if (!cancelled) {
-        const over = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.cnode')
-        // Landing the drag does NOT send: the note is written in the dialog,
-        // exactly as on the switchboard.
-        if (over && over.dataset.id !== d.from) C.openLinkDialog(d.from, over.dataset.id)
+        const hit = document.elementFromPoint(ev.clientX, ev.clientY)
+        // Landing the drag does NOT send, on either target: the note is
+        // written in a dialog, exactly as on the switchboard. Dropping on the
+        // gutter opens the SPAWN form with the wire recorded on it; dropping
+        // on a node opens the link dialog, as before.
+        if (hit?.closest('.cplus')) {
+          openSpawn(stagePoint(ev), { from: d.from, ...MCL.dropMode(ev) })
+        } else {
+          const over = hit?.closest('.cnode')
+          if (over && over.dataset.id !== d.from) C.openLinkDialog(d.from, over.dataset.id)
+        }
       }
       render()
       if (!pending) return
@@ -404,21 +477,59 @@ const MCC = (() => {
     completeTimer = setTimeout(() => sendComplete(value), COMPLETE_DEBOUNCE_MS)
   }
 
-  const openSpawn = (p) => {
+  /** Every name already spoken for: live sessions, and ledger rows no listing
+   *  has ruled on yet -- a spawn started ten seconds ago has no card on the
+   *  board but has certainly taken its name. */
+  const takenNames = () => {
+    const out = new Set()
+    for (const s of S().sessions) if (s.name) out.add(s.name)
+    for (const r of S().canvas.spawnedBy || []) if (r.name && !r.sessionId) out.add(r.name)
+    return [...out]
+  }
+
+  /** The model and effort to inherit from the source node. Its ledger row when
+   *  the canvas started it -- the only place an EFFORT is ever recorded -- and
+   *  otherwise its reported model with the form's default effort. The model
+   *  goes through MCL.modelOption: a session reports a display label ("opus
+   *  5"), the <select> offers aliases, and a label it cannot place is dropped
+   *  rather than assigned, since an absent value leaves a select empty. */
+  const inheritedSettings = (id) => {
+    const sp = spawnOf(id), s = sessionOf(id)
+    const values = [...$('cs-model').options].map((o) => o.value)
+    return { model: MCL.modelOption(sp?.model || s?.model, values), effort: sp?.effort || '' }
+  }
+
+  const openSpawn = (p, link = null) => {
     const x = Math.max(0, Math.round(p.x)), y = Math.max(0, Math.round(p.y))
     // The NODE lands on the click point, so the dataset keeps it un-clamped.
     form.dataset.x = String(x); form.dataset.y = String(y)
+    // The wire this form will draw, if any, recorded on the FORM rather than in
+    // a module variable so closeSpawn has exactly one thing to clear. A stale
+    // `from` here would silently wire the next right-click spawn to whatever
+    // was dragged an hour ago.
+    const src = link ? sessionOf(link.from) : null
+    form.dataset.from = link ? link.from : ''
+    form.dataset.brief = link && link.brief ? '1' : ''
+    MCX.show($('cs-link'), !!link)
+    MCX.setText($('cs-linkname'), src ? (src.name || link.from.slice(0, 8)) : '')
+    MCX.show($('cs-noterow'), !!(link && link.brief))
+    $('cs-note').value = ''
     fillDatalist(null)
     const recents = recentsList()
-    // The last directory typed is kept across opens; otherwise the newest
-    // recent seeds it, and on a relay with no history at all the relay's own
-    // project root does. An empty field is never the right answer here -- it
-    // makes the commonest case (start one where I already am) the most typing.
-    if (!$('cs-cwd').value) $('cs-cwd').value = recents[0] || ''
-    $('cs-name').value = ''
+    // A fan-out starts in the source's own tree far more often than anywhere
+    // else; otherwise the last directory typed is kept across opens, then the
+    // newest recent, then the relay's own project root.
+    if (link && src?.cwd) $('cs-cwd').value = src.cwd
+    else if (!$('cs-cwd').value) $('cs-cwd').value = recents[0] || ''
+    $('cs-name').value = link && src ? MCL.suggestName(src.name || '', takenNames()) : ''
     $('cs-prompt').value = ''
-    $('cs-model').value = 'opus'
-    $('cs-effort').value = 'high'
+    // A preset applied at the last open must not ride into this one: its
+    // persona and tools sit in no visible field. Cleared for the same reason
+    // `from` is.
+    MCT.detach($('cs-tplstrip'))
+    const inh = link && link.inherit ? inheritedSettings(link.from) : null
+    $('cs-model').value = inh?.model || 'opus'
+    $('cs-effort').value = inh?.effort || 'high'
     // Unhidden BEFORE it is positioned: a hidden element measures 0, and the
     // clamp below needs the panel's real size. Both happen in this one task,
     // so the browser never paints it at the previous open's position.
@@ -433,13 +544,21 @@ const MCC = (() => {
     const px = Math.max(vx, Math.min(x, vx + stage.clientWidth - form.offsetWidth))
     const py = Math.max(vy, Math.min(y, vy + stage.clientHeight - form.offsetHeight))
     form.style.left = Math.round(px) + 'px'; form.style.top = Math.round(py) + 'px'
-    requestAnimationFrame(() => $('cs-cwd').focus())
+    // In link mode the directory is already filled in from the source, so the
+    // first thing left to write is the prompt.
+    requestAnimationFrame(() => (link ? $('cs-prompt') : $('cs-cwd')).focus())
   }
 
   // The debounce timer is cancelled with the form: a completion that lands
   // after it closes would rebuild a datalist nothing is showing, and would do
   // it against the path from the last time it was open.
-  const closeSpawn = () => { clearTimeout(completeTimer); completeTimer = null; form.hidden = true }
+  const closeSpawn = () => {
+    clearTimeout(completeTimer); completeTimer = null
+    form.hidden = true
+    // Cleared HERE and nowhere else: a `from` left on the dataset would wire
+    // the next right-click spawn to whatever this drag came from.
+    form.dataset.from = ''; form.dataset.brief = ''
+  }
 
   const submitSpawn = async (ev) => {
     ev.preventDefault()
@@ -449,14 +568,26 @@ const MCC = (() => {
     if (!cwd || !prompt) { C.toast('a directory and a kickoff prompt are both required', { kind: 'warn' }); return }
     const go = $('cs-go')
     go.disabled = true
-    const r = await C.post('/api/spawn', {
+    // Read before closeSpawn clears the dataset.
+    const from = form.dataset.from
+    const body = {
       cwd, name, prompt, model: $('cs-model').value, effort: $('cs-effort').value,
       x: Number(form.dataset.x), y: Number(form.dataset.y),
-    })
+      templateId: MCT.appliedId($('cs-tplstrip')),
+    }
+    // `null` rather than '' for a quiet drop: an empty note is still a brief,
+    // and a brief costs the SOURCE a queued command, a tool call and a turn.
+    if (from) body.link = { from, note: form.dataset.brief ? $('cs-note').value.trim() : null }
+    const r = await C.post('/api/spawn', body)
     go.disabled = false
     if (!r.ok) { C.toast(r.error || 'spawn failed', { ms: 8000, kind: 'warn' }); return }
     closeSpawn()
-    C.toast('started ' + r.name + ' · ' + r.shortId + ' in auto mode — it appears here once it reports in', { ms: 7000 })
+    const started = 'started ' + r.name + ' · ' + r.shortId + ' in auto mode — it appears here'
+      + (from ? ', wired, ' : ' ') + 'once it reports in'
+    // The toast is one slot, so a persona the CLI could not find rides on the
+    // same line rather than replacing it.
+    if (r.warning) C.toast(started + ' · ' + r.warning, { ms: 10000, kind: 'warn' })
+    else C.toast(started, { ms: 7000 })
   }
 
   // --- attach / view --------------------------------------------------------
@@ -464,7 +595,32 @@ const MCC = (() => {
   const attach = (deps) => {
     C = deps
     stage = $('cstage'); nodesEl = $('cnodes'); wiresEl = $('cwires'); wctx = wiresEl.getContext('2d')
-    form = $('cspawn'); emptyEl = $('cempty')
+    form = $('cspawn'); emptyEl = $('cempty'); plusEl = $('cplus')
+    // The preset strip over the prompt. cs-model and cs-effort offer closed
+    // sets, so a preset naming a value neither offers leaves the select as it
+    // was and says so, rather than silently starting on a different model.
+    const pickOption = (sel, v) => {
+      if (!v || sel.value === v) return
+      if ([...sel.options].some((o) => o.value === v)) sel.value = v
+      else C.toast('this form offers no ' + v + ' — kept ' + sel.value, { kind: 'warn' })
+    }
+    MCT.mountStrip($('cs-tplstrip'), {
+      read: () => ({
+        prompt: $('cs-prompt').value, model: $('cs-model').value,
+        effort: $('cs-effort').value, name: $('cs-name').value,
+      }),
+      write: (f) => {
+        $('cs-prompt').value = f.prompt
+        pickOption($('cs-model'), f.model)
+        pickOption($('cs-effort'), f.effort)
+        $('cs-name').value = f.name
+      },
+      // requestSubmit, never submit(): it runs the browser's own `required`
+      // validation, so a start from a chip is refused exactly as the button's is.
+      submit: () => form.requestSubmit(),
+      focus: () => $('cs-prompt').focus(),
+      verb: 'starts',
+    })
     $('c-reset').addEventListener('click', async () => {
       const r = await C.post('/api/canvas/reset')
       C.toast(r.error ? 'reset failed: ' + r.error : 'view reset — every node is back in the switchboard layout')
@@ -478,6 +634,7 @@ const MCC = (() => {
     // ⌥-click is the keyboard route. (app.js also tracks ⌥ for its steering
     // marks and shows a mode line about it; that is harmless here.)
     stage.addEventListener('click', (ev) => {
+      if (swallowClick) { swallowClick = false; return }
       if (!ev.altKey || ev.target.closest('.cnode, .cspawn')) return
       ev.preventDefault()
       openSpawn(stagePoint(ev))
@@ -514,14 +671,29 @@ const MCC = (() => {
     // But the innermost thing still closes first. Two of app.js's own overlays
     // can sit ON TOP of this form -- the link dialog, which a wire drag opens
     // over it, and the settings popover, opened by the gear. While either is
-    // up, esc is theirs and this listener must fall through to app.js.
+    // up, esc is theirs and this listener must fall through to app.js. The
+    // preset editor and the preset strip's template mode close first as well:
+    // templates.js's capture listener registers before this one and stops the
+    // key, and the two guards below say the same thing here.
     addEventListener('keydown', (ev) => {
       if (ev.key !== 'Escape' || !form || form.hidden) return
       if (!document.getElementById('linkmodal').hidden) return
       if (!document.getElementById('settingspop').hidden) return
+      if (!document.getElementById('tplmodal').hidden) return
+      if (document.getElementById('cs-tplstrip')?.classList.contains('tplmode')) return
       closeSpawn(); ev.stopImmediatePropagation()
     }, true)
-    addEventListener('resize', () => { if (active) render() })
+    // The gutter is pinned to the stage's VISIBLE band, so it moves when the
+    // stage scrolls. Passive: it never calls preventDefault. Both handlers
+    // return immediately unless the gutter is actually up, so neither costs
+    // anything on an ordinary scroll.
+    stage.addEventListener('scroll', layoutPlus, { passive: true })
+    // The legend has to stay honest when a modifier is pressed WITHOUT moving
+    // the pointer -- pointermove is the only other thing that carries the flags.
+    const onMod = (ev) => { if (drag && drag.kind === 'wire') markPlus(ev) }
+    addEventListener('keydown', onMod)
+    addEventListener('keyup', onMod)
+    addEventListener('resize', () => { layoutPlus(); if (active) render() })
   }
 
   const setView = (name) => {
@@ -537,9 +709,25 @@ const MCC = (() => {
       for (const o of nodesEl.querySelectorAll('.cnode.dragging, .cnode.wiring, .cnode.target')) {
         o.classList.remove('dragging'); o.classList.remove('wiring'); o.classList.remove('target')
       }
+      showPlus(false)
     }
     if (active) render()
   }
 
-  return { attach, setView, render }
+  let spotTimer = null
+  /** Two seconds of a ring on the nodes a caller cares about. Deliberately
+   *  not a selection and not a filter: nothing is hidden, nothing is
+   *  persisted, and a payload arriving mid-spotlight leaves it alone because
+   *  the class is toggled on the reconciled node rather than assigned. */
+  const spotlight = (ids) => {
+    const want = new Set(ids ?? [])
+    if (!nodesEl) return
+    for (const n of nodesEl.querySelectorAll('.cnode')) n.classList.toggle('spot', want.has(n.dataset.id))
+    clearTimeout(spotTimer)
+    spotTimer = setTimeout(() => {
+      for (const n of nodesEl.querySelectorAll('.cnode.spot')) n.classList.remove('spot')
+    }, 2000)
+  }
+
+  return { attach, setView, render, spotlight }
 })()

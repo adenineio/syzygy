@@ -56,6 +56,20 @@
 }
 .cnode:hover { border-color: var(--cyan-deep); }
 .cnode.working { box-shadow: inset 2px 0 0 var(--amber); }
+/* Subagents, mirroring the switchboard card's right-edge tick, and on
+   ::before for the identical reason: `.cnode.working` already owns this
+   element's box-shadow and a same-specificity rule later in the file would
+   delete that left edge outright. ::after is `.cnode.colored`'s ring.
+   12px clear of both ends so neither the soft border-radius nor the sharp
+   9px chamfer clips it. */
+.cnode::before {
+  content: '';
+  position: absolute; right: 0; top: 12px; bottom: 12px; width: 2px;
+  pointer-events: none;
+  background: transparent;
+}
+.cnode[data-agents="running"]::before { background: var(--accent-hot); }
+.cnode[data-agents="idle"]::before    { background: var(--dim); }
 .cnode.dragging { opacity: .82; cursor: grabbing; z-index: 3; }
 .cnode.wiring { border-color: var(--cyan); }
 .cnode.target { border-color: var(--cyan); background: rgba(111,195,223,.10); }
@@ -67,11 +81,16 @@
    Same reasoning and same amber as the switchboard card. */
 /* No outer glow. One (`0 0 18px -6px var(--amber-hot)`) would be clipped to
    invisible by the chamfer above and then appear from nowhere the moment
-   soft/space turned that chamfer off -- and it is not wanted in either state.
+   soft turned that chamfer off -- and it is not wanted in either state.
    `.card.needs` in app.css carries no glow for the same reason. */
 .cnode.needs { border-color: var(--amber); box-shadow: inset 2px 0 0 var(--amber-hot); }
 .cnode.needs:hover { border-color: var(--amber-hot); }
 .cnode.needs.wiring, .cnode.needs.target { border-color: var(--cyan); }
+/* A spotlight is a state, on for two seconds and then off; nothing eases.
+   Under sharp corners the chamfer's clip-path would cut an outline away, so
+   the ring is drawn inside the node there instead. */
+.cnode.spot { outline: 1px solid var(--cyan); outline-offset: 2px; }
+:root[data-corners="sharp"] .cnode.spot { outline: none; box-shadow: inset 0 0 0 1px var(--cyan); }
 .cneed {
   margin-left: 4px; color: var(--amber-hot); font-size: 8px;
   letter-spacing: .1em; text-transform: uppercase; white-space: nowrap;
@@ -79,6 +98,13 @@
 }
 @keyframes cneedpulse { 0%, 100% { opacity: .5 } 50% { opacity: 1 } }
 @media (prefers-reduced-motion: reduce) { .cneed { animation: none; opacity: .95 } }
+/* Which peer's ask this session is working on. A flat label: no pulse, since
+   it is a standing fact rather than something asking for attention. */
+.cpeer {
+  margin-left: 4px; padding: 0 4px; font-size: 8px; letter-spacing: .08em;
+  white-space: nowrap; color: var(--cyan); border: 1px solid var(--cyan);
+  border-radius: var(--r-control);
+}
 
 /* Simply stopped. No border rule and no hue: the node keeps its ordinary
    outline and gains one dim ring, so it reads as "nothing to report" rather
@@ -144,3 +170,33 @@
   border-radius: 0;
   clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
 }
+
+/* The plus gutter. Positioned by canvas.js from MCL.plusRect, in the stage's
+   SCROLLED coordinates -- an absolutely positioned child of a scroll container
+   scrolls with its content, which is why `left` is scrollLeft + clientWidth -
+   width. Above .cnodes (a dragging node is z-index 3) and below .cspawn (5),
+   so the strip means "new session" for the whole of the drag, shadowing any
+   node beneath it. */
+.cplus {
+  position: absolute; z-index: 4;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  border-left: 1px dashed var(--cyan-deep);
+  background: rgba(111, 195, 223, .06);
+  text-align: center; user-select: none;
+}
+.cplus[hidden] { display: none; }
+.cplus.hot { background: rgba(111, 195, 223, .16); border-left-color: var(--cyan); }
+.cplusmark { font-size: 26px; line-height: 1; color: var(--cyan); }
+.cpleg { font-size: 8.5px; line-height: 1.5; letter-spacing: .04em; color: var(--grey); }
+.cplegrow { padding: 2px 3px; }
+.cplegrow.drop { color: var(--dim); }
+/* Two independent flags, so both rows can be lit at once -- there is no
+   precedence rule, which is the whole reason dropMode returns flags. */
+.cplus.inherit .cplegrow.inh, .cplus.quiet .cplegrow.qui { color: var(--amber-hot); }
+.cpleg kbd { border: 1px solid var(--edge-hi); padding: 0 3px; color: var(--dim); }
+
+/* The spawn form in link mode. Both rows are built once by the markup and
+   hidden with MCX.show's `.gone`, never added and removed. */
+.cslink { font-size: 9.5px; color: var(--grey); }
+.cslink b { color: var(--cyan); }
+.csnote { display: flex; flex-direction: column; gap: 4px; }

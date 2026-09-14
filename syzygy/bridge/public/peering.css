@@ -1,0 +1,117 @@
+/* Syzygy -- the Peering view: the link's controls above a drill-in log of
+ * every exchange that has crossed the link, and the record of whichever row
+ * is open beside it. No animation and no transition anywhere in this file.
+ *
+ * `display` lives on the `.on` rule and nowhere else -- see app.css's own
+ * note beside #view-telemetry.on for why a bare `#view-peering { display }`
+ * would paint this view over every other one. */
+#view-peering.on {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 12px 12px;
+  min-height: 0;
+}
+
+.prhead {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+  gap: 8px;
+  max-height: 44vh;
+  min-height: 0;
+}
+.prhead > .panel { overflow-y: auto; min-height: 0; }
+/* peers.css spans #peer-panel across Telemetry's own two-column grid; here
+ * it is one child of a two-column row beside the Safeguard card. */
+#view-peering #peer-panel { grid-column: auto; }
+
+.prbody {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  min-height: 0;
+}
+.prbody:has(#pr-detail:not([hidden])) {
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+}
+#pr-detail[hidden] { display: none; }
+
+#pr-log { display: flex; flex-direction: column; min-height: 0; outline: none; }
+#pr-log .pbody { flex: 1; min-height: 0; }
+
+.prtools {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 12px; font-size: 10px; color: var(--dim);
+  border-bottom: 1px solid var(--edge-hi);
+}
+.prtoolshint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prfiltertext {
+  width: 160px; padding: 3px 7px; font-family: var(--mono); font-size: 10px;
+  background: var(--panel); color: var(--fg); border: 1px solid var(--edge-hi);
+  border-radius: var(--r-input);
+}
+
+.prrow {
+  display: grid;
+  grid-template-columns: 72px 18px 110px 72px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 11px;
+  border-bottom: 1px solid var(--edge-hi);
+  cursor: pointer;
+}
+.prrow[data-selected="true"],
+.prrow[data-open="true"] {
+  background: var(--panel);
+  border-radius: var(--r-surface);
+}
+.prtime, .prmeta { font-variant-numeric: tabular-nums; color: var(--dim); }
+.prarrow { color: var(--dim); text-align: center; }
+.prpeer { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prkind[data-kind="error"] { color: var(--red-hot); border-color: var(--red-hot); }
+.prsummary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prredact {
+  font-size: 8.5px; letter-spacing: .08em; text-transform: uppercase;
+  padding: 1px 5px; border-radius: var(--r-control);
+  border: 1px solid var(--amber); color: var(--amber);
+}
+.prredact[data-off="true"] { border-color: var(--red-hot); color: var(--red-hot); }
+.prpin { color: var(--amber); }
+.prrow[data-pinned="true"] { border-left: 2px solid var(--amber); }
+
+.prolder { margin: 8px auto; display: block; }
+
+.prdetailhead { font-size: 11px; color: var(--dim); margin-bottom: 6px; }
+.prsafeguardline { font-size: 10.5px; color: var(--dim); margin-bottom: 8px; }
+.prsection { margin-bottom: 10px; }
+.prsectionlabel { font-size: 9px; letter-spacing: .12em; text-transform: uppercase; color: var(--grey); margin-bottom: 3px; }
+.prpre {
+  font-family: var(--mono); font-size: 10.5px; white-space: pre-wrap; word-break: break-word;
+  background: var(--panel); border: 1px solid var(--edge-hi); border-radius: var(--r-input);
+  padding: 6px 8px; max-height: 40vh; overflow: auto;
+}
+.prdetailclose { margin-top: 4px; }
+
+.prsgline { font-size: 10.5px; color: var(--dim); margin-bottom: 8px; }
+.prsgwarn { color: var(--amber); }
+.prsgpeer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 0; }
+.prsgpeername { font-size: 11px; }
+.prsgtoggle { font-size: 9.5px; padding: 3px 8px; }
+
+#peer-summary {
+  grid-column: 1 / -1;
+  text-align: left;
+  cursor: pointer;
+  border: 1px solid var(--edge-hi);
+  background: var(--panel);
+  border-radius: var(--r-surface);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 8px 12px;
+}
+
+@media (max-width: 1100px) {
+  .prhead, .prbody { grid-template-columns: minmax(0, 1fr); }
+}

@@ -79,8 +79,11 @@ func padTo(s string, w int) string {
 	return s
 }
 
-// lastRow is the toast, BOARD's link hint, or the short help line. The armed
-// strip takes this row too, once it ships.
+// lastRow is the one row every transient claim competes for, and this is the
+// only place the order lives. Top wins: the toast, the notes form's legend, the
+// armed strip, the leader's hint, the lost relay, the mode's own hint (BOARD's and GRID's link
+// hints, HOTKEYS' editor legend or refused save), the read-only notice, and
+// last the short help line.
 func (m Model) lastRow(f Frame) string {
 	if !f.ShowLast {
 		return ""
@@ -101,6 +104,15 @@ func (m Model) lastRow(f Frame) string {
 	if m.gridForm.Open {
 		return m.gridFormHelp(f)
 	}
+	// The strip outranks the lost relay: a gesture that needs the relay was
+	// cancelled when it went down, so an arm still standing is one that can
+	// land, and the next keypress acting on it is the thing to say.
+	if s := m.armRow(f); s != "" {
+		return s
+	}
+	if s := m.bankRow(f); s != "" {
+		return s
+	}
 	if m.conn == relay.Down && m.everLive {
 		// The connection outranks the link hint: a gesture that cannot reach
 		// the relay must not be the thing standing where the reason would be.
@@ -118,10 +130,13 @@ func (m Model) lastRow(f Frame) string {
 			return hint
 		}
 	case ModeHotkeys:
-		// The armed confirm, the editor's legend and a refused save all live
-		// here, ahead of the short-help row that would otherwise stand where
-		// the reason belongs.
+		// The editor's legend and a refused save live here, ahead of the
+		// short-help row that would otherwise stand where the reason belongs.
 		if hint := m.hkLastRow(f); hint != "" {
+			return hint
+		}
+	case ModeChain:
+		if hint := m.chLastRow(f); hint != "" {
 			return hint
 		}
 	}

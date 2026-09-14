@@ -187,6 +187,7 @@ func (m Model) viewGrid(f Frame, stale bool, budget int) []string {
 		hot := s.ID == m.linkFrom || s.ID == m.dragFrom
 		m.gridCard(c, r, s, i == cursor, hot, s.ID == hover, stale)
 	}
+	m.gridDrawWires(c, lay)
 	m.gridDrawDrag(c, lay, f)
 	rows = append(rows, c.rows()...)
 	rows = append(rows, m.gridPendingRows(f, lay)...)
@@ -491,6 +492,55 @@ func (m Model) gridHoverID() string {
 		return id
 	}
 	return ""
+}
+
+// gridWireLinks is which settled links to draw: all of them, the cursor card's
+// own, or none.
+func (m Model) gridWireLinks() []relay.Link {
+	if !m.gridWires {
+		return nil
+	}
+	if !m.gridWiresFocus {
+		return m.links
+	}
+	i := m.gridCursorIndex()
+	if i < 0 || i >= len(m.sessions) {
+		return nil
+	}
+	return m.linksFor(m.sessions[i].ID)
+}
+
+// gridDrawWires lays the settled links into the board's free channels. Every
+// card is skipped, so a run that has to cross the board passes behind nothing.
+func (m Model) gridDrawWires(c *canvas, lay gridLayout) {
+	links := m.gridWireLinks()
+	if len(links) == 0 {
+		return
+	}
+	index := make(map[string]int, len(m.sessions))
+	for i, s := range m.sessions {
+		index[s.ID] = i
+	}
+	top := m.gridTopRow(lay)
+	rects := make([]gridRect, 0, len(m.sessions))
+	for i := range m.sessions {
+		if r, ok := lay.cardRect(i, top); ok {
+			rects = append(rects, r)
+		}
+	}
+	skip := func(x, y int) bool {
+		for _, r := range rects {
+			if r.contains(x, y) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, w := range routeWires(lay, top, index, links) {
+		for i := 0; i+1 < len(w.Pts); i++ {
+			c.line(w.Pts[i].X, w.Pts[i].Y, w.Pts[i+1].X, w.Pts[i+1].Y, gsWire, skip)
+		}
+	}
 }
 
 // gridDrawDrag draws the braille line from the source card's centre to the

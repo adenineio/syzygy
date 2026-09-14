@@ -86,10 +86,10 @@ func TestHotkeysFrameInvariantAtEveryWidth(t *testing.T) {
 			}
 
 			// Armed: the last row is the confirm.
-			m.hk.armed, m.hk.armedOn, m.hk.armedAt = true, "3", frozen
+			m.arm(Arm{Mode: ModeHotkeys, Key: "x", Target: "3", Label: "CLEAR 3"})
 			assertFrame(t, m.Render(), w, h)
 			assertPaletteOnly(t, m.Render())
-			m.hk.armed = false
+			m.disarm()
 
 			// Refused: the last row is the reason.
 			m.hk.err = "not saved: `hotkeys` is not an array of objects"
@@ -255,9 +255,9 @@ func TestHotkeysCursorAndScopeKeys(t *testing.T) {
 		t.Fatal("t should switch back to GLOBAL")
 	}
 
-	m.hk.armed, m.hk.armedOn, m.hk.armedAt = true, "0", frozen
+	m.arm(Arm{Mode: ModeHotkeys, Key: "x", Target: "0", Label: "CLEAR 0"})
 	m, _ = pressKey(t, m, 'j')
-	if m.hk.armed {
+	if m.hasArm {
 		t.Fatal("moving the cursor must cancel a half-armed clear")
 	}
 }
@@ -277,11 +277,11 @@ func TestClearingASlotTakesTwoPresses(t *testing.T) {
 	m.hk.files.GlobalPath = path
 
 	m, cmd := pressKey(t, m, 'x')
-	if cmd != nil {
-		t.Fatal("the first x must not write anything")
+	if msg, done := settles(t, cmd); done {
+		t.Fatalf("the first x must not write anything, got %#v", msg)
 	}
-	if !m.hk.armed || m.hk.armedOn != "2" {
-		t.Fatalf("the first x should arm slot 2, got armed=%v on %q", m.hk.armed, m.hk.armedOn)
+	if !m.isArmed("x", "2") {
+		t.Fatalf("the first x should arm slot 2, got armed=%v on %q", m.hasArm, m.armed.Target)
 	}
 	if out := ansi.Strip(m.Render()); !contains(out, "CLEAR 2") {
 		t.Fatalf("the armed row should name what a second press clears:\n%s", out)
@@ -319,11 +319,11 @@ func TestClearingASlotTakesTwoPresses(t *testing.T) {
 func TestAnArmedClearExpires(t *testing.T) {
 	m := hkModel(t, 60, 30, hkGlobal, hkProject)
 	m, _ = pressKey(t, m, 'x')
-	if !m.hkIsArmed("2") {
+	if !m.isArmed("x", "2") {
 		t.Fatal("setup: the first x should arm")
 	}
-	m.now = frozen.Add(hkArmed + time.Second)
-	if m.hkIsArmed("2") {
+	m.now = frozen.Add(armWindow + time.Second)
+	if m.isArmed("x", "2") {
 		t.Fatal("an arm must lapse rather than wait forever")
 	}
 	if out := ansi.Strip(m.Render()); contains(out, "CLEAR 2") {
@@ -332,7 +332,7 @@ func TestAnArmedClearExpires(t *testing.T) {
 	// esc disarms too, the way it cancels every other half-made gesture.
 	m.now = frozen
 	m = feed(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
-	if m.hk.armed {
+	if m.hasArm {
 		t.Fatal("esc should cancel the arm")
 	}
 }

@@ -1,0 +1,6 @@
+{"type":"user","message":{"role":"user","content":"Trace the leak through the allocator."}}
+{"type":"assistant","isSidechain":false,"message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":5000,"output_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+{"type":"user","message":{"role":"user","content":"Widen the search to the whole call graph."}}
+{"type":"assistant","isSidechain":false,"message":{"id":"m2","model":"claude-opus-5","usage":{"input_tokens":200,"output_tokens":300,"cache_creation_input_tokens":594800,"cache_read_input_tokens":0}}}
+{"type":"user","message":{"role":"user","content":"Summarize every candidate site found so far."}}
+{"type":"assistant","isSidechain":false,"message":{"id":"m3","model":"claude-opus-5","usage":{"input_tokens":100,"output_tokens":250,"cache_creation_input_tokens":0,"cache_read_input_tokens":819900}}}

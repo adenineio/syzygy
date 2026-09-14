@@ -12,6 +12,15 @@ import { basename } from 'node:path'
 const TTL_MS = 15_000
 const cache = new Map()   // key -> { at, value }
 
+// Keyed by commonDir: { key, value, until }. `key` is the heads string the
+// value was built for, so a clean graph is served until a worktree head
+// moves rather than on a fixed TTL -- a short TTL would re-run a batch of
+// subprocesses on every scan on a machine with many worktrees of one repo,
+// forever, for a graph that had not changed. A build where a git call
+// failed gets a short `until` instead, so one bad timeout cannot freeze a
+// branch empty until its next commit.
+const graphCache = new Map()
+
 /** execFile, never exec: no shell, so a path with a space is safe. A non-zero
  *  exit or a timeout is not an error here -- it means "not a git repo". */
 const git = (args, cwd) =>
@@ -36,7 +45,7 @@ const cached = async (key, at, make) => {
   return value
 }
 
-export const resetCache = () => cache.clear()
+export const resetCache = () => { cache.clear(); graphCache.clear() }
 
 /** `--path-format=absolute` is required: a bare --git-common-dir returns the
  *  relative `.git` when run from the toplevel. Verified on git 2.55.0.
@@ -101,6 +110,111 @@ export const worktreesOf = async (cwd) => {
   if (!real.length) return null
   real[0].isMain = true
   return real
+}
+
+export const GRAPH_COMMITS_PER_BRANCH = 30
+export const GRAPH_BRANCHES_PER_PROJECT = 20
+export const GRAPH_SUBJECT_MAX = 120
+export const GRAPH_RETRY_MS = 60_000
+
+const US = '\x1f'
+
+/** The recompute gate. Every worktree's (branch, head) sorted into one
+ *  string: history can only have changed if one of them moved, so between
+ *  commits the scan pays nothing at all. */
+export const headsKey = (commonDir, worktrees) =>
+  commonDir + '|' + (worktrees ?? [])
+    .map((w) => (w.branch || '(detached)') + '@' + (w.head || ''))
+    .sort()
+    .join(',')
+
+const parseLog = (out) => {
+  const rows = []
+  for (const line of String(out).split('\n')) {
+    if (!line) continue
+    const [sha, parents, subject, at] = line.split(US)
+    if (!sha) continue
+    rows.push({
+      sha,
+      parents: parents ? parents.split(' ').filter(Boolean) : [],
+      subject: String(subject ?? '').slice(0, GRAPH_SUBJECT_MAX),
+      at: Number(at) * 1000 || 0,
+    })
+  }
+  return rows
+}
+
+/** Commit history per branch, for the Projects tab's Graph panel and the
+ *  sandbox's line graph. Bounded three ways and recomputed only when a head
+ *  moves. Every failure is `null` -- never a throw, and never a stale graph
+ *  belonging to a different project, which is why the cache is keyed by the
+ *  common dir and validated against the heads it was built for. A build in
+ *  which any git call itself failed is still cached, but only briefly, so a
+ *  single bad subprocess cannot pin a branch empty for good. */
+export const graphOf = async (commonDir, worktrees, { now = Date.now } = {}) => {
+  const list = worktrees ?? []
+  const main = list.find((w) => w.isMain) ?? list[0]
+  if (!main?.path) return null
+
+  const key = headsKey(commonDir, list)
+  const hit = graphCache.get(commonDir)
+  if (hit && hit.key === key && now() < hit.until) return hit.value
+
+  const names = []
+  for (const w of list) {
+    if (!w.branch) continue          // detached: no ref to log
+    if (!names.includes(w.branch)) names.push(w.branch)
+  }
+  // Main first, so the panel's first row is the one everything else is
+  // measured against.
+  const base = main.branch || null
+  if (base) names.sort((a, b) => (a === base ? -1 : b === base ? 1 : 0))
+  const kept = names.slice(0, GRAPH_BRANCHES_PER_PROJECT)
+  const droppedBranches = names.length - kept.length
+
+  const branches = []
+  let cut = false
+  let failed = false
+  for (const name of kept) {
+    const out = await git(
+      ['log', '--no-color', `--format=%H${US}%P${US}%s${US}%at`,
+       '-n', String(GRAPH_COMMITS_PER_BRANCH + 1), name, '--'],
+      main.path,
+    )
+    if (out === null) failed = true
+    // A branch git will not log is reported as an empty branch rather than
+    // dropped: the worktree exists, and a missing row would read as a
+    // worktree that is not there.
+    const rows = out === null ? [] : parseLog(out)
+    const truncated = rows.length > GRAPH_COMMITS_PER_BRANCH
+    if (truncated) cut = true
+    let ahead = null, behind = null
+    if (base && name !== base) {
+      const counts = await git(['rev-list', '--left-right', '--count', `${base}...${name}`], main.path)
+      if (counts === null) failed = true
+      if (counts) {
+        const [b, a] = counts.trim().split(/\s+/).map(Number)
+        if (Number.isFinite(b) && Number.isFinite(a)) { behind = b; ahead = a }
+      }
+    } else if (base && name === base) {
+      ahead = 0; behind = 0
+    }
+    branches.push({
+      name,
+      head: list.find((w) => w.branch === name)?.head ?? (rows[0]?.sha.slice(0, 7) ?? ''),
+      isMain: name === base,
+      ahead, behind,
+      commits: rows.slice(0, GRAPH_COMMITS_PER_BRANCH),
+      truncated,
+    })
+  }
+
+  // No branch at all (every worktree detached, or a bare repo) is not a
+  // failure -- it is a project with nothing to draw. `null` is reserved for
+  // "the question could not be asked".
+  const value = { base, branches, builtAt: now(), truncated: cut || droppedBranches > 0 }
+  graphCache.set(commonDir, { key, value, until: failed ? now() + GRAPH_RETRY_MS : Infinity })
+  return value
 }
 
 /** Distinct session cwds -> the projects they belong to. Both git calls are

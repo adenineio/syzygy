@@ -91,6 +91,88 @@ await ok('reorder moves the listed ids to the front in order', () => {
   assert.deepEqual(s.all().map((x) => x.title), ['c', 'a', 'b'])
 })
 
+let freshN = 0
+const fresh = () => ({ store: createStore({ file: join(dir, `fresh-${++freshN}.json`) }) })
+
+await ok('a created request records where its title came from', async () => {
+  const { store } = fresh()
+  const a = store.create({ title: 'Typed by hand', ask: 'x' })
+  assert.equal(a.titleSource, 'manual', 'a title typed into the create body is a manual one')
+  const b = store.create({ ask: 'do the thing', title: 'do the thing', titleSource: 'auto' })
+  assert.equal(b.titleSource, 'auto')
+  store.update(b.id, { title: 'My own title' })
+  assert.equal(store.get(b.id).titleSource, 'manual', 'typing a title always wins')
+  store.update(b.id, { titleSource: 'auto' })
+  assert.equal(store.get(b.id).titleSource, 'manual', 'and can never be pushed back to auto by a patch')
+})
+
+await ok('retitle re-slugs, but only while the request is a draft', async () => {
+  const { store } = fresh()
+  const r = store.create({ ask: 'x', title: 'first go', titleSource: 'auto' })
+  const old = r.slug
+  const out = store.retitle(r.id, 'A much better title')
+  assert.equal(out.title, 'A much better title')
+  assert.equal(out.slug, 'a-much-better-title')
+  assert.notEqual(out.slug, old)
+  store.transition(r.id, 'queued')
+  assert.equal(store.retitle(r.id, 'too late'), null, 'the slug is frozen once it is about to become a branch')
+  assert.equal(store.get(r.id).title, 'A much better title')
+})
+
+await ok('relatesTo is a validated merge, never a blind assign', async () => {
+  const { store } = fresh()
+  const r = store.create({ title: 't', ask: 'x' })
+  store.update(r.id, { relatesTo: { kind: 'plan', ref: 'docs/plans/x.md' } })
+  assert.deepEqual(store.get(r.id).relatesTo, { kind: 'plan', ref: 'docs/plans/x.md' })
+  store.update(r.id, { relatesTo: { kind: 'nonsense', ref: 'y' } })
+  assert.deepEqual(store.get(r.id).relatesTo, { kind: 'plan', ref: 'docs/plans/x.md' },
+    'an unknown kind is refused, not stored')
+  store.update(r.id, { relatesTo: { kind: 'spec', ref: 42 } })
+  assert.equal(store.get(r.id).relatesTo.kind, 'plan', 'a non-string ref is refused')
+  store.update(r.id, { relatesTo: null })
+  assert.equal(store.get(r.id).relatesTo, null, 'null clears it')
+  store.update(r.id, { relatesTo: ['plan', 'x'] })
+  assert.equal(store.get(r.id).relatesTo, null, 'an array is not a reference')
+})
+
+await ok('a fanout group id survives an update and cannot be forged into one', async () => {
+  const { store } = fresh()
+  const r = store.create({ title: 't', ask: 'x', fanout: { id: 'g1', n: 1, of: 3 } })
+  assert.deepEqual(r.fanout, { id: 'g1', n: 1, of: 3 })
+  store.update(r.id, { title: 'renamed' })
+  assert.deepEqual(store.get(r.id).fanout, { id: 'g1', n: 1, of: 3 })
+})
+
+await ok('a fanout patch on a request created without one is refused, not adopted', async () => {
+  const { store } = fresh()
+  const r = store.create({ title: 't', ask: 'x' })
+  store.update(r.id, { fanout: { id: 'forged', n: 1, of: 1 } })
+  assert.equal(store.get(r.id).fanout, null)
+})
+
+await ok('a forPeer tag is stored at create only, and no update or transition can add, change or remove it', async () => {
+  const { store } = fresh()
+  const tag = { peer: 'vm', askId: 'a'.repeat(16) }
+  const other = { peer: 'laptop', askId: 'b'.repeat(16) }
+  const tagged = store.create({ title: 't', ask: 'x', forPeer: { ...tag, extra: 1 } })
+  assert.deepEqual(tagged.forPeer, tag)
+  const malformed = store.create({ title: 'm', ask: 'x', forPeer: { peer: 'vm', askId: 'short' } })
+  assert.equal('forPeer' in malformed, false, 'a malformed tag stores no key')
+  const plain = store.create({ title: 'p', ask: 'x' })
+  assert.equal('forPeer' in plain, false, 'an untagged request carries no key')
+
+  store.update(tagged.id, { forPeer: other })
+  store.update(tagged.id, { forPeer: null })
+  assert.deepEqual(store.get(tagged.id).forPeer, tag, 'an update cannot change or remove it')
+  store.update(plain.id, { forPeer: other })
+  assert.equal('forPeer' in store.get(plain.id), false, 'an update cannot add it')
+
+  store.transition(tagged.id, 'queued', { forPeer: other })
+  assert.deepEqual(store.get(tagged.id).forPeer, tag, 'a transition cannot change it')
+  store.transition(plain.id, 'queued', { forPeer: other })
+  assert.equal('forPeer' in store.get(plain.id), false, 'a transition cannot add it')
+})
+
 // ---- persistence ------------------------------------------------------------
 await ok('flush writes atomically and reloads identically', () => {
   const f = join(dir, 'e.json')
@@ -381,74 +463,32 @@ const fakeSpawn = (calls) => (bin, argv, opts) => {
   return child
 }
 
-await ok('start spawns claude with the scoping argv and streams frames out', async () => {
-  const calls = []
-  const store = createStore({ file: join(dir, 'sc1.json') })
-  const r = store.create({ title: 'x', project: RDIR })
-  const sent = []
-  const sc = createScoper({ store, broadcast: (t, d) => sent.push([t, d]), spawn: fakeSpawn(calls) })
-  const started = await sc.start(r.id, 'i want a thing', RDIR)
-  assert.equal(started.ok, true)
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0].opts.cwd, RDIR)
-  assert.equal(calls[0].argv[calls[0].argv.length - 1], 'i want a thing')
-  calls[0].child.emit('{"type":"system","session_id":"sess-1"}\n')
-  calls[0].child.emit('{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}\n')
-  assert.ok(sent.some(([t]) => t === 'scope'), 'frames are broadcast')
-  assert.equal(store.get(r.id).scoping.sessionId, 'sess-1', 'the session id is captured')
-  calls[0].child.finish(0)
-})
-await ok('a second turn resumes rather than starting fresh', async () => {
-  const calls = []
-  const store = createStore({ file: join(dir, 'sc2.json') })
-  const r = store.create({ title: 'x', project: RDIR })
-  const sc = createScoper({ store, broadcast: () => {}, spawn: fakeSpawn(calls) })
-  await sc.start(r.id, 'first', RDIR)
-  calls[0].child.emit('{"type":"system","session_id":"sess-9"}\n')
-  calls[0].child.finish(0)
-  await sc.start(r.id, 'second', RDIR)
-  const i = calls[1].argv.indexOf('--resume')
-  assert.ok(i > 0)
-  assert.equal(calls[1].argv[i + 1], 'sess-9')
-})
-await ok('the concurrency cap refuses with 429 rather than queueing', async () => {
-  const calls = []
-  const store = createStore({ file: join(dir, 'sc3.json') })
-  const ids = [1, 2, 3, 4].map(() => store.create({ title: 'x', project: RDIR }).id)
-  const sc = createScoper({ store, broadcast: () => {}, spawn: fakeSpawn(calls), maxConcurrent: 3 })
-  for (const id of ids.slice(0, 3)) assert.equal((await sc.start(id, 't', RDIR)).ok, true)
-  const refused = await sc.start(ids[3], 't', RDIR)
-  assert.equal(refused.ok, false)
-  assert.equal(refused.code, 429)
-  assert.equal(sc.active(), 3)
-})
-await ok('a finished child frees its slot', async () => {
-  const calls = []
-  const store = createStore({ file: join(dir, 'sc4.json') })
-  const r = store.create({ title: 'x', project: RDIR })
-  const sc = createScoper({ store, broadcast: () => {}, spawn: fakeSpawn(calls), maxConcurrent: 1 })
-  await sc.start(r.id, 't', RDIR)
-  assert.equal(sc.active(), 1)
-  calls[0].child.finish(0)
-  assert.equal(sc.active(), 0)
-})
+/** A bank call needs a thread to render, so every bank case seeds one turn. */
+const seedTurn = (store, id, extra = {}) =>
+  store.update(id, { scoping: { turns: [{ role: 'user', text: 'i want a thing', t: 1 }], costUsd: 0, ...extra } })
+
 await ok('killAll kills every live child', async () => {
   const calls = []
   const store = createStore({ file: join(dir, 'sc5.json') })
   const a = store.create({ title: 'a', project: RDIR }).id
   const b = store.create({ title: 'b', project: RDIR }).id
+  seedTurn(store, a); seedTurn(store, b)
   const sc = createScoper({ store, broadcast: () => {}, spawn: fakeSpawn(calls) })
-  await sc.start(a, 't', RDIR); await sc.start(b, 't', RDIR)
+  const pa = sc.bank(a, RDIR)
+  const pb = sc.bank(b, RDIR)
+  assert.equal(sc.active(), 2, 'two banks running at once')
   sc.killAll()
   assert.ok(calls.every((c) => c.child.killed), 'every child was killed')
   assert.equal(sc.active(), 0)
+  assert.equal((await pa).ok, false)
+  assert.equal((await pb).ok, false)
 })
 await ok('a rejected brief leaves the request scoped with an error, never half-written', async () => {
   const calls = []
   const store = createStore({ file: join(dir, 'sc6.json') })
   const r = store.create({ title: 'x', project: RDIR })
   store.transition(r.id, 'scoped')
-  store.update(r.id, { scoping: { sessionId: 'sess-2', turns: [], costUsd: 0 } })
+  seedTurn(store, r.id)
   const sc = createScoper({ store, broadcast: () => {}, spawn: fakeSpawn(calls) })
   const p = sc.bank(r.id, RDIR)
   calls[0].child.emit(JSON.stringify({ type: 'result', result: '{"nonGoals":["no goal key"]}' }) + '\n')
@@ -464,7 +504,7 @@ await ok('a valid brief is banked and the request becomes queued', async () => {
   const store = createStore({ file: join(dir, 'sc7.json') })
   const r = store.create({ title: 'x', project: RDIR })
   store.transition(r.id, 'scoped')
-  store.update(r.id, { scoping: { sessionId: 'sess-3', turns: [], costUsd: 0 } })
+  seedTurn(store, r.id)
   const sc = createScoper({ store, broadcast: () => {}, spawn: fakeSpawn(calls) })
   const p = sc.bank(r.id, RDIR)
   calls[0].child.emit(JSON.stringify({
@@ -478,22 +518,20 @@ await ok('a valid brief is banked and the request becomes queued', async () => {
   assert.equal(store.get(r.id).brief.goal, 'a real goal')
   assert.deepEqual(store.get(r.id).brief.nonGoals, [], 'absent arrays default to empty')
 })
-// C2: `store.get(requestId).state !== 'queued'` was the only unguarded
-// `store.get(...).` dereference in the tree. A request's delete button is
-// always enabled, including while its bank turn is in flight (minutes), so
-// deleting it mid-turn used to throw a TypeError here -- inside an async
-// HTTP handler with no try/catch, which becomes an unhandled rejection and
-// exits the whole relay process, taking every session's dashboard down.
+// A request's delete button is always enabled, including while its bank call
+// is in flight (minutes). An unguarded `store.get(id).state` there used to
+// throw a TypeError inside an async HTTP handler with no try/catch, which
+// becomes an unhandled rejection and exits the whole relay process.
 await ok('a bank turn whose request is deleted mid-flight resolves without throwing', async () => {
   const calls = []
   const store = createStore({ file: join(dir, 'sc7b.json') })
   const r = store.create({ title: 'x', project: RDIR })
   store.transition(r.id, 'scoped')
-  store.update(r.id, { scoping: { sessionId: 'sess-3b', turns: [], costUsd: 0 } })
+  seedTurn(store, r.id)
   const sc = createScoper({ store, broadcast: () => {}, spawn: fakeSpawn(calls) })
   const p = sc.bank(r.id, RDIR)
-  // Delete the request while the bank turn is still running -- the CLI
-  // child has not closed yet, mirroring a user clicking the row's ✕ mid-turn.
+  // Delete the request while the bank call is still running -- the CLI
+  // child has not closed yet, mirroring a user clicking the row's delete mid-call.
   assert.ok(store.remove(r.id), 'the request existed and is now gone')
   calls[0].child.emit(JSON.stringify({
     type: 'result',
@@ -503,84 +541,61 @@ await ok('a bank turn whose request is deleted mid-flight resolves without throw
   await assert.doesNotReject(p, 'bank() must resolve, never throw or reject, when its request vanishes mid-flight')
   assert.equal(store.get(r.id), null, 'the request stays gone -- nothing resurrects it')
 })
-await ok('a throwing onFrame (broadcast) does not escape the data handler, and the child can still close', async () => {
-  const calls = []
-  const store = createStore({ file: join(dir, 'sc8.json') })
-  const r = store.create({ title: 'x', project: RDIR })
-  // start() itself broadcasts a synchronous 'turn-start' event before any
-  // frame arrives, and a 'turn-end' event once the child closes; both must
-  // succeed so start() and the close handler resolve normally. Only the
-  // broadcast made from inside onFrame for the parsed 'system' frame --
-  // reached via the stdout 'data' handler -- needs to throw, to prove the
-  // data handler survives it.
-  const sc = createScoper({
-    store,
-    broadcast: (t, d) => { if (d?.event?.type === 'system') throw new Error('broadcast blew up') },
-    spawn: fakeSpawn(calls),
-  })
-  const origWrite = process.stderr.write
-  let stderrText = ''
-  process.stderr.write = (chunk) => { stderrText += chunk; return true }
-  try {
-    const started = await sc.start(r.id, 'i want a thing', RDIR)
-    assert.equal(started.ok, true)
-    // This would throw synchronously inside the 'data' listener if unguarded,
-    // which Node treats as an uncaught exception and crashes the process.
-    assert.doesNotThrow(() => calls[0].child.emit('{"type":"system","session_id":"sess-x"}\n'))
-    assert.match(stderrText, new RegExp(r.id), 'stderr names the request id')
-    assert.match(stderrText, /broadcast blew up/, 'stderr names the error')
-  } finally {
-    process.stderr.write = origWrite
-  }
-  // The child must still be able to close normally afterwards.
-  assert.doesNotThrow(() => calls[0].child.finish(0))
-  assert.equal(sc.active(), 0)
-})
-await ok('a spawn error resolves the run as a failure and does not throw out of start()', async () => {
+await ok('a spawn error resolves the bank as a failure and never throws out of it', async () => {
   const calls = []
   const store = createStore({ file: join(dir, 'sc9.json') })
   const r = store.create({ title: 'x', project: RDIR })
+  seedTurn(store, r.id)
   const sc = createScoper({ store, broadcast: () => {}, spawn: fakeSpawn(calls) })
-  const started = await sc.start(r.id, 't', RDIR)
-  assert.equal(started.ok, true, 'start() itself must not throw or refuse')
+  const p = sc.bank(r.id, RDIR)
   // 'error' fires asynchronously in real Node (ENOENT, EACCES, ...), on a
   // path separate from 'close'. With no listener it would re-throw as an
   // uncaught exception; the fake child's synchronous dispatch is enough to
   // prove the listener exists and does not itself throw.
   assert.doesNotThrow(() => calls[0].child.emitError(new Error('spawn ENOENT claude')))
-  // The store write happens in start()'s `.then()` on run()'s promise, a
-  // microtask away from the synchronous emitError() call above.
-  await new Promise((resolve) => setImmediate(resolve))
+  const res = await p
+  assert.equal(res.ok, false)
   assert.match(store.get(r.id).error.message, /spawn failed/)
   assert.match(store.get(r.id).error.message, /ENOENT/)
 })
-await ok('a spawn error frees its concurrency slot, not permanently consuming it', async () => {
+await ok('a spawn error frees its slot, not permanently consuming it', async () => {
   const calls = []
   const store = createStore({ file: join(dir, 'sc10.json') })
   const r = store.create({ title: 'x', project: RDIR })
-  const sc = createScoper({ store, broadcast: () => {}, spawn: fakeSpawn(calls), maxConcurrent: 1 })
-  await sc.start(r.id, 't', RDIR)
+  seedTurn(store, r.id)
+  const sc = createScoper({ store, broadcast: () => {}, spawn: fakeSpawn(calls) })
+  const p = sc.bank(r.id, RDIR)
   assert.equal(sc.active(), 1)
   calls[0].child.emitError(new Error('ENOENT'))
   assert.equal(sc.active(), 0, 'the slot is freed synchronously by settle(), not deferred to the close path')
+  await p
 })
 await ok("'error' followed by 'close' settles exactly once, keeping the spawn-failure message", async () => {
   const calls = []
   const store = createStore({ file: join(dir, 'sc11.json') })
   const r = store.create({ title: 'x', project: RDIR })
+  seedTurn(store, r.id)
   const sc = createScoper({ store, broadcast: () => {}, spawn: fakeSpawn(calls) })
-  await sc.start(r.id, 't', RDIR)
+  const p = sc.bank(r.id, RDIR)
   calls[0].child.emitError(new Error('spawn ENOENT claude'))
-  await new Promise((resolve) => setImmediate(resolve))
+  await p
   const afterError = store.get(r.id).error.message
   assert.match(afterError, /spawn failed/)
   // A 'close' arriving after 'error' must be a no-op on the already-settled
-  // promise -- it must not re-run start()'s `.then()` and overwrite the
+  // promise -- it must not re-run the bank's failure path and overwrite the
   // spawn-failure message with an exit-code message.
   assert.doesNotThrow(() => calls[0].child.finish(1))
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(store.get(r.id).error.message, afterError, 'the close path did not re-settle or overwrite the error')
   assert.equal(sc.active(), 0)
+})
+await ok('bank refuses a request with nothing scoped yet', async () => {
+  const store = createStore({ file: join(dir, 'sc12.json') })
+  const r = store.create({ title: 'x', project: RDIR })
+  const sc = createScoper({ store, broadcast: () => {}, spawn: () => { throw new Error('bank must not spawn with no thread') } })
+  const res = await sc.bank(r.id, RDIR)
+  assert.equal(res.code, 409)
+  assert.match(res.error, /nothing has been scoped/)
 })
 
 // ---- dispatch: the pure halves ---------------------------------------------
@@ -638,6 +653,16 @@ await ok('renderBrief omits empty sections rather than printing empty headings',
   const md = renderBrief({ title: 'T', slug: 't', ask: 'a', brief: { goal: 'g', nonGoals: [], constraints: [], successCriteria: [], openQuestions: [], research: { context7: [], urls: [], files: [] } } })
   assert.equal(/Non-goals/.test(md), false)
   assert.equal(/Open questions/.test(md), false)
+})
+
+await ok('renderBrief carries the reference the dispatched session must read', () => {
+  const md = renderBrief({ title: 'T', ask: 'a', brief: { goal: 'g' },
+    relatesTo: { kind: 'backlog', ref: 'docs/TASKS.md#thing' } })
+  assert.match(md, /## Relates to/)
+  assert.match(md, /backlog/)
+  assert.match(md, /docs\/TASKS\.md#thing/)
+  assert.ok(!renderBrief({ title: 'T', ask: 'a', brief: { goal: 'g' } }).includes('Relates to'),
+    'no section at all when there is no reference')
 })
 
 // the card reads `state` plus whether the plan file exists.
@@ -790,6 +815,53 @@ await ok('the spawn argv is a fixed template with no browser input on it', async
   for (const t of ALLOWED_TOOLS) {
     assert.notEqual(argv[atIdx + 1], t, `individual tool name "${t}" must not appear as its own argv element after --allowedTools`)
   }
+  rmSync(proj, { recursive: true, force: true })
+})
+await ok('a template adds --agent before --allowedTools and unions its tools into the one argument', async () => {
+  const calls = []
+  const store = createStore({ file: join(dir, 'dptpl.json') })
+  const proj = mkdtempSync(join(tmpdir(), 'szg-proj-'))
+  const r = store.create({ title: 'Templated', project: proj, ask: 'x', templateId: 'review' })
+  store.transition(r.id, 'queued')
+  const seen = []
+  const d = createDispatcher({
+    store, broadcast: () => {},
+    run: fakeRun([['--bg', { code: 0, stdout: 'backgrounded · tp11 · templated\n', stderr: '' }]], calls),
+    templateAgent: (req) => { seen.push(req.dispatch?.templateId); return 'syzygy-agents:review' },
+    templateTools: () => ['Read', 'Bash(just test:*)'],
+  })
+  await d.dispatch([r.id])
+  assert.deepEqual(seen, ['review'], 'the thunk is handed the request at dispatch time')
+  const argv = calls.find((c) => c.argv.includes('--bg')).argv
+  const atIdx = argv.indexOf('--allowedTools')
+  const agIdx = argv.indexOf('--agent')
+  assert.ok(agIdx >= 0 && agIdx < atIdx, '--agent must sit before the variadic --allowedTools')
+  assert.equal(argv[agIdx + 1], 'syzygy-agents:review')
+  assert.equal(argv.length, atIdx + 3, '--allowedTools, its one value, and the prompt -- nothing else follows')
+  // Tool names carry spaces (`Bash(git add:*)`), so the one argument is
+  // compared whole rather than split: every base tool, then each extra once.
+  assert.equal(argv[atIdx + 1], [...ALLOWED_TOOLS, 'Bash(just test:*)'].join(' '))
+  assert.equal(argv[atIdx + 1].split('Read').length - 1, 1, 'a tool already allowed is not repeated')
+  assert.equal(argv[argv.length - 1], initialPrompt({ slug: r.slug, date: new Date().toISOString().slice(0, 10) }), 'the prompt is last')
+  rmSync(proj, { recursive: true, force: true })
+})
+await ok('throwing template thunks mean no template, not a failed dispatch', async () => {
+  const calls = []
+  const store = createStore({ file: join(dir, 'dptpl2.json') })
+  const proj = mkdtempSync(join(tmpdir(), 'szg-proj-'))
+  const r = store.create({ title: 'Tpl Throws', project: proj, ask: 'x' })
+  store.transition(r.id, 'queued')
+  const d = createDispatcher({
+    store, broadcast: () => {},
+    run: fakeRun([['--bg', { code: 0, stdout: 'backgrounded · tp22 · tpl-throws\n', stderr: '' }]], calls),
+    templateAgent: () => { throw new Error('boom') },
+    templateTools: () => { throw new Error('boom') },
+  })
+  await d.dispatch([r.id])
+  assert.equal(store.get(r.id).state, 'dispatched')
+  const argv = calls.find((c) => c.argv.includes('--bg')).argv
+  assert.equal(argv.includes('--agent'), false)
+  assert.equal(argv[argv.indexOf('--allowedTools') + 1], ALLOWED_TOOLS.join(' '))
   rmSync(proj, { recursive: true, force: true })
 })
 await ok('a failed spawn marks the request failed and leaves the worktree alone', async () => {
@@ -958,37 +1030,6 @@ await ok('poll() broadcasts nothing when nothing about the open requests changed
   rmSync(proj, { recursive: true, force: true })
 })
 
-// second half: scoping.mjs must not broadcast the whole 'dispatch'
-// payload per assistant frame ("so a long conversation does not
-// re-broadcast the whole queue per token"). The thread panel gets every
-// frame via the 'scope' broadcast regardless; only 'dispatch' broadcasts --
-// the ones that reach renderQueue()'s replaceChildren() -- are counted here.
-await ok('a scoping turn does not broadcast the whole queue once per assistant frame', async () => {
-  const calls = []
-  const store = createStore({ file: join(dir, 'sc12.json') })
-  const r = store.create({ title: 'x', project: RDIR })
-  let dispatchBroadcasts = 0
-  const sc = createScoper({
-    store,
-    broadcast: (t) => { if (t === 'dispatch') dispatchBroadcasts++ },
-    spawn: fakeSpawn(calls),
-  })
-  const p = sc.start(r.id, 'i want a thing', RDIR)
-  await p
-  const before = dispatchBroadcasts
-  // Five separate assistant-text frames in one turn -- the "per token" case.
-  for (let i = 0; i < 5; i++) {
-    calls[0].child.emit(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: `chunk ${i}` }] } }) + '\n')
-  }
-  assert.equal(dispatchBroadcasts, before, 'no dispatch broadcast per assistant frame')
-  assert.equal(store.get(r.id).scoping.turns.filter((t) => t.role === 'assistant').length, 5, 'the turns are still recorded on the store even without a broadcast')
-  calls[0].child.finish(0)
-  // start()'s turn-end broadcast fires from the .then() on run()'s promise --
-  // a microtask away from the synchronous 'close' dispatch finish() just did.
-  await new Promise((resolve) => setImmediate(resolve))
-  assert.equal(dispatchBroadcasts, before + 1, 'exactly one more dispatch broadcast at turn end')
-})
-
 // The worktree-add failure guard is easy to leave untested: deleting
 // `if (add.code !== 0) { fail(...); return null }` passes every other check
 // in this file. This one must fail if that guard is removed.
@@ -1069,6 +1110,19 @@ await ok('garbled help degrades to the baked lists, reported as fallback', () =>
 await ok('parseClaudeOptions never throws on hostile input', () => {
   for (const bad of [{}, [], 42, '('.repeat(500)]) assert.doesNotThrow(() => parseClaudeOptions(bad))
 })
+await ok('parseClaudeOptions reports whether --max-budget-usd exists', () => {
+  const help = [
+    '  --max-budget-usd <amount>             Maximum dollar amount to spend on API',
+    '                                        calls (only works with --print)',
+    "  --model <model>                       Provide an alias (e.g. 'opus')",
+    '  --effort <level>                      Effort level (low, medium, high, xhigh, max)',
+  ].join('\n')
+  assert.equal(parseClaudeOptions(help).maxBudget, true)
+  assert.equal(parseClaudeOptions('  --model <model>\n').maxBudget, false)
+  assert.equal(parseClaudeOptions('').maxBudget, false)
+  // A flag with a similar prefix must not match.
+  assert.equal(parseClaudeOptions('  --max-budget-usd-legacy <n>\n').maxBudget, false)
+})
 
 // ---- the dispatch patch -----------------------------------------------------
 await ok('a dispatch patch MERGES, and cannot clear branch or sessionName', () => {
@@ -1089,7 +1143,7 @@ await ok('a dispatch patch MERGES, and cannot clear branch or sessionName', () =
   s.transition(r.id, 'queued')
   s.transition(r.id, 'dispatched', { dispatch: { ...s.get(r.id).dispatch, branch: 'worktree-m', sessionName: 'm' } })
   s.update(r.id, { dispatch: { model: 'sonnet', effort: 'low' } })
-  assert.deepEqual(s.get(r.id).dispatch, { model: 'sonnet', effort: 'low', branch: 'worktree-m', sessionName: 'm' })
+  assert.deepEqual(s.get(r.id).dispatch, { model: 'sonnet', effort: 'low', branch: 'worktree-m', sessionName: 'm', templateId: null })
 })
 await ok('a dispatch patch cannot forge branch or sessionName', () => {
   // Same deviation as above, same reason: branch/sessionName are established
@@ -1360,63 +1414,29 @@ await ok('a throwing relayInfo does not take the dispatch down', async () => {
   }
 }
 
-// ---- the glance's backlog count ---------------------------------------------
-// REGRESSION. The chip read 0 from its first day because renderGlance asked for
-// `w.backlog`, a key the Projects payload has never had, while the real backlog
-// hangs off `w.tasks[].items[]`. Nothing here covered the view, so a green
-// suite said nothing about it. dispatch.js is browser code, but its IIFE only
-// DEFINES its renderers -- attach() is what touches the DOM -- so it evaluates
-// in Node with no shim, and the counter is reachable as a pure function.
+// ---- the glance ----------------------------------------------------------------
+// dispatch.js is browser code, but its IIFE only DEFINES its renderers --
+// attach() is what touches the DOM -- so it evaluates in Node with no shim. The
+// glance's counts come off the digest now (counts.backlogItems, asserted in
+// test/tasks-digest-harness.mjs), so the pane keeps no counter of its own.
 {
   const vm = await import('node:vm')
   const src = readFileSync(join(ROOT, 'syzygy', 'bridge', 'public', 'dispatch.js'), 'utf8')
-  const { backlogCount, effortProgress, dedupeBacklogSections } = vm.runInNewContext(src + '\n;MCD', {})
-  // Objects/arrays returned from a DIFFERENT vm context carry that context's
-  // own Array/Object prototypes -- structurally identical to the outer
-  // realm's but not reference-equal to them, which fails assert.deepEqual
-  // even when every value matches (verified: `vm.runInNewContext('[]', {})`
-  // fails deepEqual against a literal `[]`). A JSON round-trip discards which
-  // realm made the object and leaves only plain data, so deepEqual can be
-  // used at all here. backlogCount sidesteps this by returning a bare number.
-  const plain = (v) => JSON.parse(JSON.stringify(v))
+  const dispatchExports = vm.runInNewContext(src + '\n;MCD', {})
+  const modelSrc = readFileSync(join(ROOT, 'syzygy', 'bridge', 'public', 'projects-model.js'), 'utf8')
+  const { effortProgress } = vm.runInNewContext(modelSrc + '\n;MCPM', {})
 
-  await ok('backlogCount counts items across the task files of a worktree', () => {
-    const wt = [{ tasks: [{ rel: 'docs/TASKS.md', items: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] }] }]
-    assert.equal(backlogCount(wt), 3)
+  await ok('the glance reads its counts off the digest: MCD exports neither backlogCount nor dedupeBacklogSections', () => {
+    assert.equal(dispatchExports.backlogCount, undefined)
+    assert.equal(dispatchExports.dedupeBacklogSections, undefined)
+    assert.equal(dispatchExports.effortProgress, undefined)
   })
-  await ok('backlogCount ignores the w.backlog key that never existed', () => {
-    // The exact shape the old code believed in. It must contribute nothing.
-    assert.equal(backlogCount([{ backlog: [{ id: 'x' }, { id: 'y' }] }]), 0)
-  })
-  await ok('backlogCount de-duplicates one TASKS.md shared by every worktree', () => {
-    const items = [{ id: 'a' }, { id: 'b' }]
-    const wt = [
-      { isMain: true, tasks: [{ rel: 'docs/TASKS.md', items }] },
-      { tasks: [{ rel: 'docs/TASKS.md', items }] },
-      { tasks: [{ rel: 'docs/TASKS.md', items }] },
-    ]
-    // 6 if summed per worktree; 2 is the honest number of distinct entries.
-    assert.equal(backlogCount(wt), 2)
-  })
-  await ok('backlogCount counts an entry a single worktree adds', () => {
-    const wt = [
-      { isMain: true, tasks: [{ rel: 'docs/TASKS.md', items: [{ id: 'a' }] }] },
-      { tasks: [{ rel: 'docs/TASKS.md', items: [{ id: 'a' }, { id: 'only-here' }] }] },
-    ]
-    assert.equal(backlogCount(wt), 2)
-  })
-  await ok('backlogCount skips ghosts at file level and at item level', () => {
-    const wt = [
-      { tasks: [{ rel: 'docs/TASKS.md', absent: true, diff: 'removed', items: [{ id: 'ghostfile' }] }] },
-      { tasks: [{ rel: 'docs/TASKS.md', items: [{ id: 'real' }, { id: 'ghostitem', absent: true, diff: 'removed' }] }] },
-    ]
-    assert.equal(backlogCount(wt), 1)
-  })
-  await ok('backlogCount tolerates absent, empty and malformed input', () => {
-    assert.equal(backlogCount([]), 0)
-    assert.equal(backlogCount(undefined), 0)
-    assert.equal(backlogCount([{}]), 0)
-    assert.equal(backlogCount([{ tasks: [{ rel: 'docs/TASKS.md' }] }]), 0)
+
+  await ok('the glance\'s backlog chip reads counts.backlogItems, every backlog item rather than headings alone', () => {
+    // renderGlance needs a DOM, so its source is what is pinned: the chip once
+    // read a heading-only count and silently showed a smaller number.
+    assert.match(src, /const backlog = p\.counts\?\.backlogItems \?\? 0/)
+    assert.doesNotMatch(src, /backlogSections/)
   })
 
   // ---- the glance drilldown: effort progress -------------------------------
@@ -1437,66 +1457,8 @@ await ok('a throwing relayInfo does not take the dispatch down', async () => {
     assert.equal(effortProgress({}), '0/0')
   })
 
-  // ---- the glance drilldown: backlog de-duplication ------------------------
-  await ok('dedupeBacklogSections collapses one TASKS.md shared by every worktree', () => {
-    const items = [
-      { id: 'a', kind: 'section', text: 'Section A' },
-      { id: 'b', kind: 'section', text: 'Section B' },
-    ]
-    const wt = [
-      { isMain: true, tasks: [{ rel: 'docs/TASKS.md', items }] },
-      { tasks: [{ rel: 'docs/TASKS.md', items }] },
-      { tasks: [{ rel: 'docs/TASKS.md', items }] },
-    ]
-    // 6 if a naive pass renders every worktree's copy; 2 is the honest count.
-    const out = dedupeBacklogSections(wt)
-    assert.equal(out.length, 2)
-    assert.deepEqual(plain(out).map((s) => s.id), ['a', 'b'], 'first-seen order is preserved')
-  })
-  await ok('dedupeBacklogSections ignores step items, only section headings count', () => {
-    const wt = [{ tasks: [{ rel: 'docs/TASKS.md', items: [
-      { id: 'a', kind: 'section', text: 'Heading' },
-      { id: 'b', kind: 'step', text: 'a checkbox, not a backlog section' },
-    ] }] }]
-    assert.deepEqual(plain(dedupeBacklogSections(wt)).map((s) => s.id), ['a'])
-  })
-  await ok('dedupeBacklogSections skips ghosts at file level and at item level', () => {
-    const wt = [
-      { tasks: [{ rel: 'docs/TASKS.md', absent: true, items: [{ id: 'ghostfile', kind: 'section', text: 'x' }] }] },
-      { tasks: [{ rel: 'docs/TASKS.md', items: [
-        { id: 'real', kind: 'section', text: 'Real section' },
-        { id: 'ghostitem', kind: 'section', text: 'gone', absent: true },
-      ] }] },
-    ]
-    assert.deepEqual(plain(dedupeBacklogSections(wt)).map((s) => s.id), ['real'])
-  })
-  await ok('dedupeBacklogSections unions claimedBy across duplicate copies of the same item', () => {
-    // resolveBacklogClaims (tasks.mjs) attaches a claim to whichever
-    // worktree's copy of a shared slug it happens to visit last -- so the
-    // claim can land on ANY copy, not necessarily the first one a naive
-    // dedupe would keep. This must not silently drop it.
-    const wt = [
-      { tasks: [{ rel: 'docs/TASKS.md', items: [{ id: 'a', kind: 'section', text: 'Shared' }] }] },
-      { tasks: [{ rel: 'docs/TASKS.md', items: [{ id: 'a', kind: 'section', text: 'Shared', claimedBy: [{ id: 's1', name: 'agent-1' }] }] }] },
-    ]
-    const out = dedupeBacklogSections(wt)
-    assert.equal(out.length, 1)
-    assert.deepEqual(plain(out[0].claimedBy), [{ id: 's1', name: 'agent-1' }])
-  })
-  await ok('dedupeBacklogSections does not duplicate the same claimant seen on two copies', () => {
-    const claim = [{ id: 's1', name: 'agent-1' }]
-    const wt = [
-      { tasks: [{ rel: 'docs/TASKS.md', items: [{ id: 'a', kind: 'section', text: 'Shared', claimedBy: claim }] }] },
-      { tasks: [{ rel: 'docs/TASKS.md', items: [{ id: 'a', kind: 'section', text: 'Shared', claimedBy: claim }] }] },
-    ]
-    assert.equal(dedupeBacklogSections(wt)[0].claimedBy.length, 1)
-  })
-  await ok('dedupeBacklogSections tolerates absent, empty and malformed input', () => {
-    assert.deepEqual(plain(dedupeBacklogSections([])), [])
-    assert.deepEqual(plain(dedupeBacklogSections(undefined)), [])
-    assert.deepEqual(plain(dedupeBacklogSections([{}])), [])
-    assert.deepEqual(plain(dedupeBacklogSections([{ tasks: [{ rel: 'docs/TASKS.md' }] }])), [])
-  })
+  // Backlog de-duplication moved to the relay (foldBacklog, tasks-digest.mjs)
+  // and its coverage with it: see test/tasks-digest-harness.mjs.
 }
 
 // ---- the project field ------------------------------------------------------
@@ -1505,33 +1467,6 @@ await ok('a throwing relayInfo does not take the dispatch down', async () => {
 // scoping.mjs would then spawn with that name as the cwd, and node reports a
 // missing cwd as `spawn ... ENOENT`, which reads like the BINARY being
 // missing. The validation is what stops that reaching a spawn at all.
-
-// ---- the scoping `busy` flag rides on the request --------------------------
-await ok('a scoping turn marks the REQUEST busy, and clears it when the turn ends', async () => {
-  const { createScoper } = await import(join(ROOT, 'syzygy', 'bridge', 'scoping.mjs'))
-  const calls = []
-  const store = createStore({ file: join(dir, 'busy.json') })
-  const r = store.create({ title: 'x', project: RDIR })
-  const sc = createScoper({ store, broadcast: () => {}, spawn: fakeSpawn(calls) })
-  await sc.start(r.id, 'hello', RDIR)
-  assert.equal(store.get(r.id).scoping.busy, true, 'busy is set where the pane can read it')
-  calls[0].child.finish(0)
-  await new Promise((res) => setImmediate(res))
-  assert.equal(store.get(r.id).scoping.busy, false, 'and cleared when the turn ends')
-})
-
-await ok('a FAILED scoping turn clears busy too -- it is over either way', async () => {
-  const { createScoper } = await import(join(ROOT, 'syzygy', 'bridge', 'scoping.mjs'))
-  const calls = []
-  const store = createStore({ file: join(dir, 'busy2.json') })
-  const r = store.create({ title: 'x', project: RDIR })
-  const sc = createScoper({ store, broadcast: () => {}, spawn: fakeSpawn(calls) })
-  await sc.start(r.id, 'hello', RDIR)
-  calls[0].child.finish(3)
-  await new Promise((res) => setImmediate(res))
-  assert.equal(store.get(r.id).scoping.busy, false)
-  assert.ok(store.get(r.id).error, 'and the failure is still recorded')
-})
 
 await ok('validateProject refuses a bare repo name, and NAMES the value', () => {
   const r = validateProject('demo-project')
@@ -1565,22 +1500,75 @@ await ok('validateProject is canvas.mjs\'s validateCwd, not a second implementat
   assert.equal(validateProject(dir).project, validateCwd(dir).cwd)
 })
 
-// ---- the scoping child refuses a missing cwd before it spawns ---------------
+// ---- the scoping session refuses a missing cwd before it spawns -------------
 await ok('a scoping turn with a missing project says WHICH thing is missing', async () => {
   const { createScoper } = await import(join(ROOT, 'syzygy', 'bridge', 'scoping.mjs'))
   const store = createStore({ file: join(dir, 'scope-cwd.json') })
   const r = store.create({ title: 'x', project: 'demo-project' })
   const scoper = createScoper({
     store, broadcast: () => {},
-    // If this ever runs, the cwd check did not happen first.
+    // If either of these ever runs, the cwd check did not happen first.
+    run: async () => { throw new Error('run must not be reached for a missing cwd') },
     spawn: () => { throw new Error('spawn must not be reached for a missing cwd') },
+    enqueue: () => { throw new Error('enqueue must not be reached for a missing cwd') },
     claudeBin: '/fake/claude',
   })
-  const out = await scoper.start(r.id, 'hello', 'demo-project')
+  const out = await scoper.startScoping(r.id, 'hello', 'demo-project')
+  assert.equal(out.ok, false)
+  assert.equal(out.code, 400)
   const err = store.get(r.id)?.error?.message ?? out.error ?? ''
   assert.match(String(err), /project directory does not exist: demo-project/,
     `expected a message naming the directory, got: ${JSON.stringify(err)}`)
   assert.ok(!/ENOENT/.test(String(err)), 'never the raw ENOENT, which names the binary')
+  assert.equal(store.get(r.id).scoping, null, 'nothing was started')
+})
+
+// ---- claudeBin: null -- the no-binary hotfix -------------------------------
+// A relay with no usable `claude` at all constructs this module with
+// `claudeBin: null`, never the bare string 'claude'. `run` below is a spy that
+// would happily record a call if one reached it, so an empty `calls` array is
+// the proof nothing was ever spawned -- not `claude`, and not even `git`.
+await ok('claudeBin: null refuses dispatch() before it creates a worktree or spawns anything', async () => {
+  const calls = []
+  const store = createStore({ file: join(dir, 'dp-nobin.json') })
+  const proj = mkdtempSync(join(tmpdir(), 'szg-proj-'))
+  const r = store.create({ title: 'No Binary', project: proj })
+  store.transition(r.id, 'queued')
+  const d = createDispatcher({
+    store, broadcast: () => {}, claudeBin: null,
+    run: fakeRun([['--bg', { code: 0, stdout: 'backgrounded · aa11 · nope\n', stderr: '' }]], calls),
+  })
+  const origWrite = process.stderr.write
+  const writes = []
+  process.stderr.write = (s) => { writes.push(String(s)); return true }
+  let out
+  try { out = await d.dispatch([r.id]) } finally { process.stderr.write = origWrite }
+  assert.equal(calls.length, 0, 'no git worktree add and no claude spawn without a usable binary')
+  assert.equal(out.dispatched.length, 0)
+  assert.equal(out.failed.length, 1)
+  assert.match(store.get(r.id).error.message, /no claude binary with --bg was found/)
+  assert.equal(existsSync(join(proj, '.claude', 'worktrees', 'no-binary')), false,
+    'no worktree is left behind for a dispatch that could never run')
+  assert.ok(writes.some((w) => /no claude binary with --bg was found/.test(w)), 'the refusal reaches stderr')
+  rmSync(proj, { recursive: true, force: true })
+})
+
+await ok('claudeBin: null refuses poll()\'s agents listing -- an open request is left untouched', async () => {
+  const calls = []
+  const store = createStore({ file: join(dir, 'dp-nobin-poll.json') })
+  const proj = mkdtempSync(join(tmpdir(), 'szg-proj-'))
+  const r = store.create({ title: 'Polled, No Binary', project: proj })
+  store.transition(r.id, 'queued')
+  store.transition(r.id, 'dispatched', {
+    session: { shortId: 'zz00', sessionId: 'zz00-full', spawnedAt: 1, status: 'waiting', state: 'blocked', waitingFor: 'permission prompt' },
+  })
+  const d = createDispatcher({ store, broadcast: () => {}, claudeBin: null, run: fakeRun([], calls) })
+  const origWrite = process.stderr.write
+  process.stderr.write = () => true
+  try { await d.poll() } finally { process.stderr.write = origWrite }
+  assert.equal(calls.length, 0, 'no `claude agents` call without a usable binary')
+  assert.equal(store.get(r.id).session.state, 'blocked', 'known state is untouched, never nulled by a refusal')
+  rmSync(proj, { recursive: true, force: true })
 })
 
 rmSync(dir, { recursive: true, force: true })

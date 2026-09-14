@@ -278,8 +278,8 @@ func TestFeedIsNewestFirst(t *testing.T) {
 	}
 }
 
-// The widget takes its height as a parameter, which is what lets CONSOLE reuse
-// it for a three-row mini feed.
+// The widget takes its height as a parameter, so a caller that wants a
+// three-row feed gets exactly three rows.
 func TestFeedRowsHonourASmallBudget(t *testing.T) {
 	f := NewFrame(60, 30)
 	evs := make([]relay.Event, 20)
@@ -492,5 +492,46 @@ func TestFeedDetailTruncatesFromTheRightEndForEachShape(t *testing.T) {
 	sentence := "remember: the palette lives in palette.go and nowhere else"
 	if got := feedDetail(sentence, 24); !strings.HasPrefix(got, "remember:") || !strings.HasSuffix(got, "…") {
 		t.Errorf("a sentence must keep its head: %q", got)
+	}
+}
+
+// A name carrying an escape byte can never shear a row or smuggle in a colour
+// the theme did not choose.
+func TestARowSanitisesWhatItIsGiven(t *testing.T) {
+	r := NewRow(20)
+	r.Add(theme.SBody, "a\x1b[31mb")
+	out := r.String()
+	if strings.Contains(out, "\x1b[31mb") {
+		t.Error("an escape byte survived into the row")
+	}
+	if ansi.StringWidth(out) != 20 {
+		t.Errorf("the row measures %d cells, want 20", ansi.StringWidth(out))
+	}
+	assertPaletteOnly(t, out)
+
+	bell := NewRow(20)
+	bell.Add(theme.SBody, "bell\x07")
+	if bellOut := bell.String(); strings.ContainsRune(bellOut, '\x07') {
+		t.Error("a bell byte survived into the row")
+	}
+}
+
+// f freezes the viewport where the reader is looking, rather than throwing it
+// to the far end of the feed.
+func TestFollowOffLeavesTheViewportWhereItWas(t *testing.T) {
+	m, st, _ := boardModel(t, 60, 40)
+	m = feed(t, m, relay.SnapshotMsg(st))
+	m = pressBoard(t, m, "2")
+	before := ansi.Strip(m.Render())
+	m = pressBoard(t, m, "f")
+	if m.feedFollow {
+		t.Fatal("f did not un-pin follow")
+	}
+	after := ansi.Strip(m.Render())
+	beforeRows := strings.Split(before, "\n")
+	afterRows := strings.Split(after, "\n")
+	// The follow indicator itself changes; the feed rows under it must not.
+	if strings.Join(beforeRows[4:], "\n") != strings.Join(afterRows[4:], "\n") {
+		t.Errorf("f moved the viewport:\nbefore\n%s\nafter\n%s", before, after)
 	}
 }

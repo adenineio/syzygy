@@ -182,4 +182,68 @@ ok('a live session under a DIFFERENT name is irrelevant to this one', () => {
   assert.equal(inheritableCardColor(byName, 'alpha', live), '#111111')
 })
 
+// ------------------------------------------------------------- favourites --
+
+console.log('=== favourites ===')
+
+ok('a favourite survives clearing the colour', () => {
+  const file = freshFile()
+  const c = createCards({ file, now: () => 1 })
+  c.set('one', 's1', '#ff0000')
+  c.setFavourite('one', 's1', true)
+  c.set('one', 's1', '')
+  assert.deepEqual(c.favourites(), [{ name: 'one', color: '' }])
+  assert.equal(c.all().one.favourite, true)
+  assert.equal(c.all().one.color, '')
+})
+
+ok('a favourite with no colour survives a reload', () => {
+  const file = freshFile()
+  createCards({ file, now: () => 1 }).setFavourite('two', 's2', true)
+  const again = createCards({ file, now: () => 2 })
+  assert.deepEqual(again.favourites(), [{ name: 'two', color: '' }])
+})
+
+ok('clearing both the colour and the favourite removes the entry', () => {
+  const file = freshFile()
+  const c = createCards({ file, now: () => 1 })
+  c.set('three', 's3', '#00ff00')
+  c.setFavourite('three', 's3', true)
+  c.setFavourite('three', 's3', false)
+  assert.equal(c.all().three.color, '#00ff00', 'the colour is untouched')
+  c.set('three', 's3', '')
+  assert.equal('three' in c.all(), false)
+  assert.deepEqual(c.favourites(), [])
+})
+
+ok('favourites come back ascending by name, and only the favourites', () => {
+  const file = freshFile()
+  const c = createCards({ file, now: () => 1 })
+  c.set('zeta', 'sz', '#111111')
+  c.setFavourite('zeta', 'sz', true)
+  c.setFavourite('alpha', 'sa', true)
+  c.set('nofav', 'sn', '#222222')
+  assert.deepEqual(c.favourites(), [{ name: 'alpha', color: '' }, { name: 'zeta', color: '#111111' }])
+})
+
+ok('setFavourite refuses a non-boolean and writes nothing', () => {
+  const file = freshFile()
+  const c = createCards({ file, now: () => 1 })
+  const r = c.setFavourite('one', 's1', 'yes')
+  assert.equal(r.ok, false)
+  assert.match(r.error, /favourite must be true or false/)
+  assert.equal(existsSync(file), false, 'a refused write never creates the file')
+})
+
+ok('a failed serialize leaves the previous file byte-identical, with the new field', () => {
+  const file = freshFile()
+  const c = createCards({ file, now: () => 1 })
+  c.setFavourite('one', 's1', true)
+  const before = readFileSync(file, 'utf8')
+  const cycle = {}
+  cycle.self = cycle
+  assert.throws(() => c.set('one', cycle, '#ff0000'))
+  assert.equal(readFileSync(file, 'utf8'), before)
+})
+
 console.log(`\n${pass} passed`)

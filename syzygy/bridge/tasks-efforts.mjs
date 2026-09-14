@@ -22,7 +22,7 @@
 
 const base = (rel) => rel.slice(rel.lastIndexOf('/') + 1)
 
-const progress = (p) => ({ done: p.done ?? 0, reported: p.reported ?? 0, total: p.total ?? 0 })
+export const progress = (p) => ({ done: p.done ?? 0, reported: p.reported ?? 0, total: p.total ?? 0 })
 
 /** The most recent tick anywhere in a copy, for "finished today". Read off the
  *  winning copy only: a stale copy in another worktree has older history by
@@ -35,8 +35,9 @@ const lastChecked = (p) =>
  *  (public/projects.js: `plan.items.find((i) => i.id === plan.currentItemId)`)
  *  but done once here so a consumer that never sees `items` (pane-v2's MINE
  *  view) still gets it. `null` when the plan has no unchecked step: finished,
- *  empty, or a ghost with `currentItemId` already null. */
-const currentItemText = (p) => {
+ *  empty, or a ghost with `currentItemId` already null. Exported for
+ *  tasks.mjs's plan summary, which carries the same text for the same reason. */
+export const currentItemText = (p) => {
   if (!p.currentItemId) return null
   const item = (p.items ?? []).find((i) => i.id === p.currentItemId)
   return item?.text ?? null
@@ -45,8 +46,10 @@ const currentItemText = (p) => {
 /** Is `a` further along than `b`? Verified steps decide it; a reported step
  *  breaks a tie, because a claim beats nothing but never beats a verified one.
  *  Total is the last resort, so a fuller copy of the same plan wins over a
- *  truncated one rather than the order they were scanned in deciding. */
-const ahead = (a, b) =>
+ *  truncated one rather than the order they were scanned in deciding.
+ *  Exported for tasks-digest.mjs, which labels each worktree's copy against
+ *  main's by the same rule, so the two can never disagree about "further". */
+export const ahead = (a, b) =>
   a.done !== b.done ? a.done > b.done
     : a.reported !== b.reported ? a.reported > b.reported
       : a.total > b.total

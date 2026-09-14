@@ -23,6 +23,11 @@ import { readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, basename, join } from 'node:path'
 import { parseBackgrounded } from './dispatch.mjs'
+// A cycle (requests.mjs imports validateCwd from here), and a safe one:
+// SLUG_RE is read only inside spawnRequest's body, never while this module
+// is still evaluating.
+import { SLUG_RE } from './requests.mjs'
+import { sanitizeForPeer } from './peer.mjs'
 
 // How long a SUCCESSFUL listing may omit a record before settleSpawns infers
 // `missing` from that absence. This is the constant's ONE meaning: it is not
@@ -66,10 +71,33 @@ export const DEFAULT_MODEL = 'opus'
 export const DEFAULT_EFFORT = 'high'
 export const NAME_MAX = 60
 export const PROMPT_MAX = 20_000
+// The parked link's note is bounded where /api/link's is not, because this one
+// is PERSISTED: it sits in world.json until the child registers, and an
+// unbounded note would be an unbounded file.
+export const LINK_NOTE_MAX = 4000
 
 const fin = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
 
 export const emptyCanvas = () => ({ nodes: {}, spawnedBy: [], recents: [] })
+
+/** A parked link survives a relay restart only if it still makes sense: a
+ *  non-empty `from`, and a note that is either null (wire only) or a string.
+ *  Anything else is DROPPED rather than repaired -- the same "coerce to the
+ *  shape every consumer relies on" contract the rest of sanitizeCanvas keeps,
+ *  so nothing downstream has to guard it. A note of the wrong type becomes
+ *  null rather than a stringified one: sending `[object Object]` to a session
+ *  is worse than sending nothing. */
+const sanitizePendingLink = (raw) => {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const from = typeof raw.from === 'string' ? raw.from : ''
+  if (!from) return null
+  const out = { from, note: typeof raw.note === 'string' ? raw.note.slice(0, LINK_NOTE_MAX) : null }
+  // `since` only when it is a finite number: a row parked before it
+  // existed simply has none, and resolvePendingLink then skips that check.
+  const since = fin(raw.since)
+  if (since !== null) out.since = since
+  return out
+}
 
 /** Coerce whatever world.json held to the shape every consumer relies on, so
  *  nothing downstream guards it. Same role readClaims plays for claims.json.
@@ -93,12 +121,22 @@ export const sanitizeCanvas = (raw) => {
   if (Array.isArray(r.spawnedBy)) {
     out.spawnedBy = r.spawnedBy
       .filter((s) => s && typeof s === 'object' && typeof s.shortId === 'string' && s.shortId)
-      .map((s) => ({
-        shortId: s.shortId, name: typeof s.name === 'string' ? s.name : '', cwd: typeof s.cwd === 'string' ? s.cwd : '',
-        model: typeof s.model === 'string' ? s.model : DEFAULT_MODEL, effort: typeof s.effort === 'string' ? s.effort : DEFAULT_EFFORT,
-        spawnedAt: fin(s.spawnedAt) ?? 0, sessionId: typeof s.sessionId === 'string' ? s.sessionId : null,
-        state: typeof s.state === 'string' ? s.state : null,
-      }))
+      .map((s) => {
+        const rec = {
+          shortId: s.shortId, name: typeof s.name === 'string' ? s.name : '', cwd: typeof s.cwd === 'string' ? s.cwd : '',
+          model: typeof s.model === 'string' ? s.model : DEFAULT_MODEL, effort: typeof s.effort === 'string' ? s.effort : DEFAULT_EFFORT,
+          spawnedAt: fin(s.spawnedAt) ?? 0, sessionId: typeof s.sessionId === 'string' ? s.sessionId : null,
+          state: typeof s.state === 'string' ? s.state : null,
+        }
+        // Added, never defaulted to null: an ordinary row's shape stays
+        // exactly what it was, and `'pendingLink' in row` is a real question.
+        const pl = sanitizePendingLink(s.pendingLink)
+        if (pl) rec.pendingLink = pl
+        // The same rule for which peer's ask started this spawn.
+        const fp = sanitizeForPeer(s.forPeer)
+        if (fp) rec.forPeer = fp
+        return rec
+      })
       .slice(-SPAWNED_KEEP)
   }
   if (Array.isArray(r.recents)) {
@@ -211,8 +249,30 @@ const cleanName = (name, fallback) => {
 }
 const modelOk = (m) => MODELS.includes(m) || /^claude-[a-z0-9.-]+$/.test(m)
 
+/** The optional `link` on a spawn request: wire the new session to an existing
+ *  one and, unless the note is null, brief it.
+ *
+ *  `hasSession` is INJECTED rather than imported, so this stays pure and the
+ *  harness can drive it with a Set -- the relay passes
+ *  `(id) => sessions.has(id)`. It defaults to refusing everything: a caller
+ *  that forgets the predicate gets no links rather than unchecked ones.
+ *
+ *  `note === null` means "draw the wire and send nothing", which an empty
+ *  string cannot say -- /api/link's empty note still costs the SOURCE a queued
+ *  command, a tool call and a turn. An ABSENT note defaults to null for the
+ *  same reason: the quiet direction is the safe one to get wrong. */
+export const linkOnSpawn = (raw, hasSession = () => false) => {
+  if (raw === null || raw === undefined) return { ok: true, link: null }
+  if (typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: 'link must be an object' }
+  const from = String(raw.from ?? '')
+  if (!from) return { ok: false, error: 'link.from is required' }
+  if (!hasSession(from)) return { ok: false, error: 'link.from does not name a session registered with this relay' }
+  const note = raw.note === null || raw.note === undefined ? null : String(raw.note).slice(0, LINK_NOTE_MAX)
+  return { ok: true, link: { from, note } }
+}
+
 /** The validated, defaulted spawn request. `cwd` has already passed validateCwd. */
-export const spawnRequest = (body, cwd) => {
+export const spawnRequest = (body, cwd, { hasSession = () => false } = {}) => {
   const b = body && typeof body === 'object' ? body : {}
   const prompt = String(b.prompt ?? '').trim().slice(0, PROMPT_MAX)
   if (!prompt) return { ok: false, error: 'a kickoff prompt is required' }
@@ -225,7 +285,16 @@ export const spawnRequest = (body, cwd) => {
   const effort = b.effort == null || b.effort === '' ? DEFAULT_EFFORT : String(b.effort)
   if (!EFFORTS.includes(effort)) return { ok: false, error: `unknown effort ${JSON.stringify(effort)}` }
   const name = cleanName(b.name, basename(cwd) || 'session')
-  return { ok: true, name, prompt, model, effort, cwd }
+  const lk = linkOnSpawn(b.link, hasSession)
+  if (!lk.ok) return { ok: false, error: lk.error }
+  // Refused rather than dropped: a picker that sends a malformed id has a bug
+  // worth surfacing, and a silently untemplated spawn hides it.
+  let templateId = null
+  if (b.templateId != null && b.templateId !== '') {
+    if (typeof b.templateId !== 'string' || !SLUG_RE.test(b.templateId)) return { ok: false, error: 'templateId must be a slug' }
+    templateId = b.templateId
+  }
+  return { ok: true, name, prompt, model, effort, cwd, link: lk.link, templateId }
 }
 
 /** 2, verbatim. An ARRAY. The prompt is its own element, behind the
@@ -234,8 +303,9 @@ export const spawnRequest = (body, cwd) => {
  *  (`update`, `stop`, `doctor`) is read as that subcommand -- either way a
  *  session starts with no prompt at all and nothing says so. Verified live
  *  against claude 2.1.269: the prompt arrives verbatim, `--` does not.
- *  If --allowedTools is ever added here it goes as ONE argument -- it is
- *  variadic and otherwise swallows the prompt (dispatch.mjs:167).
+ *  `--allowedTools` goes as ONE argument -- it is variadic and otherwise
+ *  swallows the prompt -- and is placed so a non-variadic option (`--agent`,
+ *  else `--model`) always follows it.
  *
  *  `pluginDir` (SZG_SPAWN_PLUGIN_DIR, a dev knob -- see spawnSession) inserts
  *  `--plugin-dir <dir>` BEFORE the `--` sentinel: it is an option, and behind
@@ -243,12 +313,24 @@ export const spawnRequest = (body, cwd) => {
  *  it, which is production.
  *
  *  `settings` is a JSON string handed to `--settings`, and it is THE way to set
- *  an environment variable in a `--bg` session. See spawnEnvSettings. */
-export const spawnArgv = ({ name, prompt, model = DEFAULT_MODEL, effort = DEFAULT_EFFORT, pluginDir = null, settings = null }) => [
+ *  an environment variable in a `--bg` session. See spawnEnvSettings.
+ *
+ *  `budgetUsd` inserts `--max-budget-usd <n>` BEFORE the sentinel, the same
+ *  reason `--plugin-dir` does: it is an option, and behind `--` it would
+ *  arrive as two more words of the prompt. A falsy value (null, 0, undefined)
+ *  omits it entirely. On CLI 2.1.270 `--help` describes the flag as "only
+ *  works with --print", so on a `--bg` session it is likely advisory rather
+ *  than enforced -- the cap that actually holds is the relay's own watchdog. */
+export const spawnArgv = ({ name, prompt, model = DEFAULT_MODEL, effort = DEFAULT_EFFORT, pluginDir = null, settings = null, budgetUsd = null, agent = null, allowedTools = null }) => [
   '--bg',
   ...(pluginDir ? ['--plugin-dir', String(pluginDir)] : []),
   ...(settings ? ['--settings', String(settings)] : []),
-  '-n', name, '--permission-mode', 'auto', '--model', model, '--effort', effort, '--', prompt,
+  '-n', name, '--permission-mode', 'auto',
+  ...(allowedTools ? ['--allowedTools', String(allowedTools)] : []),
+  ...(agent ? ['--agent', String(agent)] : []),
+  '--model', model, '--effort', effort,
+  ...(Number(budgetUsd) > 0 ? ['--max-budget-usd', String(Number(budgetUsd))] : []),
+  '--', prompt,
 ]
 
 /** The `--settings` payload that tells a spawned session which relay started
@@ -428,6 +510,63 @@ export const inheritPosition = (nodes, session, liveSessions) => {
   return { nodes: next, from: hit.id }
 }
 
+// ---- the link a spawn parked for its child -----------------------------------
+// A spawn can promise a wire before the far end exists: the child's session id
+// is not knowable until the child itself calls /api/register. So the promise
+// waits on the ledger row and is claimed here.
+
+/** Which parked link, if any, a newly-registered session should take.
+ *
+ *  Two doors, in order of certainty:
+ *    1. `sessionId` -- a SUCCESSFUL `claude agents --json` listing has already
+ *       tied this row to this id (settleSpawns). That is a fact, and no
+ *       ambiguity can arise from it.
+ *    2. the NAME, under inheritPosition's rules verbatim: never when another
+ *       LIVE session wears it, never when two or more parked rows wear it, and
+ *       never from a row a listing has already tied to somebody else, and
+ *       never to a session that STARTED before the spawn was requested.
+ *
+ *  `reason: null` with a record means link it. `'expired'` with a record means
+ *  drop the promise without keeping it. `'ambiguous'` means say so and do
+ *  nothing -- linking the wrong session is worse than linking nothing. */
+export const resolvePendingLink = (spawnedBy, session, liveSessions, now, maxAgeMs = PENDING_MAX_AGE_MS) => {
+  const none = { record: null, reason: 'none' }
+  if (!session?.id) return none
+  const parked = (spawnedBy ?? []).filter((r) => r && r.pendingLink)
+  if (!parked.length) return none
+  const fresh = (r) => now - (r.spawnedAt ?? 0) <= maxAgeMs
+  const exact = parked.find((r) => r.sessionId && r.sessionId === session.id)
+  if (exact) return { record: exact, reason: fresh(exact) ? null : 'expired' }
+  if (!session.name) return none
+  const others = (liveSessions ?? []).filter((s) => s && s.id !== session.id)
+  if (others.some((s) => s.name === session.name)) return { record: null, reason: 'ambiguous' }
+  // A session that started before the spawn was requested cannot be its child.
+  // Skipped, not failed, when either side has no time to compare.
+  const tooOld = (r) => Number.isFinite(session.startedAt) && Number.isFinite(r.pendingLink.since)
+    && session.startedAt < r.pendingLink.since
+  const byName = parked.filter((r) => !r.sessionId && r.name === session.name && !tooOld(r))
+  if (byName.length > 1) return { record: null, reason: 'ambiguous' }
+  if (byName.length === 0) return none
+  return { record: byName[0], reason: fresh(byName[0]) ? null : 'expired' }
+}
+
+/** A parked link is a promise the spawn made and may never keep -- exactly the
+ *  shape of the pending NODE, so it gets exactly the same limit, measured from
+ *  the same `spawnedAt`. Node and link for one spawn therefore die together.
+ *  The ROW is left alone: whether it still counts toward the live count is
+ *  isLiveSpawn's question, not this one's. */
+export const dropExpiredLinks = (spawnedBy, now, maxAgeMs = PENDING_MAX_AGE_MS) => {
+  let changed = false
+  const next = (spawnedBy ?? []).map((r) => {
+    if (!r || !r.pendingLink || now - (r.spawnedAt ?? 0) <= maxAgeMs) return r
+    changed = true
+    const copy = { ...r }
+    delete copy.pendingLink
+    return copy
+  })
+  return { spawnedBy: changed ? next : spawnedBy, changed }
+}
+
 // ---- the spawn ledger and the live count ---------------------------
 
 /** Fail closed. `state == null` means no SUCCESSFUL listing has ever ruled on
@@ -516,8 +655,14 @@ export const pushRecent = (recents, cwd, max = RECENTS_MAX) => {
 // window, so a listing can never re-create the placeholder under a live spawn.
 export const realRun = (bin, argv, opts = {}) =>
   new Promise((resolve) => {
-    execFile(bin, argv, { timeout: 30_000, maxBuffer: 8 * 1024 * 1024, ...opts }, (err, stdout, stderr) =>
+    // `closeStdin` is opt-in and consumed here, never forwarded to execFile:
+    // a probe that reads its refusal off argv alone still gets a stdin left
+    // open, and a child waiting on a pipe that will never write and never
+    // close sits there for the full timeout instead of exiting at once.
+    const { closeStdin, ...rest } = opts
+    const child = execFile(bin, argv, { timeout: 30_000, maxBuffer: 8 * 1024 * 1024, ...rest }, (err, stdout, stderr) =>
       resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') }))
+    if (closeStdin) child.stdin?.end()
   })
 
 // ---- which `claude` ----------------------------------------------------------
@@ -589,11 +734,24 @@ export const pickClaudeBin = async (candidates, probe) => {
  *  `pluginDir` is a development knob (`SZG_SPAWN_PLUGIN_DIR`), unset in
  *  production: it makes the child load the plugin from a checkout other than
  *  the installed one, so a relay running from a branch can spawn sessions
- *  carrying that branch's plugin and therefore talking back to it. */
-export const spawnSession = async ({ canvas, body, run, now = Date.now, claudeBin = 'claude', relayPort = null, relayToken = null, pluginDir = null }) => {
+ *  carrying that branch's plugin and therefore talking back to it.
+ *
+ *  `budgetUsd` is an OPTION, not a `body` field: it is never destructured out
+ *  of `spawnRequest`, so a browser's `/api/spawn` request can never set it. A
+ *  budget is a kill threshold, and only a caller inside the relay itself --
+ *  never a request body -- may name one.
+ *
+ *  `agent` and `allowedTools` are a template's contribution, already resolved
+ *  by the caller (see agent-templates.mjs's templateArgv). They are options
+ *  for the same reason `budgetUsd` is: a body carries at most a `templateId`,
+ *  and this function never reads the template store itself.
+ *
+ *  `forPeer` is an option for the same reason: the relay resolves which peer's
+ *  ask a spawn serves from its own ask log, and a body never names a peer. */
+export const spawnSession = async ({ canvas, body, run, now = Date.now, claudeBin = 'claude', relayPort = null, relayToken = null, pluginDir = null, budgetUsd = null, agent = null, allowedTools = null, hasSession = () => false, forPeer = null }) => {
   const v = validateCwd(body?.cwd)
   if (!v.ok) return { status: 400, body: { error: v.error }, changed: false }
-  const req = spawnRequest(body, v.cwd)
+  const req = spawnRequest(body, v.cwd, { hasSession })
   if (!req.ok) return { status: 400, body: { error: req.error }, changed: false }
   // Nothing refuses here, but the record is still written BEFORE the await. The live count is the tab's only
   // guard now, and a count that only learns about a spawn once `claude --bg`
@@ -601,6 +759,16 @@ export const spawnSession = async ({ canvas, body, run, now = Date.now, claudeBi
   // in which a second click is likely. `starting` is not SETTLED, so
   // isLiveSpawn counts the placeholder from the moment of the request.
   const placeholder = { shortId: null, name: req.name, cwd: v.cwd, model: req.model, effort: req.effort, spawnedAt: now(), sessionId: null, state: 'starting' }
+  // On the PLACEHOLDER as well as the record, because the relay is one event
+  // loop: the child can register while the `await` below is outstanding, and
+  // the only row on the ledger at that moment is this one.
+  // `since` is the REQUEST's time, stamped before `claude --bg` runs: the
+  // record's own spawnedAt is taken after the await, and a child can start
+  // during it. resolvePendingLink's name door will not hand the link to a
+  // session that started before this.
+  if (req.link) placeholder.pendingLink = { ...req.link, since: placeholder.spawnedAt }
+  const tag = sanitizeForPeer(forPeer)
+  if (tag) placeholder.forPeer = tag
   canvas.spawnedBy = [...canvas.spawnedBy, placeholder]
   const drop = () => { canvas.spawnedBy = canvas.spawnedBy.filter((r) => r !== placeholder) }
   let out
@@ -612,7 +780,7 @@ export const spawnSession = async ({ canvas, body, run, now = Date.now, claudeBi
   const settings = spawnEnvSettings({ relayPort, relayToken })
   // A throwing runner must not leave the placeholder behind -- `starting` is
   // not SETTLED, so a stranded one would inflate the count for good.
-  try { out = await run(claudeBin, spawnArgv({ ...req, pluginDir, settings }), { cwd: v.cwd, env: childEnv() }) } catch (err) { drop(); throw err }
+  try { out = await run(claudeBin, spawnArgv({ ...req, pluginDir, settings, budgetUsd, agent, allowedTools }), { cwd: v.cwd, env: childEnv() }) } catch (err) { drop(); throw err }
   const parsed = out.code === 0 ? parseBackgrounded(out.stdout) : null
   if (!parsed) {
     drop()
@@ -621,6 +789,11 @@ export const spawnSession = async ({ canvas, body, run, now = Date.now, claudeBi
   }
   const t = now()
   const record = { shortId: parsed.shortId, name: req.name, cwd: v.cwd, model: req.model, effort: req.effort, spawnedAt: t, sessionId: null, state: null }
+  // Taken from the PLACEHOLDER, never rebuilt from `req`: if the child
+  // registered during the await, the link has already been resolved and
+  // deleted, and rebuilding it here would resurrect a promise already kept.
+  if (placeholder.pendingLink) record.pendingLink = placeholder.pendingLink
+  if (placeholder.forPeer) record.forPeer = placeholder.forPeer
   // Replace the placeholder in place, so a spawn that resolved second does not
   // jump ahead of one that resolved first.
   canvas.spawnedBy = (canvas.spawnedBy.includes(placeholder)

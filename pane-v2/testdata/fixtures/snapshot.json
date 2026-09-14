@@ -1,4 +1,5 @@
 {
+ "payloadVersion": 6,
  "t": 1735689600000,
  "sessions": [
   {
@@ -393,6 +394,7 @@
    "files": {},
    "status": "Waiting for response; turn limit is 93 seconds.",
    "id": "00000000-0000-4000-8000-000000000002",
+   "transcript": "/home/dev/demo/.demo-transcript.jsonl",
    "name": "demo-project",
    "agentName": "demo-project-07",
    "cwd": "/home/dev/demo",
@@ -402,7 +404,20 @@
    "pid": "72641",
    "startedAt": 1735655616160,
    "seenAt": 1735689599629,
-   "working": true
+   "working": true,
+   "root": "/home/dev/demo",
+   "idleSince": null,
+   "needs": "",
+   "lastAnswer": "Ready when you are.",
+   "lastAnswerAt": 1735689599000,
+   "tmux": "demo",
+   "waiting": true,
+   "waitingFor": "a decision on the schema",
+   "kind": "background",
+   "shortId": "a5eb",
+   "jump": "tmux",
+   "color": "#3fb6a8",
+   "spin": { "mode": "thinking", "word": "Pondering", "id": "orrery" }
   },
   {
    "series": [
@@ -1517,5 +1532,41 @@
    "kind": "brief"
   }
  ],
+ "canvas": {
+  "nodes": { "00000000-0000-4000-8000-000000000002": { "x": 232, "y": 126, "name": "demo-project", "t": 1735689000000 } },
+  "spawnedBy": [ { "shortId": "a5eb", "name": "demo-spawn", "cwd": "/home/dev/demo", "model": "opus", "effort": "high", "spawnedAt": 1735689000000, "sessionId": null, "state": "running" } ],
+  "recents": [ "/home/dev/demo" ],
+  "live": 1,
+  "home": "/home/dev/demo"
+ },
+ "dispatch": { "requests": [] },
+ "dispatchOptions": { "models": [], "efforts": [], "source": "fallback" },
+ "usage": null,
+ "usageHistory": [],
+ "afterReset": { "queue": [], "night": null },
+ "steering": { "custom": [] },
+ "findings": [],
+ "sweepQuietMs": 900000,
+ "voice": { "ready": false },
+ "hud": { "spinners": [], "current": null },
+ "orchestrator": { "threads": [], "currentId": "" },
+ "auth": { "enabled": false },
+ "projects": [],
+ "pasteboard": [],
+ "peers": { "enabled": false, "self": "", "list": [], "asks": [], "jobs": [] },
+ "chains": {
+  "00000000-0000-4000-8000-000000000002": {
+   "blocks": [
+    { "id": "demo-b1", "title": "demo: read the handoff and the board", "state": "closed", "by": "heuristic", "pinned": true, "parent": null, "turnCount": 4, "startedAt": 1735655616160, "endedAt": 1735660000000, "rev": 1 },
+    { "id": "demo-b2", "title": "demo: drafter prompts for the branches", "state": "closed", "by": "model", "pinned": false, "parent": "demo-b1", "turnCount": 6, "startedAt": 1735660000000, "endedAt": 1735672000000, "rev": 2 },
+    { "id": "demo-b3", "title": "demo: the digit question", "state": "open", "by": "human", "pinned": false, "parent": "demo-b1", "turnCount": 3, "startedAt": 1735672000000, "endedAt": null, "rev": 3 }
+   ],
+   "open": "demo-b3",
+   "progress": "demo: weighing the two layouts",
+   "rev": 3,
+   "updatedAt": 1735689000000,
+   "refiner": { "paused": false }
+  }
+ },
  "viewers": 1
 }

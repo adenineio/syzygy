@@ -927,6 +927,6 @@ export const register: Register = (on) => {
     const mine = /^mcp__forge__(.+)$/.exec(name)
     if (!mine) return next(e)
     const args = e as unknown as Record<string, unknown>
-    return serve($, mine[1]!, args).then((text) => ({ result: { text } }) as never)
+    return serve($, mine[1]!, args).then((text) => ({ result: text }) as never)
   })
 }

@@ -15,6 +15,10 @@ const S = {
   usage: null,             // { fiveHour, sevenDay, observedAt, stale } or null before the first snapshot -- usage.mjs's parseUsage shape, verbatim
   usageHistory: [],        // ring of { t, usage }: the relay's changed-readings-only sparkline feed
   afterReset: { queue: [] },   // the after-reset queue; the relay is the only writer
+  // The Findings panel; see findings.js. Empty is exactly what a relay
+  // predating the `findings` snapshot field looks like too, same reasoning
+  // as `voice`/`hud` below.
+  findings: [],
   // Voice input; see voice.js. `ready` false and empty env/model/worker is
   // exactly what a relay predating this feature looks like too
   // -- absence must mean off, so this default is
@@ -32,17 +36,24 @@ const S = {
   // `orchestrator` stays undefined until a payload actually carries the
   // field -- an older relay never sends it, and that must render as the
   // blurb simply being absent, never as an empty one (see renderBlurb()).
-  // `orchTurns` and `orchTranscriptHidden` are client-only: the transcript
-  // is not part of the relay's snapshot at all, only the SSE frames that
-  // build it up turn by turn. A turn's own `pending`/`serverId` is how
-  // sendAsk's optimistic echo and the SSE frame that later carries the real
-  // turn id find each other without duplicating.
+  // `orchTurns` and `orchTranscriptHidden` are client-only: the snapshot
+  // carries no turns, only the SSE frames that build them up turn by turn and
+  // the one fetch of the current thread after a snapshot (cmdbar.js). A
+  // turn's own `pending`/`serverId` is how the ask engine's optimistic echo
+  // and the SSE frame that later carries the real turn id find each other
+  // without duplicating.
   // `orchTranscriptHidden` is a VIEW toggle only -- dismissing the
   // panel never touches the conversation itself or `S.orchTurns`; that is
   // what makes it different from POST /api/orchestrator/clear.
   orchestrator: undefined,
   orchTurns: [],
   orchTranscriptHidden: false,
+  // The persisted conversations (cmdbar.js). `orchThreads` is the payload's
+  // bounded header list -- never the turns -- and `orchThreadId` is which one
+  // both surfaces are showing. An older relay sends neither, which reads as
+  // an empty switcher rather than as a throw.
+  orchThreads: [],
+  orchThreadId: null,
   viewers: 1, view: 'control',
   connectedAt: null,      // when this tab's event stream opened, for the clock's tooltip
   peek: null,             // session id hovered on the switchboard
@@ -57,10 +68,14 @@ const S = {
   renaming: null,         // session id whose drawer title is currently a field,
                           // or null. Held so a redraw of the SAME card leaves
                           // a half-typed name alone while a switch to another
-                          // cancels it -- openDrawer runs on every payload.
+                          // cancels it -- MCW.open runs on every payload.
   pointer: { x: 0.5, y: 0.5 },
   focus: null,            // session id shown in the tiles/charts
   connected: false,
+  pasteboard: [],         // stashed prompts; absent on a relay that predates them
+  favourites: [],         // favourite session names; absent on a relay that predates them
+  chains: {},             // { [sessionId]: compact chain }; see chain.js -- {} is
+                          // exactly what a relay predating this feature looks like too
   activity: 0,            // 0..1: decays, but held at a floor while work is
                            // genuinely happening (see ACTIVITY_FLOOR below) --
                            // drives the swarm
@@ -412,15 +427,23 @@ const wireAuthSection = () => {
   }
 }
 
-/* Corner style: sharp (the deck's original chamfer), soft (the default,
-   app.css) or space (fully rounded, pill buttons and inputs). One attribute
-   on <html>, same mechanism as applyTheme -- [data-corners] rather than
-   [data-theme], persisted per browser under its own key. app.css carries the
-   soft VALUES on bare :root, so the only thing this needs to guarantee is
-   that a stored 'sharp' or 'space' preference lands before first paint, the
-   same guarantee applyTheme already gives THEME_KEY -- see the call beside
-   applyTheme's own at the bottom of this file. */
-const CORNERS = { sharp: 'Sharp', soft: 'Soft', space: 'Space-age' }
+/* Corner style: sharp (the deck's original chamfer) or soft (the default,
+   app.css). One attribute on <html>, same mechanism as applyTheme --
+   [data-corners] rather than [data-theme], persisted per browser under its own
+   key. app.css carries the soft VALUES on bare :root, so the only thing this
+   needs to guarantee is that a stored 'sharp' preference lands before first
+   paint, the same guarantee applyTheme already gives THEME_KEY -- see the call
+   beside applyTheme's own at the bottom of this file.
+
+   A third style, 'space', was dropped and
+   its tokens are out of app.css. THE MIGRATION IS THIS MAP AND NOTHING ELSE:
+   applyCorners resolves any name not in CORNERS to 'soft' and then writes the
+   resolved value back under CORNERS_KEY, so a browser holding "space" lands on
+   soft on its first load after the merge, once, silently. Do not add an
+   `if (stored === 'space')` branch -- it would duplicate a rule this function
+   already enforces for every unknown value, and would be a second thing to
+   delete later. */
+const CORNERS = { sharp: 'Sharp', soft: 'Soft' }
 const CORNERS_KEY = 'szg.corners'
 const applyCorners = (name) => {
   const corners = name in CORNERS ? name : 'soft'
@@ -439,7 +462,6 @@ const buildCorners = () => {
     b.dataset.tip = {
       sharp: 'Sharp\nSquare corners, the deck\'s original chamfered bevel.',
       soft: 'Soft\nGently rounded corners. The default.',
-      space: 'Space-age\nFully rounded, pill-shaped buttons and fields -- no glow.',
     }[name]
     b.onclick = () => applyCorners(name)
     box.appendChild(b)
@@ -623,6 +645,9 @@ const buildCard = (id) => {
   // Beside the state dot rather than up in row 1, which already carries the
   // name, the badge and both status flags and is tight at 232px.
   card.appendChild(el('span', 'agentchip'))
+  // Who this session is working for, when a peer's ask put it here. Built once
+  // and hidden with MCX.show, never added and removed -- this card is reused.
+  card.appendChild(el('span', 'peerchip'))
   card.appendChild(el('div', 'grip', '⠿ drag to link'))
   wireCardEvents(card)
   return card
@@ -778,12 +803,33 @@ const fillCard = (card, s) => {
   const agents = s.agents || []
   const running = agents.filter((a) => a.status === 'running').length
   MCX.show(chip, agents.length > 0)
+  // The same fact at card scale. The chip is an 8.5px label in a bottom
+  // corner -- readable when you are looking at one card, invisible when you
+  // are scanning twenty -- so the CARD carries the state as one attribute and
+  // CSS draws it. `none` is a real value, not a removed attribute: `agents` is
+  // an optional payload field, so an ABSENT attribute means "this pane is
+  // drawing an older payload" while `none` means "this session has no
+  // subagents", and those are different facts.
+  //
+  // An attribute, never className: this card is reconciled, not rebuilt, and
+  // assigning className would wipe .colored/.needs/.stopped out from under
+  // MCX. One attribute has exactly one value by construction.
+  MCX.setAttr(card, 'data-agents', running ? 'running' : agents.length ? 'idle' : 'none')
   if (agents.length) {
     MCX.setText(chip, agents.length + (agents.length === 1 ? ' agent' : ' agents'))
     MCX.setAttr(chip, 'data-live', running ? '1' : '0')
     MCX.setAttr(chip, 'title', running
       ? `${running} of ${agents.length} subagent${agents.length === 1 ? '' : 's'} running`
       : `${agents.length} subagent${agents.length === 1 ? '' : 's'}, none running`)
+  }
+  // Which peer's ask put this session to work. The relay adds the key only to
+  // a session that has one, so an older relay simply never shows the chip.
+  const pchip = card.querySelector('.peerchip')
+  const fp = typeof s.forPeer?.peer === 'string' ? s.forPeer : null
+  MCX.show(pchip, !!fp)
+  if (fp) {
+    MCX.setText(pchip, 'for ' + fp.peer)
+    MCX.setAttr(pchip, 'title', 'working on an ask from the peer ' + fp.peer)
   }
   setText(card.querySelector('.name'), s.name || s.repo || s.cwd?.split('/').pop() || s.id.slice(0, 8))
   // `idleSince` is when this session stopped working; seenAt is only when the
@@ -1003,7 +1049,7 @@ const wireCardEvents = (card) => {
     if (!moved || !target || target.dataset.id === from) {
       // A click on a card means "send this here" while a command is armed, and
       // "show me this session" the rest of the time.
-      if (!moved) { if (S.armed) armedClick(from, ev.altKey); else openDrawer(from) }
+      if (!moved) { if (S.armed) armedClick(from, ev.altKey); else MCW.open(from) }
       return
     }
     // Landing the drag does NOT send. The brief the target receives is one
@@ -1382,6 +1428,14 @@ const layoutWires = () => {
   layoutDrag()
 }
 
+MCE.on('sessions', (d) => {
+  S.sessions = d
+  if (!S.sessions.find((s) => s.id === S.focus)) S.focus = bestFocus()
+  renderCards(); renderTiles(); renderHeat(); recomputeMood(); renderPills(); MCC.render()
+  MCW.refreshLastMessage()
+})
+MCE.on('links', (d) => { S.links = d; layoutWires(); MCC.render() })
+
 // ================================================================== metrics
 /* The rail is an OVERVIEW: by default every row here covers the whole board,
    not the focused session, because "one session's context" is not a fact about
@@ -1444,6 +1498,15 @@ const renderUsageRow = () => {
   }
   paint('5h', '5-hour', u?.fiveHour ?? null)
   paint('7d', '7-day', u?.sevenDay ?? null)
+  // The standing state, on the row it governs, so an armed fleet is visible
+  // from the control view without opening Telemetry.
+  const r = S.afterReset?.resume ?? null
+  if (r?.armed) {
+    const both = (r.windows || []).includes('sevenDay')
+    const sub = $('s-usage-5h')
+    sub.textContent = sub.textContent + (both ? ' · armed · 5h+7d' : ' · armed')
+    $('t-usage-5h').dataset.tip += '\nLimit resume is armed: a session this window freezes is prompted to carry on at the reset.'
+  }
 }
 
 const renderTiles = () => {
@@ -1549,31 +1612,552 @@ const renderUsagePanel = () => {
   sparkline($('ch-usage-5h'), seriesFor('fiveHour'), T.accent, true)
   sparkline($('ch-usage-7d'), seriesFor('sevenDay'), T.accent, true)
   renderUsageQueue()
+  renderCreateForm()
+  renderNight()
+  renderResume()
+}
+
+/** A queue entry's state as its chip reads it. `pending` reads as `armed`
+ *  because that is what the entry is: waiting on a reset, not on anyone. */
+const AR_STATE_LABEL = { pending: 'armed', fired: 'fired', failed: 'failed', cancelled: 'cancelled' }
+const AR_STATE_CHIP = { pending: 'armed', fired: 'fired', failed: 'err', cancelled: 'deny' }
+/** Payload keys only the relay writes. It deletes them from every POST
+ *  itself; stripping them here too keeps a duplicate's request honest about
+ *  what it is asking for, while the relay's own strip is what keeps it safe. */
+const AR_RELAY_KEYS = ['auto', 'spawn', 'skipped', 'stoppedAt', 'stopReason', 'episode', 'reason']
+
+/** ⌥-click on a row: the same window, kind, target and payload, re-armed
+ *  against the CURRENT boundary through the ordinary create route. */
+const duplicateEntry = async (e) => {
+  const payload = { ...(e.payload || {}) }
+  for (const k of AR_RELAY_KEYS) delete payload[k]
+  const r = await post('/api/after-reset', { window: e.window, kind: e.kind, target: e.target, payload })
+  if (r.error) { toast(r.error, { ms: 6000, kind: 'warn' }); return }
+  toast(`duplicated — armed for the next ${WINDOW_LABEL[e.window] || e.window} reset`)
 }
 
 /** The after-reset queue's list: one card per entry, a remove
  *  button on each. Removing a PENDING entry cancels it (relay.mjs's
  *  afterReset.cancel -- the store's own history, not a delete) and removing
- *  an already-settled one is a harmless no-op on the relay side, so this
- *  button never needs two different labels for the two cases. */
+ *  an already-settled one clears it away, so this button never needs two
+ *  different labels for the two cases.
+ *
+ *  A REBUILD on every render, not a keyed reconcile: it holds no inputs, so
+ *  there is nothing a rebuild could take out from under the user. The list
+ *  element itself persists, which is what lets `.dupmode` live on it. */
 const renderUsageQueue = () => {
   const box = $('usage-queue'); box.textContent = ''
   const queue = S.afterReset?.queue ?? []
   $('c-usage-queue').textContent = String(queue.length)
   if (!queue.length) { box.appendChild(el('div', 'empty', 'Nothing queued.')); return }
   for (const e of queue) {
+    const p = e.payload || {}
     const row = el('div', 'aritem')
+    row.classList.add('st-' + e.state)
     const from = el('div', 'from', `${WINDOW_LABEL[e.window] || e.window} · ${e.kind}`)
-    from.appendChild(el('span', 'chip' + (e.state === 'failed' ? ' err' : e.state === 'cancelled' ? ' deny' : ''), e.state))
+    const chip = el('span', 'chip', AR_STATE_LABEL[e.state] || e.state)
+    if (AR_STATE_CHIP[e.state]) chip.classList.add(AR_STATE_CHIP[e.state])
+    from.appendChild(chip)
+    // Its own chip, not a variant of the state chip: "the relay chose this"
+    // has to be visible at a glance on a row that is also armed or fired.
+    if (p.auto) from.appendChild(el('span', 'chip auto', 'auto-armed'))
+    from.appendChild(el('span', 'ardup', '⌥-click duplicates'))
     row.appendChild(from)
-    const detail = e.kind === 'prompt' ? (e.payload?.text || '(no prompt text)') : `ids: ${(e.payload?.ids || []).join(', ') || '(none)'}`
-    row.appendChild(el('div', 'q', e.error ? `${detail} — error: ${e.error}` : detail))
+    const detail = e.kind === 'prompt' ? (p.text || '(no prompt text)')
+      : e.kind === 'plan' ? (p.planTitle || p.planName || e.target || '(no plan)')
+      : e.kind === 'resume' ? `${p.sessionName || e.target || '(no session)'} — ${p.reason || 'resumed'}`
+      : e.kind === 'spawn' ? (p.prompt || '(no brief)')
+      : `ids: ${(p.ids || []).join(', ') || '(none)'}`
+    row.appendChild(el('div', 'q', detail))
+    // `skipped` is written only when some ids were not green-lit, so its
+    // absence on a fired row means all of them were.
+    if (e.kind === 'implement' && Array.isArray(p.skipped) && p.skipped.length) {
+      const m = (p.ids || []).length
+      row.appendChild(el('div', 'arline', `${Math.max(0, m - p.skipped.length)} of ${m} green-lit · skipped ${p.skipped.join(', ')}`))
+    }
+    if ((e.kind === 'plan' || e.kind === 'spawn') && p.spawn) row.appendChild(spawnLine(p.spawn))
+    // Verbatim: a summary of a failure is a second, weaker account of it.
+    if (e.error) row.appendChild(el('div', 'arerr', e.error))
+    if (p.stopReason) row.appendChild(el('div', 'arerr', `stopped — ${p.stopReason}`))
     const rm = el('button', 'btn no', 'remove')
     rm.onclick = () => post('/api/after-reset/delete', { id: e.id }).then((r) => { if (r.error) toast('remove failed: ' + r.error) })
     row.appendChild(rm)
+    row.addEventListener('click', (ev) => {
+      if (!ev.altKey || ev.target.closest('button')) return
+      ev.preventDefault()
+      void duplicateEntry(e)
+    })
     box.appendChild(row)
   }
 }
+
+/** A fired plan's session: its name, its branch, and its live state read off
+ *  the roster by shortId. `waiting` carries the reason, because a night run
+ *  parked on a question is the thing worth seeing in the morning. */
+const spawnLine = (sp) => {
+  const line = el('div', 'arline')
+  const s = sp.shortId ? S.sessions.find((x) => x.shortId === sp.shortId) : null
+  const name = sp.name || sp.shortId || 'session'
+  if (s) {
+    const b = el('button', 'arsess', name); b.type = 'button'
+    b.onclick = () => MCW.open(s.id)
+    line.appendChild(b)
+  } else {
+    line.appendChild(el('span', null, name))
+  }
+  if (sp.branch) line.appendChild(el('span', null, sp.branch))
+  const state = !s ? 'not live' : s.waiting ? `waiting · ${s.waitingFor || 'no reason reported'}` : s.working ? 'working' : 'idle'
+  line.appendChild(el('span', s?.waiting ? 'waiting' : null, state))
+  return line
+}
+
+// Holding ⌥ paints the duplicate affordance on every queue row. Cleared on
+// blur and on a tab switch, since a keyup that happens elsewhere never
+// arrives here and the list would otherwise stay in duplicate mode.
+const setDupMode = (on) => {
+  $('usage-queue').classList.toggle('dupmode', on)
+  $('ar-disrupted').classList.toggle('dupmode', on)
+}
+addEventListener('keydown', (ev) => { if (ev.key === 'Alt') setDupMode(true) })
+addEventListener('keyup', (ev) => { if (ev.key === 'Alt') setDupMode(false) })
+addEventListener('blur', () => setDupMode(false))
+document.addEventListener('visibilitychange', () => setDupMode(false))
+
+// ------------------------------------------------ queue work: the create form
+/* The form's markup is static in index.html and wired once below. The panel
+   re-renders every few seconds, so a refill happens only when a control's
+   source data actually changed, and never to a control that has focus. A
+   control the user has changed is refilled only if their choice survives the
+   refill; otherwise it is left exactly as they set it. */
+const AR = {
+  kind: 'prompt', window: 'fiveHour',
+  keys: {},            // control id -> JSON key of the data it was last filled from
+  edited: new Set(),   // control ids the user has changed since their last fill
+  plans: new Map(),    // plan <select> value -> the eligible plan it names, as last filled
+  nightKey: null,      // JSON key of the night settings last written into the block
+  statusKey: null,     // JSON key of the status line last drawn
+}
+const AR_FIELD = /^(INPUT|TEXTAREA|SELECT)$/
+const AR_KIND_KEYS = { p: 'prompt', i: 'implement', l: 'plan', s: 'spawn' }
+
+/** Refill a <select>. Returns true when it did, so a caller holding a lookup
+ *  beside the options can swap that lookup in the same breath. */
+const fillArSelect = (sel, options) => {
+  const key = JSON.stringify(options)
+  if (AR.keys[sel.id] === key || document.activeElement === sel) return false
+  const prev = sel.value
+  const survives = options.some((o) => o.value === prev)
+  if (AR.edited.has(sel.id) && prev && !survives) return false
+  sel.textContent = ''
+  for (const o of options) { const n = el('option', null, o.label); n.value = o.value; sel.appendChild(n) }
+  if (survives) sel.value = prev
+  AR.keys[sel.id] = key
+  return true
+}
+
+const fillArChecks = (rows) => {
+  const list = $('ar-implement-list')
+  const key = JSON.stringify(rows)
+  if (AR.keys[list.id] === key || list.contains(document.activeElement)) return
+  const ticked = new Set([...list.querySelectorAll('input:checked')].map((c) => c.value))
+  if (AR.edited.has(list.id) && [...ticked].some((id) => !rows.some((r) => r.id === id))) return
+  list.textContent = ''
+  for (const r of rows) {
+    const lab = el('label', 'archeck')
+    const box = el('input'); box.type = 'checkbox'; box.value = r.id; box.checked = ticked.has(r.id)
+    lab.appendChild(box); lab.appendChild(el('span', null, r.label))
+    list.appendChild(lab)
+  }
+  AR.keys[list.id] = key
+}
+
+/** Fill the three kind panes. Every empty choice list is a sentence, never a
+ *  blank control. Nothing is filled while the form is closed; opening it
+ *  calls this straight away. */
+const renderCreateForm = () => {
+  if ($('ar-form').hidden) return
+
+  const sessions = S.sessions.map((s) => ({ value: s.id, label: nameOf(s.id) }))
+  fillArSelect($('ar-prompt-target'), sessions)
+  $('ar-prompt-target').hidden = !sessions.length
+  $('ar-prompt-none').hidden = sessions.length > 0
+
+  // Exactly the requests the relay's implement path will act on: planned,
+  // with a session, and that session registered here. Anything looser would
+  // offer a green light the relay then skips.
+  const live = new Set(S.sessions.map((s) => s.id))
+  const reqs = (S.dispatch?.requests ?? [])
+    .filter((r) => r.state === 'planned' && r.session?.sessionId && live.has(r.session.sessionId))
+    .map((r) => ({ id: String(r.id), label: `${r.title} · ${r.slug} · ${nameOf(r.session.sessionId)}` }))
+  fillArChecks(reqs)
+  $('ar-implement-list').hidden = !reqs.length
+  $('ar-implement-none').hidden = reqs.length > 0
+
+  // The relay's own eligibility list, never a second rule computed here. A
+  // relay with no `night` field predates plan entries altogether, and says so.
+  const night = S.afterReset?.night ?? null
+  const eligible = night?.eligible ?? []
+  const planOpts = eligible.map((p) => ({ value: p.key, label: `${p.title || p.name} — ${p.project}` }))
+  if (fillArSelect($('ar-plan-target'), planOpts)) AR.plans = new Map(eligible.map((p) => [p.key, p]))
+  $('ar-plan-old').hidden = night != null
+  $('ar-plan-none').hidden = night == null || eligible.length > 0
+  $('ar-plan-target').hidden = !eligible.length
+  $('ar-plan-budget-label').hidden = !eligible.length
+  $('ar-plan-budget').placeholder = night ? `${night.budgetUsd} (night default)` : 'night default'
+}
+
+const setArKind = (kind) => {
+  AR.kind = kind
+  for (const b of $('ar-kind').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.kind === kind))
+  for (const k of ['prompt', 'implement', 'plan', 'spawn']) $('ar-pane-' + k).hidden = k !== kind
+}
+const setArWindow = (w) => {
+  AR.window = w
+  for (const b of $('ar-window').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.window === w))
+}
+const openArForm = () => {
+  $('ar-form').hidden = false
+  $('ar-open').hidden = true
+  renderCreateForm()
+  // The form itself, not its first field, so the modal keys are live at once.
+  $('ar-form').focus()
+}
+const closeArForm = () => {
+  $('ar-form').hidden = true
+  $('ar-open').hidden = false
+  $('ar-open').focus()
+}
+const clearArForm = () => {
+  $('ar-prompt-text').value = ''
+  $('ar-plan-budget').value = ''
+  $('ar-spawn-cwd').value = ''
+  $('ar-spawn-prompt').value = ''
+  $('ar-spawn-name').value = ''
+  for (const c of $('ar-implement-list').querySelectorAll('input:checked')) c.checked = false
+  AR.edited.clear()
+}
+
+/** Arm what the form describes. ⇧ fires it now, through the same function
+ *  the scheduler calls; ⌥ keeps the form open with its values for queueing
+ *  several in a row. The relay's error is shown verbatim, and the form stays
+ *  open on any error so nothing typed is lost. */
+const armAfterReset = async ({ shiftKey = false, altKey = false } = {}) => {
+  const body = { window: AR.window, kind: AR.kind }
+  if (AR.kind === 'prompt') {
+    const target = $('ar-prompt-target').value
+    const text = $('ar-prompt-text').value.trim()
+    if (!target) { toast('no live session to prompt'); return }
+    if (!text) { toast('write the prompt first'); return }
+    body.target = target
+    body.payload = { text }
+  } else if (AR.kind === 'implement') {
+    const ids = [...$('ar-implement-list').querySelectorAll('input:checked')].map((c) => c.value)
+    if (!ids.length) { toast('tick at least one request to green-light'); return }
+    body.payload = { ids }
+  } else if (AR.kind === 'spawn') {
+    const cwd = $('ar-spawn-cwd').value.trim()
+    const prompt = $('ar-spawn-prompt').value.trim()
+    if (!cwd) { toast('a new session needs a directory'); return }
+    if (!prompt) { toast('write the brief first'); return }
+    body.payload = { cwd, prompt, name: $('ar-spawn-name').value.trim() }
+  } else {
+    const plan = AR.plans.get($('ar-plan-target').value)
+    if (!plan) { toast('no plan picked'); return }
+    body.target = plan.rel
+    body.payload = { mainRoot: plan.mainRoot, project: plan.project, planName: plan.name, planTitle: plan.title }
+    const budget = $('ar-plan-budget').value.trim()
+    if (budget) body.payload.budgetUsd = Number(budget)
+  }
+  if (shiftKey) body.now = true
+  const btn = $('ar-arm'); btn.disabled = true
+  const r = await post('/api/after-reset', body)
+  btn.disabled = false
+  if (r.error) { toast(r.error, { ms: 6000, kind: 'warn' }); return }
+  if (r.entry?.state === 'failed') { toast(r.entry.error || 'failed', { ms: 6000, kind: 'warn' }); return }
+  toast(shiftKey ? `fired — ${AR_STATE_LABEL[r.entry?.state] || r.entry?.state || 'sent'}` : `armed for the next ${WINDOW_LABEL[AR.window]} reset`)
+  if (altKey) return
+  clearArForm()
+  closeArForm()
+}
+
+$('ar-open').addEventListener('click', openArForm)
+$('ar-close').addEventListener('click', closeArForm)
+$('ar-arm').addEventListener('click', (ev) => { void armAfterReset({ shiftKey: ev.shiftKey, altKey: ev.altKey }) })
+for (const b of $('ar-kind').querySelectorAll('button')) b.addEventListener('click', () => setArKind(b.dataset.kind))
+for (const b of $('ar-window').querySelectorAll('button')) b.addEventListener('click', () => setArWindow(b.dataset.window))
+for (const id of ['ar-prompt-target', 'ar-prompt-text', 'ar-plan-target', 'ar-plan-budget', 'ar-spawn-cwd', 'ar-spawn-prompt', 'ar-spawn-name']) {
+  $(id).addEventListener('input', () => AR.edited.add(id))
+}
+$('ar-implement-list').addEventListener('change', () => AR.edited.add('ar-implement-list'))
+
+// The modal layer, on the form element rather than the document, so it is
+// live only while focus is inside the form. Every handled key stops
+// propagating: Escape must not also reach the page's Escape router, and Enter
+// must not also reach the steering layer's.
+$('ar-form').addEventListener('keydown', (ev) => {
+  const t = ev.target
+  const tag = t instanceof Element ? t.tagName : ''
+  if (ev.key === 'Escape') {
+    ev.preventDefault(); ev.stopPropagation()
+    closeArForm()
+    return
+  }
+  if (ev.key === 'Enter' && !ev.metaKey && !ev.ctrlKey) {
+    // In a textarea ⇧Enter stays a line break: firing a prompt the instant
+    // someone reaches for a new line would spend the window by accident.
+    if (tag === 'TEXTAREA' && ev.shiftKey) return
+    // The kind, window and close buttons keep their own Enter.
+    if (tag === 'BUTTON' && t.id !== 'ar-arm') return
+    ev.preventDefault(); ev.stopPropagation()
+    void armAfterReset({ shiftKey: ev.shiftKey, altKey: ev.altKey })
+    return
+  }
+  // Letters are typing inside a field: "plan" typed into the prompt box must
+  // not switch the kind three times.
+  if (AR_FIELD.test(tag) || ev.metaKey || ev.ctrlKey || ev.altKey) return
+  const key = ev.key.toLowerCase()
+  if (AR_KIND_KEYS[key]) {
+    ev.preventDefault(); ev.stopPropagation()
+    setArKind(AR_KIND_KEYS[key])
+  } else if (key === 'w') {
+    ev.preventDefault(); ev.stopPropagation()
+    setArWindow(AR.window === 'fiveHour' ? 'sevenDay' : 'fiveHour')
+  } else if (key === 'r') {
+    ev.preventDefault(); ev.stopPropagation()
+    void armResume({ shiftKey: ev.shiftKey })
+  }
+})
+
+// ---------------------------------------------------------- queue work: night
+const AR_NIGHT_CONTROLS = [
+  { id: 'ar-night-enabled', field: 'enabled', read: (c) => c.checked, write: (c, n) => { c.checked = n.enabled === true } },
+  { id: 'ar-night-start', field: 'start', read: (c) => c.value, write: (c, n) => { c.value = n.start ?? '' } },
+  { id: 'ar-night-end', field: 'end', read: (c) => c.value, write: (c, n) => { c.value = n.end ?? '' } },
+  { id: 'ar-night-budget', field: 'budgetUsd', read: (c) => (c.value === '' ? null : Number(c.value)), write: (c, n) => { c.value = n.budgetUsd ?? '' } },
+  { id: 'ar-night-hours', field: 'maxHours', read: (c) => (c.value === '' ? null : Number(c.value)), write: (c, n) => { c.value = n.maxHours ?? '' } },
+]
+
+const hhmm = (t) => new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false })
+
+/** The night block. A relay with no `night` field predates night hours and the
+ *  block says exactly that -- reading it as "off" would make "the feature did
+ *  not land" and "the relay is older than the page" look identical. */
+const renderNight = () => {
+  $('ar-night').hidden = false
+  const n = S.afterReset?.night ?? null
+  $('ar-night-old').hidden = n != null
+  $('ar-night-body').hidden = n == null
+  $('ar-night-status').hidden = n == null
+  if (!n) { $('ar-night-err').hidden = true; return }
+  const key = JSON.stringify([n.enabled, n.start, n.end, n.budgetUsd, n.maxHours])
+  if (AR.nightKey !== key) {
+    let complete = true
+    for (const c of AR_NIGHT_CONTROLS) {
+      const node = $(c.id)
+      if (document.activeElement === node || AR.edited.has(c.id)) { complete = false; continue }
+      c.write(node, n)
+    }
+    if (complete) AR.nightKey = key
+  }
+  renderNightStatus(n)
+}
+
+/** One line, the relay's own account: armed, off, held with the relay's
+ *  reason, or active. Nothing here decides anything. */
+const renderNightStatus = (n) => {
+  const armed = n.armed ? (S.afterReset?.queue ?? []).find((e) => e.id === n.armed) : null
+  let text, cls
+  if (armed) {
+    const t = armed.armedResetsAt
+    const title = armed.payload?.planTitle || armed.payload?.planName || armed.target
+    text = `armed — ${title}` + (Number.isFinite(t) ? ` fires at ${hhmm(t)} · in ${until(t)}` : ' fires at the next reset')
+    cls = 'armed'
+  } else if (!n.enabled) {
+    text = 'off'; cls = 'off'
+  } else if (n.held) {
+    text = `held: ${n.held}`; cls = 'held'
+  } else {
+    text = n.active ? 'active' : Number.isFinite(n.armsAt) ? `arms for the ${hhmm(n.armsAt)} reset` : 'active'
+    cls = 'active'
+  }
+  const key = JSON.stringify([text, cls, armed?.id ?? null])
+  if (AR.statusKey === key) return
+  AR.statusKey = key
+  const box = $('ar-night-status')
+  box.textContent = ''
+  box.classList.remove('armed', 'off', 'held', 'active')
+  box.classList.add(cls)
+  box.appendChild(el('span', null, text))
+  if (armed) {
+    const b = el('button', 'btn no', 'cancel'); b.type = 'button'
+    b.onclick = () => post('/api/after-reset/delete', { id: armed.id }).then((r) => { if (r.error) toast('cancel failed: ' + r.error) })
+    box.appendChild(b)
+  }
+}
+
+/** True while the arm write is in flight, so a redraw leaves the settings
+ *  pop's switch on what was clicked until the relay answers. */
+let resumeToggling = false
+
+/** The limit-resume block. A relay with no `resume` field predates the feature
+ *  and the block says exactly that -- reading it as "disarmed" would make "the
+ *  feature did not land" and "the relay is older than the page" identical. */
+const renderResume = () => {
+  $('ar-resume').hidden = false
+  const r = S.afterReset?.resume ?? null
+  $('ar-resume-old').hidden = r != null
+  $('ar-resume-body').hidden = r == null
+  $('ar-resume-status').hidden = r == null
+  // The settings pop's switch follows the same field as the arm button. Left
+  // alone while its own write is in flight, so it never flickers back to the
+  // old value between the click and the relay's answer.
+  const sw = $('resume-enable')
+  $('resume-old').hidden = r != null
+  if (!resumeToggling) {
+    sw.checked = !!r?.armed
+    sw.disabled = r == null
+  }
+  if (!r) { $('ar-disrupted').textContent = ''; $('c-ar-disrupted').textContent = '0'; return }
+  $('ar-resume-arm').setAttribute('aria-pressed', String(!!r.armed))
+  $('ar-resume-arm').textContent = r.armed ? 'armed' : 'arm'
+  $('ar-resume-wins').textContent = (r.windows || []).map((w) => WINDOW_LABEL[w] || w).join(' + ')
+  const box = $('ar-resume-status')
+  box.textContent = ''
+  box.classList.remove('armed', 'off', 'held', 'active')
+  // Armed with no episode open is the ordinary resting state, not a refusal,
+  // and a dark reading no longer holds anything: the clock proves the reset.
+  if (!r.armed) { box.classList.add('off'); box.appendChild(el('span', null, 'off — sessions stopped by the limit stay stopped')) }
+  else if (!r.episode) { box.classList.add('active'); box.appendChild(el('span', null, 'armed — watching for the limit')) }
+  else if (r.held) { box.classList.add('held'); box.appendChild(el('span', null, `held: ${r.held}`)) }
+  else { box.classList.add('armed'); box.appendChild(el('span', null, `the window is spent — resuming at ${hhmm(r.episode.resetsAt)}`)) }
+  if (r.lastFire) box.appendChild(el('span', null, `last reset: ${r.lastFire.fired} resumed, ${r.lastFire.failed} failed`))
+  renderDisrupted(r.disrupted ?? [])
+}
+
+/** One row per session the relay believes the limit stopped, with the sentence
+ *  that admitted it -- a list with no reasoning on it is a list nobody can
+ *  argue with. Rebuilt in full: it holds no input, so there is nothing a
+ *  rebuild could take out from under the user, and the list element itself
+ *  persists, which is what lets `.dupmode` live on it. */
+const renderDisrupted = (rows) => {
+  const box = $('ar-disrupted'); box.textContent = ''
+  $('c-ar-disrupted').textContent = String(rows.length)
+  if (!rows.length) { box.appendChild(el('div', 'empty', 'Nothing frozen by the limit.')); return }
+  for (const row of rows) {
+    const node = el('div', 'aritem')
+    if (row.excluded) node.classList.add('st-cancelled')
+    const head = el('div', 'from', row.name || row.id)
+    if (row.excluded) head.appendChild(el('span', 'chip deny', 'excluded'))
+    else if (!row.eligible) head.appendChild(el('span', 'chip fired', 'resumed'))
+    head.appendChild(el('span', 'ardup', '⌥ excludes · ⇧ resumes now'))
+    node.appendChild(head)
+    node.appendChild(el('div', 'q', row.reason))
+    node.addEventListener('click', (ev) => {
+      if (ev.target.closest('button')) return
+      if (ev.altKey) { ev.preventDefault(); void toggleExclude(row) }
+      else if (ev.shiftKey) { ev.preventDefault(); void resumeNow(row) }
+      else if (S.sessions.some((s) => s.id === row.id)) MCW.open(row.id)
+    })
+    box.appendChild(node)
+  }
+}
+
+const resumeErr = (r) => {
+  const err = $('ar-resume-err')
+  if (r.error) { err.textContent = r.field ? `${r.field}: ${r.error}` : r.error; err.hidden = false; return true }
+  err.hidden = true
+  return false
+}
+
+const toggleExclude = async (row) => {
+  const until = S.afterReset?.resume?.episode?.resetsAt ?? (Date.now() + 6 * 3600_000)
+  const body = row.excluded ? { include: row.id } : { exclude: { id: row.id, name: row.name, until } }
+  const r = await post('/api/resume', body)
+  if (!resumeErr(r)) toast(row.excluded ? `${row.name || row.id} will be resumed` : `${row.name || row.id} excluded until the next limit`)
+}
+
+const resumeNow = async (row) => {
+  const r = await post('/api/resume/fire', { id: row.id })
+  if (!resumeErr(r)) toast(`resumed ${row.name || row.id}`)
+}
+
+/** click arms the 5-hour window; ⇧ arms the 7-day one beside it; ⌥ arms and
+ *  excludes everyone frozen right now, so a standing arm can start from the
+ *  NEXT limit rather than re-prompting sessions that froze hours ago. */
+const armResume = async ({ shiftKey = false, altKey = false } = {}) => {
+  const r0 = S.afterReset?.resume ?? null
+  const armed = !(r0?.armed)
+  const body = { armed, by: 'toggle' }
+  if (armed && shiftKey) body.windows = ['fiveHour', 'sevenDay']
+  else if (armed) body.windows = ['fiveHour']
+  resumeToggling = true
+  $('resume-enable').disabled = true
+  const r = await post('/api/resume', body)
+  resumeToggling = false
+  const failed = resumeErr(r)
+  // The settings pop cannot see the Telemetry tab's error line, so it carries
+  // its own copy of the same sentence.
+  $('resume-setting-err').textContent = failed ? $('ar-resume-err').textContent : ''
+  $('resume-setting-err').hidden = !failed
+  // Both controls show what the relay holds, never what was clicked: a
+  // refusal redraws them back, and a success adopts the relay's answer.
+  if (!failed && r.resume && S.afterReset) S.afterReset.resume = r.resume
+  renderResume()
+  if (failed) return
+  if (armed && altKey) {
+    const until = r.resume?.episode?.resetsAt ?? (Date.now() + 6 * 3600_000)
+    for (const row of r.resume?.disrupted ?? []) {
+      await post('/api/resume', { exclude: { id: row.id, name: row.name, until } })
+    }
+    toast(r.resume?.episode ? 'armed, holding this window' : 'armed — no window is spent, so nothing was held')
+    return
+  }
+  toast(armed ? `armed for ${(body.windows || []).map((w) => WINDOW_LABEL[w] || w).join(' + ')}` : 'disarmed')
+}
+
+$('ar-resume-arm').addEventListener('click', (ev) => {
+  void armResume({ shiftKey: ev.shiftKey, altKey: ev.altKey })
+})
+
+// The settings pop's switch is the arm button's plain click, not a second
+// write path. A switch already agreeing with the relay only redraws.
+$('resume-enable').addEventListener('change', () => {
+  if ($('resume-enable').checked === !!S.afterReset?.resume?.armed) { renderResume(); return }
+  void armResume()
+})
+
+/** One field per POST. A 400 names its field, and the line under the block
+ *  says which and why; nothing is kept locally, so a refused value simply
+ *  never becomes the relay's. */
+const postNight = async (c) => {
+  const r = await post('/api/night', { [c.field]: c.read($(c.id)) })
+  AR.edited.delete(c.id)
+  const err = $('ar-night-err')
+  if (r.error) { err.textContent = r.field ? `${r.field}: ${r.error}` : r.error; err.hidden = false; return }
+  err.hidden = true
+  if (r.night && S.afterReset) S.afterReset.night = r.night
+  AR.nightKey = null
+  renderNight()
+}
+for (const c of AR_NIGHT_CONTROLS) {
+  const node = $(c.id)
+  node.addEventListener('input', () => AR.edited.add(c.id))
+  node.addEventListener('change', () => { void postNight(c) })
+}
+
+// The relay only sends this on an actual change -- reading, history
+// ring, after-reset queue, or a threshold crossing -- so every arrival here
+// is real news, never a 15s heartbeat. `d.crossed` is the relay's own
+// crossings() output (relay.mjs's usageTick): app.js never recomputes it,
+// only fires for what it is told already happened. A relay with no `night`
+// field leaves it null, which the night block reads as "predates night hours".
+MCE.on('usage', (d) => {
+  S.usage = d.usage
+  S.usageHistory = d.history ?? []
+  S.afterReset = { queue: d.queue ?? [], night: d.night ?? null, resume: d.resume ?? null }
+  renderTiles()
+  for (const c of d.crossed ?? []) fireUsageAlert(c)
+})
 
 // ================================================================== heatmap
 const renderHeat = () => {
@@ -1649,6 +2233,13 @@ const renderFeed = () => {
   })
 }
 
+MCE.on('events', (d) => {
+  const incoming = d
+  S.events = [...S.events, ...incoming].slice(-400)
+  for (const e of incoming) firePulse(e.status === 'deny' ? 1.4 : 0.75)
+  renderFeed(); recomputeMood()
+})
+
 // ==================================================================== inbox
 const renderInbox = () => {
   const box = $('inbox'); box.textContent = ''
@@ -1695,6 +2286,9 @@ const renderInbox = () => {
 }
 const nameOf = (id) => S.sessions.find((s) => s.id === id)?.name || (id || '').slice(0, 8)
 
+MCE.on('questions', (d) => { S.questions = d; renderInbox() })
+MCE.on('approvals', (d) => { S.approvals = d; renderInbox() })
+
 // ================================================================= steering
 /** Unmodal: straight to the focused session. Only the Telemetry tab's file-heat
  *  cells use this -- the Steering panel is modal, see below. */
@@ -1716,11 +2310,30 @@ const prompt_ = (label, text) => ({ label, verb: 'prompt', payload: { text } })
  *  by the id the store minted. */
 const steerId = (cmd) => (cmd.custom ? 'c:' + cmd.custom : 'b:' + cmd.label)
 
+/** The broadcast the Findings panel exists to receive. Every clause is
+ *  load-bearing: facts not judgements (the evaluator judges), the six kinds,
+ *  the line evidence report_finding refuses without, and an explicit licence
+ *  to report nothing -- a store padded with non-findings is worse than an
+ *  empty one. */
+const WRITE_FINDINGS_PROMPT = [
+  "Pause and write down what you have learned that would change another session's work — not what you did, what surprised you.",
+  '',
+  'For each one, call the `report_finding` tool once:',
+  '',
+  '- `surprise` — one line, the fact itself. Not a judgement, not a recommendation, and never "we should".',
+  '- `kind` — one of `constraint`, `drift`, `hazard`, `dead-code`, `duplicate`, `question`.',
+  '- `touched` — the files or subsystems it came out of.',
+  '- `evidence` — at least one `path:line`. A finding with no line number is refused, and rightly: somebody else has to be able to check it.',
+  '',
+  'Report facts only. Somebody with the whole picture does the judging, and your job is to give them something they can verify. **If nothing surprised you, report nothing and say so in one line** — an empty answer is a real answer here, and padding the store is worse than leaving it alone.',
+].join('\n')
+
 const STEER_BUTTONS = [
   prompt_('run tests', 'Run the test suite and report failures.'),
   prompt_('commit', 'Stage and commit the current work with a clear message.'),
   prompt_('review diff', 'Review the current diff for bugs and simplifications.'),
   prompt_('step back', 'Step back: are we solving the right problem, and is there a simpler way?'),
+  prompt_('write findings', WRITE_FINDINGS_PROMPT),
   prompt_('status update', 'hows it going, any updates?'),
   prompt_('spawn reviewer', 'Spawn a subagent to review the work so far and report back.'),
   prompt_('surface rulings', 'Surface the rulings you made while I was away: read your autonomous-run rulings log under docs/decisions/ (the newest *-autonomous-rulings.md) and make your FINAL message a summary of it — every ruling, what you chose, the tradeoff, the alternatives you did not take, and the commit to roll back to. If there is no such log, say so in one line and summarise the decisions from this session instead.'),
@@ -1752,14 +2365,61 @@ const steerCommands = () => [
  *  mode line exists: see renderModeline(). Every state this can be in has a
  *  sentence there saying what the next click does.
  */
+/** ONE request, however many targets. The relay validates the whole set before
+ *  it enqueues anything, so a partial fan-out is not a state that exists --
+ *  and "queued", never "sent": a command sits in a Map until the target's own
+ *  poll drains it. */
 const steerTo = async (ids, label, verb, payload) => {
   if (!ids.length) return toast('no session to steer')
-  const results = await Promise.all(
-    ids.map((id) => post('/api/command', { targetId: id, verb, payload }).catch((e) => ({ error: String(e) }))),
-  )
-  const failed = results.filter((r) => r?.error).length
-  const who = ids.length === 1 ? nameOf(ids[0]) : `${ids.length} sessions`
-  toast(failed ? `${label}: ${failed} of ${ids.length} failed` : `${label} → ${who}`)
+  const r = await post('/api/command', { targetIds: ids, verb, payload, label })
+  if (r.error) return toast(`${label}: ${r.error}`, { kind: 'warn' })
+  const who = r.n === 1 ? (r.queued[0]?.name || 'a session') : `${r.n} sessions`
+  toast(`${label} → queued to ${who}`)
+}
+
+/** ⇧ and the held `A` both land here: no target step at all, and one code path
+ *  so the two gestures cannot drift. The relay resolves "all" against its own
+ *  live registry, so a card that expired between the render and the click
+ *  cannot 404 the whole broadcast. */
+const steerAll = async (label, verb, payload) => {
+  const r = await post('/api/command', { all: true, verb, payload, label })
+  if (r.error) return toast(`${label}: ${r.error}`, { kind: 'warn' })
+  toast(`${label} → queued to all ${r.n} sessions`)
+}
+
+/* A subset is remembered by NAME, per button, per browser: session ids change
+   on every restart, and a name is the stable handle claims-inherit.mjs and
+   inheritPosition already build on. localStorage can throw and can come back
+   with anything, so every read is guarded and a bad value is "nothing
+   remembered" -- the same rule FOLD_KEY and DENSITY_KEY follow. */
+const FLEET_KEY = (id) => 'szg.fleet.' + id
+const fleetRemembered = (id) => {
+  try {
+    const v = JSON.parse(localStorage.getItem(FLEET_KEY(id)) || '[]')
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []
+  } catch { return [] }
+}
+const rememberFleet = (id, names) => {
+  try { localStorage.setItem(FLEET_KEY(id), JSON.stringify(names.slice(0, 64))) } catch {}
+}
+
+/** Which live sessions a remembered name list pre-checks. A name matching TWO
+ *  live sessions checks NEITHER -- claims-inherit.mjs's rule, applied where
+ *  guessing means sending a prompt into a session nobody picked. */
+const fleetPreselect = (names, sessions) => {
+  const byName = new Map()
+  for (const s of sessions) {
+    const n = s.name || ''
+    byName.set(n, byName.has(n) ? null : s.id)     // null marks an ambiguous name
+  }
+  const ids = [], ambiguous = [], missing = []
+  for (const n of names) {
+    if (!byName.has(n)) { missing.push(n); continue }
+    const id = byName.get(n)
+    if (id == null) ambiguous.push(n)
+    else ids.push(id)
+  }
+  return { ids, ambiguous, missing }
 }
 
 const disarm = () => {
@@ -1831,6 +2491,104 @@ const closeSteerForm = () => {
   renderModeline()
 }
 
+/* The fleet picker. `cmd` is the steering command an option-click armed;
+ * `null` when the modal is closed, which is what the esc chain and the mode
+ * line test. Sending from here does NOT arm -- a subset has already been
+ * chosen, and a second targeting step would be a trap. */
+let fleetForm = null
+const fleetModal = $('fleetform')
+const FLEET_HINT = '<kbd>esc</kbd> cancels &middot; <kbd>&#8984;</kbd>/<kbd>ctrl</kbd> + <kbd>enter</kbd> sends'
+
+const fleetCheckedBoxes = () => Array.from($('ff-list').querySelectorAll('input[type=checkbox]:checked'))
+const fleetCheckedIds = () => fleetCheckedBoxes().map((cb) => cb.dataset.id)
+const fleetCheckedNames = () => fleetCheckedBoxes().map((cb) => cb.dataset.name)
+
+/** The live checked count, recomputed on every checkbox change and on
+ *  all/none -- the title is the only place that count is shown. */
+const updateFleetTitle = () => {
+  if (!fleetForm) return
+  setText($('ff-title'), `${fleetForm.cmd.label} → ${fleetCheckedIds().length} of ${S.sessions.length} sessions`)
+}
+
+const openFleetForm = (cmd) => {
+  fleetForm = { cmd, restore: document.activeElement }
+  const { ids, ambiguous, missing } = fleetPreselect(fleetRemembered(steerId(cmd)), S.sessions)
+  MCX.reconcile($('ff-list'), S.sessions, {
+    key: (s) => s.id,
+    create: () => {
+      const row = el('label', 'fleetrow')
+      const cb = el('input')
+      cb.type = 'checkbox'
+      row.appendChild(cb)
+      row.appendChild(el('span', 'fleetname'))
+      row.appendChild(el('span', 'fleetproj'))
+      row.appendChild(el('span', 'statedot'))
+      return row
+    },
+    update: (row, s) => {
+      const cb = row.querySelector('input')
+      cb.dataset.id = s.id
+      cb.dataset.name = s.name || ''
+      // Rows persist in the list across opens, so a row reused from a prior
+      // open still carries that button's checked state -- this callback only
+      // runs at open time, so it must set the box unconditionally to reflect
+      // this button's own remembered set rather than trusting `isNew`.
+      cb.checked = ids.includes(s.id)
+      cb.onchange = updateFleetTitle
+      setText(row.querySelector('.fleetname'), s.name || s.id.slice(0, 8))
+      // Sessions carry no `project` field: the display name, or the last
+      // segment of its worktree root/cwd -- the same fallback the card uses.
+      setText(row.querySelector('.fleetproj'), s.repo || (s.root || s.cwd || '').split('/').pop() || '')
+      const dot = row.querySelector('.statedot')
+      const state = sessionStateOf(s)
+      MCX.setAttr(dot, 'data-state', state)
+      MCX.setAttr(dot, 'title', 'presence: ' + state)
+    },
+  })
+  // The ambiguity and missing counts go ahead of the key hints, and only
+  // when there is something to say -- a clean remembered set says nothing.
+  const bits = []
+  if (ambiguous.length) bits.push(`${ambiguous.length} remembered name${ambiguous.length === 1 ? '' : 's'} match${ambiguous.length === 1 ? 'es' : ''} more than one session and ${ambiguous.length === 1 ? 'was' : 'were'} left unchecked`)
+  if (missing.length) bits.push(`${missing.length} remembered name${missing.length === 1 ? '' : 's'} ${missing.length === 1 ? 'is' : 'are'} not on the board`)
+  $('ff-note').innerHTML = [...bits, FLEET_HINT].join(' &middot; ')
+  updateFleetTitle()
+  fleetModal.hidden = false
+  renderModeline()
+}
+
+const closeFleetForm = () => {
+  if (!fleetForm) return
+  const back = fleetForm.restore
+  fleetForm = null
+  fleetModal.hidden = true
+  if (back?.isConnected && typeof back.focus === 'function') back.focus()
+  renderModeline()
+}
+
+const submitFleetForm = () => {
+  if (!fleetForm) return
+  const { cmd } = fleetForm
+  const ids = fleetCheckedIds()
+  rememberFleet(steerId(cmd), fleetCheckedNames())
+  closeFleetForm()
+  void steerTo(ids, cmd.label, cmd.verb, cmd.payload)
+}
+
+$('ff-cancel').addEventListener('click', closeFleetForm)
+$('ff-all').addEventListener('click', () => {
+  for (const cb of $('ff-list').querySelectorAll('input[type=checkbox]')) cb.checked = true
+  updateFleetTitle()
+})
+$('ff-none').addEventListener('click', () => {
+  for (const cb of $('ff-list').querySelectorAll('input[type=checkbox]')) cb.checked = false
+  updateFleetTitle()
+})
+$('ff-send').addEventListener('click', submitFleetForm)
+fleetModal.addEventListener('mousedown', (ev) => { if (ev.target === fleetModal) closeFleetForm() })
+fleetModal.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); submitFleetForm() }
+})
+
 /** The whole list goes up, every time -- add, edit, delete and reorder are all
  *  "here is the new list". The store validates it; a 400 comes back with a
  *  reason and the form stays open so it can be fixed. */
@@ -1889,13 +2647,24 @@ const renderSteer = () => {
       // `payload` is null on a command that collects an argument first
       // (`go autonomous`), so the tip cannot assume there is text.
       const tip = cmd.payload?.text ?? (cmd.verb === 'abort' ? 'aborts the current turn' : 'asks for a goal first')
-      b.dataset.tip = cmd.custom
-        ? `${cmd.label}\n${tip}\n\nshift-click to edit or delete`
-        : `${cmd.label}\n${tip}`
+      b.dataset.tip = (cmd.custom
+        ? `${cmd.label}\n${tip}\n\nright-click to edit or delete`
+        : `${cmd.label}\n${tip}`) + '\n\nshift-click — all sessions · option-click — pick a subset'
       b.onclick = (ev) => {
-        // Shift opens the editor instead of arming -- shift is the one
-        // modifier steering does not already spend (A broadcasts, ⌥ marks).
-        if (ev.shiftKey && cmd.custom) return void openSteerForm({ edit: cmd.custom })
+        // ⇧ — every live session, no target step. The custom-button editor
+        // is on the context menu below: ⇧ belongs to the fleet on EVERY
+        // button, and a gesture that means two things depending on which
+        // button it lands on is a rule nobody retains.
+        if (ev.shiftKey) {
+          if (cmd.form === 'goal') return void toast('state the goal first', { kind: 'warn' })
+          disarm()
+          return void steerAll(cmd.label, cmd.verb, cmd.payload)
+        }
+        // ⌥ — the subset picker for this button, with its remembered set.
+        if (ev.altKey) {
+          if (cmd.form === 'goal') return void toast('state the goal first', { kind: 'warn' })
+          return void openFleetForm(cmd)
+        }
         // A command with no payload has to collect one before it can arm --
         // there is nothing to carry until the goal has been stated.
         if (cmd.form === 'goal') return void openSteerForm({ goal: {
@@ -1908,14 +2677,21 @@ const renderSteer = () => {
             syncArmed()
           },
         } })
-        if (S.mods.all) {          // A is "every session": no target needed.
-          const ids = S.sessions.map((x) => x.id)
+        if (S.mods.all) {          // A is "every session": the same path as ⇧.
           disarm()
-          return void steerTo(ids, cmd.label, cmd.verb, cmd.payload)
+          return void steerAll(cmd.label, cmd.verb, cmd.payload)
         }
         S.armed = S.armed && steerId(S.armed) === steerId(cmd) ? null : cmd
         if (!S.armed) S.marks = []
         syncArmed()
+      }
+      // Right-click (⌃-click on macOS) opens a custom button's editor. ⇧ is
+      // the fleet's; contextmenu costs no modifier and both a mouse and the
+      // keyboard can reach it.
+      b.oncontextmenu = (ev) => {
+        if (!cmd.custom) return
+        ev.preventDefault()
+        openSteerForm({ edit: cmd.custom })
       }
     },
   })
@@ -1928,574 +2704,36 @@ const renderSteer = () => {
   add.onclick = () => openSteerForm({})
 }
 
-// =================================================================== drawer
+MCE.on('steering', (d) => { S.steering = d; renderSteer(); syncArmed() })
+
+// ============================================================ scope and keys
+// The drawer itself lives in drawer.js (global MCW). What stays here is the
+// rail's scope -- shared with the card-hover handlers in wireCardEvents -- and
+// the page's Escape router, whose middle branches reach five things that are
+// this file's alone.
 /** Everything the rail's scope drives. One call so a hover can never move the
  *  metrics without also moving the feed, which would read as a bug. */
 const rescope = () => { renderTiles(); renderFeed(); renderModeline() }
 
-/** Paints the drawer's "Last message" section from `s.lastAnswer`/
- *  `lastAnswerAt` alone. Split out of `openDrawer` so a live update can
- *  repaint just this one section into `#d-last` -- built once, in
- *  `openDrawer` -- without touching the rest of `#d-body` (which would cost
- *  its scroll position) and without a close/reopen. `lastAnswer` is a payload
- *  field, so against a relay that predates it this reads undefined and the
- *  empty state shows -- indistinguishable from a session that has not
- *  finished a turn yet: the pane's static assets reload on their own, but the
- *  relay behind them does not. */
-const renderLastMessage = (s) => {
-  const box = $('d-last'); if (!box) return
-  box.textContent = ''
-  if (s.lastAnswer) {
-    const said = el('div', 'saidbox')
-    // textContent, never innerHTML: this is an assistant's prose arriving over
-    // the wire and it is displayed, never parsed.
-    const pre = el('pre', 'said')
-    pre.textContent = s.lastAnswer
-    said.appendChild(pre)
-    said.appendChild(el('div', 'saidage', s.lastAnswerAt ? ago(s.lastAnswerAt) + ' ago' : ''))
-    box.appendChild(said)
-  } else box.appendChild(el('div', 'empty', 'No message yet.'))
-}
-
-/** Called on every SSE payload that carries fresh session data. While the
- *  drawer is pinned open on a session, its "Last message" section otherwise
- *  only reflects whatever was true at the moment it was opened -- this is
- *  what keeps it live without re-running `openDrawer` (and its scroll-
- *  resetting, rename-cancelling side effects) on every frame. */
-const refreshPinnedLastMessage = () => {
-  if (!S.pinned) return
-  const s = S.sessions.find((x) => x.id === S.pinned)
-  if (s) renderLastMessage(s)
-}
-
-// --- TODOs: this session's own plans, with a whole-project toggle -----------
-/** Whether plan `p` -- already known to live in this session's own worktree --
- *  counts as its OWN work, and by which rule; also the display order (an
- *  explicit claim outranks `checkedBy` outranks a bare diff from main, the
- *  same precedence `tasks.mjs`'s `ownerFor` uses for the claim itself). `null`
- *  means none of the three apply: inherited noise in "this session" mode.
- *
- *  There is no relay field for "differs from main" as such (the per-plan
- *  `diff` only says whether the FILE exists in main, not whether its content
- *  does), so the third rule is derived from what each item already carries:
- *  `tasks.mjs`'s `labelItems` stamps every item 'same' unless this worktree's
- *  copy genuinely outranks or trails main's -- exactly "not identical to
- *  main". `isMainWorktree` is the one case that check cannot see at all:
- *  `labelItems` is never even called against main's own items (there is
- *  nothing to diff main against), so every item there reads 'same' by
- *  construction regardless of real progress. Reported/verified counts on
- *  THIS copy are the fallback signal there -- the only worktree it applies
- *  to, so it cannot reintroduce the inherited-plan noise this filter exists
- *  to remove in a branched worktree, where an untouched inherited plan's
- *  reported count is identical to main's and so already reads 'same'. */
-const planIsMine = (p, sessionId, isMainWorktree) => {
-  if (p.owner?.source === 'claim' && p.owner.id === sessionId) return 'claim'
-  if (p.owner?.source === 'checked' && p.owner.id === sessionId) return 'checked'
-  const differs = (p.items || []).some((i) => i.diff && i.diff !== 'same')
-  const touched = differs || (isMainWorktree && (p.done > 0 || p.reported > 0))
-  return touched ? 'touched' : null
-}
-const TODO_MINE_ORDER = { claim: 0, checked: 1, touched: 2 }
-
-const TODO_SCOPE_KEY = 'szg.drawer.todoscope'
-const readTodoScope = () => {
-  try { return localStorage.getItem(TODO_SCOPE_KEY) === 'all' ? 'all' : 'mine' } catch { return 'mine' }
-}
-const writeTodoScope = (v) => { try { localStorage.setItem(TODO_SCOPE_KEY, v) } catch {} }
-
-/** The drawer's TODOs section: this session's own plans by default -- an
- *  explicit claim, then `checkedBy`, then anything touched in this worktree's
- *  copy that main's does not share -- plus its claimed backlog sections, with
- *  a header toggle to the unfiltered whole-worktree list (the only thing the
- *  section showed before this feature). Rebuilt on demand, from `openDrawer`
- *  and from the toggle's own click, rather than only ever from `openDrawer` --
- *  the same reason `renderLastMessage` is split out: repainting the whole
- *  drawer body would cost scroll position and cancel an in-progress rename.
- *  Re-finds the worktree from `S.projects` each call rather than closing over
- *  it, so a toggle click after a payload has moved on still reads live data.
- *  Rows are MCX-keyed so a hover surviving the mine/whole-project toggle is
- *  free, the same reason `renderSteer` reconciles its button list. */
-const renderTodos = (id) => {
-  const head = $('d-todos-head'), flag = $('d-todos-flag'), note = $('d-todos-note'), list = $('d-todos-list')
-  if (!head || !list || !flag || !note) return
-  head.textContent = ''
-  head.appendChild(el('span', 'sect', 'TODOs'))
-
-  const wt = (S.projects || [])
-    .flatMap((p) => p.worktrees)
-    .find((w) => w.sessions.some((x) => x.id === id))
-
-  if (!wt) {
-    MCX.show(flag, false)
-    MCX.setText(note, 'No task files found for this session’s worktree.')
-    MCX.show(note, true)
-    MCX.reconcile(list, [], { key: (d) => d.key })
-    return
-  }
-
-  // The convention is docs/TASKS.md; a file at the project ROOT outranks it.
-  // Worth saying out loud, because a project with both has a docs/TASKS.md
-  // that is being read and is not the authority -- which is invisible
-  // everywhere else and is exactly the sort of thing somebody edits for an
-  // hour before noticing.
-  if (wt.taskAuthority === 'root') {
-    MCX.setText(flag, 'todos: ' + wt.taskFile + ' at the project root takes precedence over docs/')
-    MCX.show(flag, true)
-  } else MCX.show(flag, false)
-
-  // `!p.shipped` matters as much as the counts here: this list computes
-  // "in flight" itself rather than reading `effort.live`, so without it a
-  // plan that DECLARES it shipped still appears, captioned "all steps
-  // checked" beside a title reading `0/N`. That caption is a false
-  // completion claim -- worse than the stale current step it replaced.
-  const live = wt.plans.filter((p) => p.done < p.total && !p.shipped)
-
-  if (!live.length) {
-    MCX.show(note, false)
-    MCX.reconcile(list, [], { key: (d) => d.key })
-    list.textContent = ''
-    list.appendChild(el('div', 'empty', 'No plans in flight in ' + wt.path + '.'))
-    return
-  }
-
-  const scope = readTodoScope()
-  const mine = live
-    .map((p) => ({ p, reason: planIsMine(p, id, wt.isMain) }))
-    .filter((x) => x.reason)
-    .sort((a, b) => TODO_MINE_ORDER[a.reason] - TODO_MINE_ORDER[b.reason])
-    .map((x) => x.p)
-  const sections = (wt.tasks || [])
-    .flatMap((t) => (t.items || []).map((i) => ({ i, t })))
-    .filter(({ i }) => i.kind === 'section' && (i.claimedBy || []).some((c) => c.id === id))
-
-  // Nothing claimed or touched: fall through to the unfiltered list rather
-  // than an empty section, so a fresh session is never blank.
-  const fallback = scope === 'mine' && mine.length === 0 && sections.length === 0
-  const wholeProject = scope === 'all' || fallback
-  const shownPlans = wholeProject ? live : mine
-
-  const toggle = el('button', 'btn todoscope', scope === 'all' ? 'whole project' : 'this session')
-  toggle.dataset.tip = 'TODOs scope\n"this session" shows only plans this session claimed or has touched, plus its claimed backlog sections.\n"whole project" shows every in-flight plan in the worktree.\n\nClick to switch.'
-  toggle.onclick = () => { writeTodoScope(scope === 'all' ? 'mine' : 'all'); renderTodos(id) }
-  head.appendChild(toggle)
-  head.appendChild(el('span', 'todocount', scope === 'all'
-    ? live.length + (live.length === 1 ? ' plan' : ' plans') + ' · whole project'
-    : mine.length + ' of ' + live.length + ' plans · this session'))
-
-  MCX.setText(note, 'no plan claimed or touched by this session — showing the project')
-  MCX.show(note, fallback)
-
-  const rows = shownPlans.map((p) => ({ key: 'plan:' + p.rel, kind: 'plan', p }))
-  if (!wholeProject) for (const { i, t } of sections) rows.push({ key: 'section:' + t.rel + '#' + i.slug, kind: 'section', i })
-
-  MCX.reconcile(list, rows, {
-    key: (d) => d.key,
-    create: () => {
-      const r = el('div', 'ev ok')
-      r.appendChild(el('div', 'body'))
-      return r
-    },
-    update: (r, d) => {
-      const bd = r.firstElementChild
-      bd.textContent = ''
-      if (d.kind === 'plan') {
-        const cur = d.p.items.find((i) => i.id === d.p.currentItemId)
-        bd.appendChild(el('div', 'title', (d.p.title || d.p.rel) + ' · ' + d.p.done + '/' + d.p.total))
-        bd.appendChild(el('div', 'detail', cur ? cur.text : 'all steps checked'))
-      } else {
-        bd.appendChild(el('div', 'title', d.i.text))
-        bd.appendChild(el('div', 'detail', 'claimed backlog section'))
-      }
-    },
-  })
-}
-
-// --- card colour ---------------------------------------------------------
-// A session card's own outline colour, set here and drawn by fillCard/
-// canvas.js off `s.color` (cards.mjs). It exists to make one session findable
-// at a glance, which is a switchboard-wide concern -- so the picker lives in
-// the drawer, one per session, rather than as a global setting.
-
-/** Eight points spread evenly around the wheel, at the same saturation and
- *  lightness `buildSwatches` already uses for the theme picker (hsl(hue 60%
- *  65%)) -- "from the theme family" without literally reusing THEMES' five
- *  hues, which would sit on top of the four semantic presets below (amber
- *  ~30°, green ~165°, purple ~262°, red-hot ~350°). */
-const hslToHex = (h, s, l) => {
-  s /= 100; l /= 100
-  const k = (n) => (n + h / 30) % 12
-  const a = s * Math.min(l, 1 - l)
-  const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)))
-  const toHex = (n) => Math.round(255 * f(n)).toString(16).padStart(2, '0')
-  return `#${toHex(0)}${toHex(8)}${toHex(4)}`
-}
-const CARD_WHEEL = [0, 45, 90, 135, 180, 225, 270, 315].map((h) => hslToHex(h, 60, 65))
-// The four semantic tokens (app.css :root), spelled out as the literal hex
-// they already are rather than resolved from CSS -- the picker needs a real
-// #rrggbb to post, not a var() reference.
-const CARD_SEMANTIC = ['#e0973c', '#ff5670', '#45c9a0', '#a883e6'] // amber, red-hot, green, purple
-const CARD_PRESETS = [...CARD_WHEEL, ...CARD_SEMANTIC]
-
-/** Sets a session's outline colour. Optimistic, same pattern as canvas.js's
- *  node-move drag (finish()): the card and the drawer update immediately,
- *  and only revert if the relay refuses. `s` is mutated in place rather than
- *  replaced, since `S.sessions` is what every render reads. */
-const setCardColor = async (id, color) => {
-  const s = S.sessions.find((x) => x.id === id)
-  const prior = s ? s.color : undefined
-  if (s) s.color = color
-  renderCards()
-  if (S.pinned === id) renderColor(id)
-  const r = await post('/api/session/color', { id, color })
-  if (!r || r.error) {
-    toast((r && r.error) || 'could not set colour', { kind: 'warn' })
-    if (s) s.color = prior
-    renderCards()
-    if (S.pinned === id) renderColor(id)
-  }
-}
-
-/** Rebuilt on every call rather than kept as a stable container (unlike
- *  #d-last/#d-todos): nothing here needs a partial SSE repaint mid-drawer,
- *  so the plain rebuild openDrawer already does for most sections is enough. */
-const renderColor = (id) => {
-  const box = $('d-color')
-  if (!box) return
-  const s = S.sessions.find((x) => x.id === id)
-  box.textContent = ''
-  if (!s) return
-
-  const row = el('div', 'cswatches')
-  for (const hex of CARD_PRESETS) {
-    const b = el('button', 'swatch')
-    b.type = 'button'
-    b.style.setProperty('--sw', hex)
-    b.setAttribute('aria-label', hex)
-    b.setAttribute('aria-pressed', String((s.color || '') === hex))
-    b.onclick = () => setCardColor(id, hex)
-    row.appendChild(b)
-  }
-  box.appendChild(row)
-
-  const pickrow = el('div', 'cpickrow')
-  const input = el('input')
-  input.type = 'color'
-  input.value = /^#[0-9a-f]{6}$/i.test(s.color || '') ? s.color : '#6fc3df'
-  input.title = 'custom colour'
-  input.oninput = () => setCardColor(id, input.value)
-  pickrow.appendChild(input)
-
-  const clear = el('button', 'btn no', 'clear')
-  clear.type = 'button'
-  clear.disabled = !s.color
-  clear.onclick = () => setCardColor(id, '')
-  pickrow.appendChild(clear)
-  box.appendChild(pickrow)
-}
-
-const openDrawer = (id) => {
-  const s = S.sessions.find((x) => x.id === id); if (!s) return
-  S.focus = id
-  S.pinned = id
-  // a pinned card reveals the per-session narration underneath the
-  // blurb, the same as hovering the panel does (app.css's .orb-pinned rules).
-  MCX.toggle(document.querySelector('.orbpanel'), 'orb-pinned', true)
-  rescope()
-  const st = s.stats || {}
-  // openDrawer re-runs on every payload, so a rename left half-typed would
-  // otherwise survive a switch to a different card and commit against the
-  // wrong session. Only a change of session cancels it; a refresh of the same
-  // one leaves the field alone, or typing a name would be impossible.
-  if (S.renaming !== id) { stopRenaming(); S.renaming = null }
-  $('d-title').textContent = s.name || s.repo || id.slice(0, 12)
-  const b = $('d-body'); b.textContent = ''
-  const asking = needsOf(s)
-  if (asking) {
-    const box = el('div', 'needbox')
-    box.appendChild(el('div', 'needhead', '\u25cf waiting on you'))
-    box.appendChild(el('div', 'needwhat', asking))
-    box.appendChild(el('div', 'needsrc', s.waiting ? 'parked at a prompt' : 'asked at the end of its last turn'))
-    b.appendChild(box)
-  }
-
-  // A colour for this card, so it is findable at a glance -- above Last
-  // message: it is the thing to reach for before reading anything else.
-  b.appendChild(el('div', 'sect', 'Card colour'))
-  const colorBox = el('div'); colorBox.id = 'd-color'
-  b.appendChild(colorBox)
-  renderColor(id)
-
-  // What it last said, and when. Given its own stable container (`d-last`)
-  // rather than built inline here, so `refreshPinnedLastMessage` (SSE handlers,
-  // below) can repaint just this section while the drawer stays open, instead
-  // of requiring a close/reopen to see a new answer -- see `renderLastMessage`.
-  b.appendChild(el('div', 'sect', 'Last message'))
-  const lastBox = el('div'); lastBox.id = 'd-last'
-  b.appendChild(lastBox)
-  renderLastMessage(s)
-
-  const dl = el('dl', 'kv')
-  const kv = (k, v) => { dl.appendChild(el('dt', null, k)); dl.appendChild(el('dd', null, String(v ?? '—'))) }
-  kv('session', s.id); kv('agent name', s.agentName || '—'); kv('cwd', s.cwd); kv('repo', s.repo || '—')
-  kv('branch', s.branch || '—'); kv('model', s.model); kv('pid', s.pid); kv('uptime', ago(s.startedAt))
-  kv('context', compact(st.ctx || 0) + ' / ' + compact(st.ctxLimit || 200000))
-  kv('spend', money(st.spend)); kv('tool calls', st.tools || 0); kv('guardrails', st.guardrails || 0)
-  b.appendChild(dl)
-
-  b.appendChild(el('div', 'sect', 'Subagents'))
-  if (s.agents?.length) {
-    for (const a of s.agents) {
-      const r = el('div', 'ev ' + (a.status === 'running' ? 'agent' : 'ok'))
-      const bd = el('div', 'body')
-      bd.appendChild(el('div', 'title', a.description || a.type))
-      bd.appendChild(el('div', 'detail', a.type + ' · ' + a.status))
-      r.appendChild(bd)
-      const kill = el('button', 'btn no', 'kill'); kill.style.alignSelf = 'center'
-      kill.onclick = () => { post('/api/command', { targetId: s.id, verb: 'kill-agent', payload: { agentId: a.id } }); toast('kill sent') }
-      r.appendChild(kill)
-      b.appendChild(r)
-    }
-  } else b.appendChild(el('div', 'empty', 'No subagents.'))
-
-  // Built as stable containers (see renderTodos, above): the toggle repaints
-  // just this section, without the scroll-resetting, rename-cancelling cost
-  // of a full openDrawer re-run.
-  const todosHead = el('div', 'secthead'); todosHead.id = 'd-todos-head'
-  b.appendChild(todosHead)
-  const todosFlag = el('div', 'taskflag'); todosFlag.id = 'd-todos-flag'
-  b.appendChild(todosFlag)
-  const todosNote = el('div', 'tdnote'); todosNote.id = 'd-todos-note'
-  b.appendChild(todosNote)
-  const todosList = el('div'); todosList.id = 'd-todos-list'
-  b.appendChild(todosList)
-  renderTodos(id)
-
-  b.appendChild(el('div', 'sect', 'Recent activity'))
-  const mine = S.events.filter((e) => e.sessionId === id).slice(-18).reverse()
-  if (mine.length) for (const e of mine) {
-    const r = el('div', 'ev ' + (e.status === 'deny' ? 'deny' : 'ok'))
-    r.appendChild(el('div', 'ts num', clockOf(e.t)))
-    const bd = el('div', 'body'); bd.appendChild(el('div', 'title', e.label || e.kind))
-    if (e.detail) bd.appendChild(el('div', 'detail', e.detail))
-    r.appendChild(bd); b.appendChild(r)
-  } else b.appendChild(el('div', 'empty', 'Nothing recorded.'))
-
-  b.appendChild(el('div', 'sect', 'Links'))
-  const mylinks = S.links.filter((l) => l.from === id || l.to === id)
-  if (mylinks.length) for (const l of mylinks) {
-    const r = el('div', 'ev ok')
-    const bd = el('div', 'body')
-    bd.appendChild(el('div', 'title', (l.from === id ? '→ ' : '← ') + nameOf(l.from === id ? l.to : l.from)))
-    r.appendChild(bd)
-    const cut = el('button', 'btn no', 'unlink')
-    cut.onclick = () => { post('/api/unlink', { id: l.id }); toast('unlinked') }
-    r.appendChild(cut); b.appendChild(r)
-  } else b.appendChild(el('div', 'empty', 'No channels open. Drag this card onto another.'))
-
-  // --- jump to this session's terminal ---------------------------------------
-  b.appendChild(el('div', 'sect', 'Terminal'))
-  b.appendChild(renderJump(s))
-
-  // Its own stable container, like the TODOs and Last message sections above:
-  // arming has to survive the payload repaints that re-run openDrawer, or the
-  // button would disarm itself two seconds after being armed.
-  b.appendChild(el('div', 'sect', 'Close'))
-  const killBox = el('div'); killBox.id = 'd-kill'
-  b.appendChild(killBox)
-  renderKill(id)
-
-  $('drawer').classList.add('open')
-  renderCards()
-}
-// --- jumping to a session's terminal -----------------------------------------
-/** The four cases, by the name the relay put on the payload. A relay that
- *  predates the field sends nothing, and the button then reads "jump to
- *  terminal" and lets the relay answer -- a neutral label is the right
- *  degradation, where guessing a case would be a confident wrong one
- *  A client reading a missing payload field fails SILENTLY. */
-const JUMP = {
-  tmux: { label: 'jump to terminal', detail: 'switches the tmux client and raises the terminal' },
-  background: { label: 'attach', detail: 'opens a tmux window and attaches to this background session' },
-  resume: { label: 'resume', detail: 'the process has exited; opens a tmux window and resumes it' },
-  outside: { label: 'outside tmux', detail: 'live in a terminal outside tmux — nothing can raise it without a macOS permission prompt' },
-}
-const renderJump = (s) => {
-  const c = JUMP[s.jump] || JUMP.tmux
-  const row = el('div', 'ev' + (s.jump === 'outside' ? ' deny' : ''))
-  const bd = el('div', 'body')
-  bd.appendChild(el('div', 'title', c.label))
-  bd.appendChild(el('div', 'detail', c.detail))
-  row.appendChild(bd)
-  const btn = el('button', 'btn', c.label)
-  btn.disabled = s.jump === 'outside'
-  btn.onclick = async () => {
-    const out = await post('/api/jump', { id: s.id })
-    if (out && out.ok) {
-      toast(out.case === 'tmux' ? 'jumped' : `opened ${out.window || 'a tmux window'}`)
-      if (out.note) toast(out.note, { ms: 5000, kind: 'warn' })
-    } else if (out && out.case === 'outside') {
-      toast(`outside tmux${out.tty ? ' on ' + out.tty : ''} — run: ${out.command}`, { ms: 8000, kind: 'warn' })
-    } else {
-      toast((out && out.error) || 'could not jump', { ms: 5000, kind: 'warn' })
-    }
-  }
-  row.appendChild(btn)
-  return row
-}
-
-// --- closing a session -------------------------------------------------------
-/** Two steps, and the second one expires. The pane-v2 spec's armed-confirmation
- *  idiom in browser form: the first click arms, the second within ARM_MS does
- *  it, and anything else -- five seconds passing, opening another drawer --
- *  disarms. A confirm() dialog would have done the same job and blocked the
- *  whole board, which on a page carrying a live SSE stream is worse than the
- *  problem. */
-const KILL_ARM_MS = 5000
-let killArmed = null      // { id, until, timer }
-const disarmKill = () => {
-  if (killArmed?.timer) clearTimeout(killArmed.timer)
-  killArmed = null
-}
-/** What closing this session would actually do. Mirrors canvas.mjs's killPlan,
- *  and deliberately says WHICH mechanism: "stop" and "SIGTERM" are different
- *  promises and the button should not pretend they are one. */
-const killModeOf = (s) => {
-  if (s.kind === 'background' && s.shortId) return { can: true, what: 'claude stop ' + s.shortId }
-  if (Number(s.pid) > 1) return { can: true, what: 'SIGTERM to pid ' + s.pid }
-  return { can: false, what: 'no pid registered, and not a background agent' }
-}
-const renderKill = (id) => {
-  const box = $('d-kill')
-  if (!box) return
-  const s = S.sessions.find((x) => x.id === id)
-  box.textContent = ''
-  if (!s) return
-  const mode = killModeOf(s)
-  const row = el('div', 'ev')
-  const bd = el('div', 'body')
-  bd.appendChild(el('div', 'title', mode.can ? 'End this session' : 'Cannot end this session'))
-  bd.appendChild(el('div', 'detail', mode.what))
-  row.appendChild(bd)
-  if (mode.can) {
-    const armed = killArmed && killArmed.id === id && Date.now() < killArmed.until
-    const btn = el('button', 'btn no', armed ? 'click again to confirm' : 'close session')
-    btn.onclick = async () => {
-      if (!(killArmed && killArmed.id === id && Date.now() < killArmed.until)) {
-        disarmKill()
-        killArmed = { id, until: Date.now() + KILL_ARM_MS, timer: setTimeout(() => { disarmKill(); renderKill(id) }, KILL_ARM_MS) }
-        renderKill(id)
-        return
-      }
-      disarmKill()
-      const out = await post('/api/session/kill', { id })
-      if (out && out.ok) { toast('session closed'); closeDrawer() }
-      else toast((out && out.error) || 'could not close the session')
-    }
-    row.appendChild(btn)
-  }
-  box.appendChild(row)
-}
-
-const closeDrawer = () => {
-  disarmKill()
-  $('drawer').classList.remove('open')
-  S.pinned = null
-  MCX.toggle(document.querySelector('.orbpanel'), 'orb-pinned', false)
-  rescope()
-}
-$('d-close').onclick = closeDrawer
-
-// --- the reply field ---------------------------------------------------------
-/** Send what is typed to the pinned session, as a prompt.
- *
- *  `S.pinned` and not `S.focus`: focus follows the pointer across the board, so
- *  addressing focus would send the reply to whichever card the mouse drifted
- *  over between typing and hitting send. The pin is the session whose drawer is
- *  open, which is the one the field is visibly attached to.
- *
- *  The toast says QUEUED, never "sent". `/api/command` returns once the verb is
- *  on the session's queue; the session collects it on its next poll and only
- *  then does `$.prompt.submit` run. Reporting "sent" would be a claim this code
- *  cannot make: the relay answers on enqueue, not on delivery. */
-const sendReply = async () => {
-  const box = $('d-replytext')
-  const text = box.value.trim()
-  const id = S.pinned
-  if (!text || !id) return
-  // Cleared BEFORE the await, so a second Enter on a slow relay cannot enqueue
-  // the same reply twice; restored on failure, because losing what somebody
-  // typed is worse than a duplicate they can see and delete.
-  box.value = ''
-  const r = await post('/api/command', { targetId: id, verb: 'prompt', payload: { text } })
-  if (r.error) { box.value = text; toast(r.error, { kind: 'warn' }); return }
-  toast('queued for ' + nameOf(id))
-}
-// --- rename ------------------------------------------------------------------
-/** The drawer title becomes a field, and back again.
- *
- *  Nothing here writes the name: it posts, and the name arrives the long way
- *  round -- the relay queues the verb, the session runs Claude Code's own
- *  /rename on its next poll, and its next /api/stats push carries the new name
- *  onto the payload, about a second later. So the title is never assigned
- *  locally even for a moment. A title that changed instantly and then reverted
- *  because /rename refused the name would be a lie the board told itself. */
-const stopRenaming = () => {
-  S.renaming = null
-  MCX.show($('d-titleedit'), false)
-  MCX.show($('d-renamehint'), false)
-  MCX.show($('d-title'), true)
-}
-const startRenaming = () => {
-  const s = S.sessions.find((x) => x.id === S.pinned)
-  if (!s) return
-  const box = $('d-titleedit')
-  S.renaming = s.id
-  box.value = s.name || ''
-  MCX.show($('d-title'), false)
-  MCX.show(box, true)
-  MCX.show($('d-renamehint'), true)
-  box.focus()
-  box.select()
-}
-const commitRename = async () => {
-  const box = $('d-titleedit')
-  const name = box.value.trim()
-  const id = S.pinned
-  stopRenaming()
-  if (!id || !name) return
-  const r = await post('/api/rename', { id, name })
-  toast(r.error ? 'rename refused: ' + r.error : 'rename queued', r.error ? { kind: 'warn' } : undefined)
-}
-$('d-rename').onclick = () => {
-  if ($('d-titleedit').classList.contains('gone')) startRenaming()
-  else void commitRename()
-}
-$('d-titleedit').addEventListener('keydown', (ev) => {
-  if (ev.key === 'Enter') { ev.preventDefault(); void commitRename() }
-  // Handled here rather than in the drawer's Escape listener so it can stop
-  // the event: cancelling the rename must not also close the drawer.
-  else if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); stopRenaming() }
-})
-
-$('d-reply').addEventListener('submit', (ev) => { ev.preventDefault(); void sendReply() })
-$('d-replytext').addEventListener('keydown', (ev) => {
-  if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); void sendReply() }
-})
 addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return
   // A half-typed reply is the innermost thing of all. Escape steps out of the
   // field and leaves the drawer open; closing it here would discard what the
   // user had written, and the field is the one place in the drawer where esc
   // has something of its own to mean.
-  if (document.activeElement === $('d-replytext')) { $('d-replytext').blur(); return }
+  if (MCW.escapeFromReply()) return
   // The link dialog is the innermost thing open, so esc answers that first and
   // leaves the drawer where it is.
   if (!$('settingspop').hidden) { closeSettings(); return }
+  if (fleetForm) { closeFleetForm(); return }
   if (steerForm) { closeSteerForm(); return }
   if (pendingLink) { closeLinkDialog(); return }
   // An armed command is the innermost thing open after the dialog: esc should
   // put the pointer down before it starts closing panels.
   if (S.armed) { disarm(); return }
+  // Budget mode is a lens over the whole page, entered from the rail's frame
+  // chip. Leaving it moves nothing else, so it answers before any view closes.
+  if (MCBG.mode() === 'budget') { MCBG.setMode('off'); return }
   // the SECOND Escape (or one pressed with the field never focused,
   // since `#orb-ask`'s own handler already stopped propagation on the
   // first) collapses the transcript -- a VIEW action, guarded on there
@@ -2503,7 +2741,7 @@ addEventListener('keydown', (e) => {
   // an Escape another view still needs.
   if (S.orchTurns.length > 0 && !S.orchTranscriptHidden) { S.orchTranscriptHidden = true; renderOrchTranscript(); return }
   S.linkFrom = null
-  closeDrawer()
+  MCW.close()
 })
 
 // ===================================================================== mood
@@ -2536,7 +2774,7 @@ const ORCH_BLURB_STALE_MS = 2 * 10 * 60_000
  *
  *  this is also the one place `orchestrator.busy` is read every time
  *  it can possibly change (the snapshot, the SSE `orchestrator` frame, and
- *  sendAsk's own optimistic busy toggles all call this), so it is the
+ *  the ask engine's own optimistic busy toggles all call this), so it is the
  *  natural single call site for telling the presence swarm to glow/spin up
  *  while Syzygy is thinking. `window.MCS` may not exist yet (the swarm's ES
  *  module loads after this classic script) or the swarm may never become
@@ -2570,10 +2808,10 @@ const noteAskDelta = () => {
   clearTimeout(stallTimer)
   stallTimer = setTimeout(() => {
     askStalled = true
-    // Park the visible turn too: the transcript's trailing "…" is the same
+    // Park the visible turn too: both transcripts' trailing "…" is the same
     // claim as the glow and would otherwise contradict it.
     for (const t of S.orchTurns) if (t.streaming) t.streaming = false
-    renderOrchTranscript()
+    MCQ.renderAll()
     renderBlurb()
   }, ASK_STALL_MS)
   if (wasStalled) renderBlurb()
@@ -2652,18 +2890,40 @@ const renderOrchActions = (box, t) => {
     // (parseActions), so this resolves the ref for the LABEL only -- the
     // tooltip shows exactly the text that will be enqueued.
     const reportTo = a.report_to ? resolveSessionRef(a.report_to) : null
+    // A drop goes to this turn's own peer. A turn with none renders a button
+    // that cannot be pressed: never a guess, and never "the only peer", which
+    // stops being true the moment a second one is paired.
+    const dropPaths = Array.isArray(a.paths) ? a.paths : []
+    const noPeer = a.kind === 'drop' && !t.peer
+    // `a.model` reaches this label already validated (orchestrator.mjs's
+    // parseActions drops a shaped-wrong one before it ever gets here), so
+    // showing it needs no check of its own beyond "is it set".
+    const modelTag = a.model ? ` · ${a.model}` : ''
     const label = a.kind === 'link' ? `link ${nameOf(from)} → ${nameOf(to)}`
       : a.kind === 'prompt' ? `send to ${nameOf(to)}` + (reportTo ? ` ↩ ${nameOf(reportTo)}` : '')
-      : a.kind === 'dispatch' ? `queue brief: ${a.title}`
-      : a.kind === 'spawn' ? `spawn ${a.name || 'collector'} in ${shortPath(a.cwd)}`
+      : a.kind === 'dispatch' ? `queue brief: ${a.title}${modelTag}`
+      : a.kind === 'spawn' ? `spawn ${a.name || 'collector'}${modelTag} in ${shortPath(a.cwd)}`
+      : a.kind === 'arm_resume' ? (a.mode === 'disarm' ? 'disarm limit resume'
+        : a.mode === 'arm_weekly' ? 'arm limit resume (5h + 7d)' : 'arm limit resume')
+      : a.kind === 'drop' ? (noPeer ? 'drop: no peer on this turn' : `drop ${dropPaths.length} file(s) to ${t.peer}`)
       : a.kind
     const btn = el('button', 'orchact' + (applied ? ' applied' : ''), (applied ? '✓ ' : '') + label)
     btn.type = 'button'
-    btn.disabled = !!applied
-    const detail = a.note || a.text || a.prompt || a.ask || ''
+    btn.disabled = !!applied || noPeer
+    const detail = a.kind === 'drop' ? [a.note, ...dropPaths].filter(Boolean).join(String.fromCharCode(10))
+      : a.note || a.text || a.prompt || a.ask || ''
     if (detail) btn.title = detail
-    if (!applied) {
-      btn.addEventListener('click', async () => {
+    if (!applied && !noPeer) {
+      btn.addEventListener('click', async (ev) => {
+        // A drop's modifiers open the Peering panel's composer, filled from
+        // this proposal and aimed at this turn's peer: ⇧ to strike a path or
+        // write a note first, ⌥ to see what the filter would let leave. Neither
+        // sends anything, so neither marks the action applied. Read off this
+        // click, never off a held-key flag.
+        if (a.kind === 'drop' && (ev.shiftKey || ev.altKey)) {
+          MCN.openDropComposer({ peer: t.peer, paths: dropPaths, note: a.note || '', dryRun: ev.altKey && !ev.shiftKey })
+          return
+        }
         // A spawn takes seconds and used to give NOTHING back until it
         // finished, so it was pressed three times and started three
         // real sessions. Disable and relabel FIRST, synchronously, before
@@ -2681,71 +2941,51 @@ const renderOrchActions = (box, t) => {
           btn.disabled = false
           btn.textContent = original
         }
+        // A liaison turn's apply names its ask, and the relay stores which peer it
+        // was for on whatever record the apply creates. The pane never names the
+        // peer itself.
+        const forAsk = t.askId ? { forAsk: t.askId } : {}
         const r = a.kind === 'link'
           ? await post('/api/link', { from, to, note: a.note || '' })
           : a.kind === 'prompt'
-            ? await post('/api/command', { targetId: to, verb: 'prompt', payload: { text: a.text || '' } })
+            ? await post('/api/command', { targetId: to, verb: 'prompt', payload: { text: a.text || '' }, ...forAsk })
           : a.kind === 'dispatch'
             ? await post('/api/request/create', {
                 title: a.title, project: a.project || '', ask: a.ask || '', brief: a.brief || null,
+                model: a.model, effort: a.effort, ...forAsk,
               })
           : a.kind === 'spawn'
             ? await post('/api/spawn', {
                 cwd: a.cwd, name: a.name || '', prompt: a.prompt,
-                model: a.model, effort: a.effort,
+                model: a.model, effort: a.effort, ...forAsk,
+              })
+          : a.kind === 'drop'
+            ? await post('/api/peer/' + encodeURIComponent(t.peer) + '/drop', { paths: dropPaths, note: a.note || '' })
+          : a.kind === 'arm_resume'
+            ? await post('/api/resume', {
+                armed: a.mode !== 'disarm', by: 'orchestrator',
+                ...(a.mode === 'disarm' ? {} : { windows: a.mode === 'arm_weekly' ? ['fiveHour', 'sevenDay'] : ['fiveHour'] }),
               })
             : { error: 'unknown action kind' }
         if (r.error) { restore(); toast('could not apply: ' + r.error, { kind: 'warn' }); return }
         t.appliedIdx = t.appliedIdx || new Set()
         t.appliedIdx.add(i)
         renderOrchActions(box, t)
-        toast('applied')
+        // The relay re-checks every path and leaves out the ones it refuses
+        // rather than failing the drop, so say how many did not go.
+        const left = a.kind === 'drop' && Array.isArray(r.refused) ? r.refused.length : 0
+        if (left) toast(`applied; ${left} ${left === 1 ? 'path was' : 'paths were'} left out`, { kind: 'warn' })
+        else toast('applied')
       })
     }
     box.appendChild(btn)
   }
 }
 
-/** while a reply is still streaming, the server has not yet had a
- *  chance to strip a trailing action fence (`parseActions` only runs once
- *  the whole turn is done) -- so the raw ```json block would otherwise
- *  flash into view character by character as the model types it, then
- *  vanish the instant `d.text` replaces it on `done`. Chosen fix: buffer a
- *  trailing UNCLOSED fence (an odd count of "```" markers) out of what is
- *  shown, holding everything from the last opening marker onward until it
- *  either closes (parity flips back to even -- a legitimate code sample the
- *  model included, shown in full) or the turn ends and the server's own
- *  cleaned text takes over entirely. Only ever trims a SUFFIX, so it never
- *  hides prose that came before the fence. */
-const visibleWhileStreaming = (answer) => {
-  // Actions always arrive as a TRAILING fenced json block, so hide it for the
-  // whole of streaming -- closed as well as open. Hiding only an unclosed
-  // fence (the odd-count rule below) meant that the moment the model wrote
-  // its closing ``` the count went even and the raw JSON became visible, and
-  // it then sat there until the server's `done` frame arrived with the
-  // cleaned text -- seconds later, because the child lives on past its last
-  // text frame -- so the raw payload sat in the transcript and only slowly
-  // turned into a button.
-  const open = answer.lastIndexOf('```json')
-  if (open >= 0) return answer.slice(0, open).replace(/\s+$/, '')
-  // Any other unclosed fence: hide the incomplete block, as before.
-  const fences = (answer.match(/```/g) || []).length
-  if (fences % 2 === 0) return answer
-  return answer.slice(0, answer.lastIndexOf('```')).replace(/\s+$/, '')
-}
-
 /** The transcript, MCX-reconciled by turn id -- contains no input of its
  * own, so `#orb-ask` living outside it is never at risk from a
  *  re-render here. `.gone`, never removed and re-added: an empty transcript
  *  is the common case (nobody has asked anything yet this session).
- *
- *  the answer and the failure reason are now two SEPARATE
- *  elements, `.orcha` and `.orcherr` -- a turn that streamed a real, partial
- *  answer before hitting e.g. a budget cap keeps showing that answer, with
- *  the reason it stopped underneath it, rather than the error blanking the
- *  whole bubble. `.orcha` itself hides when there is neither real text nor
- *  an in-progress "…" ('s "a reply that is ONLY an action block must
- *  not render an empty bubble").
  *
  *  visibility is `has turns AND not dismissed` -- `S.orchTranscriptHidden`
  *  is a VIEW toggle only (the × below, and Escape), never a conversation
@@ -2755,36 +2995,9 @@ const renderOrchTranscript = () => {
   const visible = S.orchTurns.length > 0 && !S.orchTranscriptHidden
   MCX.show(box, visible)
   MCX.show($('orb-transcript-bar'), visible)
-  MCX.reconcile(box, S.orchTurns, {
-    key: (t) => t.id,
-    create: () => {
-      const card = el('div', 'orchturn')
-      card.appendChild(el('div', 'orchq'))
-      card.appendChild(el('div', 'orcha'))
-      card.appendChild(el('div', 'orcherr'))
-      card.appendChild(el('div', 'orchacts'))
-      return card
-    },
-    update: (node, t) => {
-      MCX.setText(node.querySelector('.orchq'), t.question)
-      const shown = t.streaming ? visibleWhileStreaming(t.answer) : t.answer
-      const answerEl = node.querySelector('.orcha')
-      MCX.show(answerEl, t.streaming || shown.trim().length > 0)
-      MCX.setText(answerEl, shown + (t.streaming ? ' …' : ''))
-      // a queued turn is WAITING, not failed. It reads as a status
-      // line rather than a ⚠, and carries no `errored` class, because the
-      // human did nothing wrong and nothing has been lost -- it goes out by
-      // itself the moment the slot frees.
-      const errEl = node.querySelector('.orcherr')
-      MCX.show(errEl, !!t.error || !!t.queued)
-      if (t.queued) MCX.setText(errEl, '⋯ queued — will send when Syzygy is free')
-      else if (t.error) MCX.setText(errEl, '⚠ ' + t.error)
-      MCX.toggle(node, 'streaming', !!t.streaming)
-      MCX.toggle(node, 'queued', !!t.queued)
-      MCX.toggle(node, 'errored', !!t.error && !t.queued)
-      renderOrchActions(node.querySelector('.orchacts'), t)
-    },
-  })
+  // One renderer for both transcripts (cmdbar.js), so the card markup and the
+  // MCX config exist in exactly one place.
+  MCQ.renderTurns(box)
 }
 
 $('orb-transcript-close').addEventListener('click', () => {
@@ -2799,6 +3012,7 @@ $('orb-transcript-new').addEventListener('click', async () => {
   const r = await post('/api/orchestrator/clear', {})
   if (r?.ok === false) { toast('Syzygy: could not start a new conversation', { kind: 'warn' }); return }
   S.orchTurns = []
+  if (r?.thread) { S.orchThreadId = r.thread.id }
   renderOrchTranscript()
   toast('started a new conversation with Syzygy')
 })
@@ -2809,289 +3023,160 @@ $('orb-transcript-new').addEventListener('click', async () => {
  *  Escape, or one pressed while the field never had focus, which collapses
  *  the transcript). `stopPropagation` here keeps that window-level handler
  *  from ALSO firing on the SAME keystroke -- the same pattern
- *  `d-titleedit`'s own Escape handler uses. */
+ *  `d-titleedit`'s own Escape handler uses.
+ *
+ *  The engine -- the optimistic echo, the 409 queue, the drain -- lives in
+ *  cmdbar.js, because the rail and the command bar must share exactly one
+ *  queue: two would 409 against each other. */
 const sendAsk = async () => {
   const input = $('orb-ask')
   const text = input.value.trim()
   if (!text) return
-  // NO client-side busy guard. The server is the only thing that can
-  // arbitrate the shared slot: `ask()` PREEMPTS an in-flight blurb and
-  // 409s only behind another real ask. A guard here refused to send while the
-  // invisible after-reply blurb held the slot, so the preemption it exists to
-  // trigger could never run and the pane just showed "still answering" for a
-  // turn they could not see. A genuine 409 comes back through the `!r.ok`
-  // path below, which keeps the echoed prompt and attaches the reason to it.
   input.value = ''
-  // echo the prompt into the transcript IMMEDIATELY, optimistically,
-  // before the request has even landed -- the old code waited for the
-  // first SSE frame to create the turn, which is exactly why a prompt sat
-  // invisible until the whole thing finished or errored. `pending`/
-  // `serverId: null` marks it as not yet claimed by a real server turn id;
-  // the SSE handler below finds and claims this SAME object (never a
-  // second, duplicate turn) the instant the server's first frame arrives.
-  const turn = {
-    id: 'pending-' + Math.random().toString(36).slice(2), serverId: null, pending: true,
-    question: text, answer: '', streaming: true, actions: [], rejected: [], error: null,
-  }
-  S.orchTurns = [...S.orchTurns, turn].slice(-20)
-  S.orchTranscriptHidden = false
-  renderOrchTranscript()
-  S.orchestrator = { blurb: '', blurbAt: 0, ...(S.orchestrator || {}), busy: true, asking: true }
-  renderBlurb()
-  const r = await post('/api/orchestrator/ask', { text })
-  if (!r.ok) {
-    // a turn refused because something else holds the slot is
-    // QUEUED, never dropped. It was previously shown as an error and then
-    // forgotten, so a message typed at the wrong moment was gone for good
-    // with no way to retry it but retyping. It keeps its place in the
-    // transcript and is marked queued; `drainAskQueue` re-sends it the
-    // moment busy clears. Any OTHER failure (503, network) still surfaces
-    // as an error on the echoed prompt -- those are not worth retrying
-    // blindly, and a silent retry loop against a dead relay is worse than
-    // an honest failure.
-    if (isBusyRefusal(r.error)) {
-      turn.pending = false
-      turn.streaming = false
-      turn.queued = true
-      askQueue.push({ turn, text })
-      renderOrchTranscript()
-      return
-    }
-    turn.pending = false
-    turn.streaming = false
-    turn.error = r.error || 'could not ask'
-    renderOrchTranscript()
-    toast('Syzygy: ' + (r.error || 'could not ask'), { kind: 'warn' })
-    S.orchestrator = { ...(S.orchestrator || {}), busy: false, asking: false }
-    renderBlurb()
-  }
-}
-
-/** A 409 from `ask()` -- the only refusal worth holding onto, since it means
- *  "later would work". Matched on the message the relay actually sends. */
-const isBusyRefusal = (err) => typeof err === 'string' && /already busy with a turn|^busy$/i.test(err)
-
-/** Queued turns, oldest first. Drained one at a time: the server still only
- *  runs one ask at a time, so releasing them all at once would just make
- *  every one but the first 409 again. */
-const askQueue = []
-let draining = false
-
-const drainAskQueue = async () => {
-  if (draining || !askQueue.length) return
-  if (S.orchestrator?.busy) return
-  draining = true
-  try {
-    while (askQueue.length && !S.orchestrator?.busy) {
-      const next = askQueue[0]
-      const r = await post('/api/orchestrator/ask', { text: next.text })
-      if (!r.ok) {
-        // Still busy -- leave it at the head of the queue and wait for the
-        // next busy:false. Anything else is a real failure: surface it on
-        // the turn and drop it from the queue rather than spinning.
-        if (isBusyRefusal(r.error)) break
-        askQueue.shift()
-        next.turn.queued = false
-        next.turn.error = r.error || 'could not ask'
-        renderOrchTranscript()
-        continue
-      }
-      askQueue.shift()
-      next.turn.queued = false
-      next.turn.pending = true
-      next.turn.streaming = true
-      next.turn.serverId = null
-      renderOrchTranscript()
-      S.orchestrator = { blurb: '', blurbAt: 0, ...(S.orchestrator || {}), busy: true, asking: true }
-      renderBlurb()
-    }
-  } finally { draining = false }
+  await MCQ.ask(text)
 }
 $('orb-ask').addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter') { ev.preventDefault(); void sendAsk() }
   else if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); ev.target.blur() }
 })
 
-// ====================================================================== SSE
+// One event, several shapes (the transport scoping.mjs's own 'scope' event
+// already uses): a blurb update carries {blurb, blurbAt, busy} with no
+// `id`; an ask-turn frame carries {id, delta|done|error, text?, actions?}
+// and may ALSO carry `busy` (both ask() and refreshBlurb() broadcast
+// their own busy:true/false around the ONE shared concurrency slot -- see
+// orchestrator.mjs); a thread change carries {threads, currentId}. This
+// handler owns the busy/blurb half. The ask-turn and thread halves are
+// cmdbar.js's own registration on the same event, which runs after this one.
+//
+// orchestrator.busy is what drives the presence swarm's streams
+// look thinking indicator too (swarm-math.js's easeThinking) -- renderBlurb
+// runs on every S.orchestrator change (this handler, the snapshot, and
+// the ask engine's own optimistic busy toggles), so ONE call site there is
+// enough; see renderBlurb's own body for the actual MCS.setBusy call.
+MCE.on('orchestrator', (d) => {
+  if ('busy' in d || 'blurb' in d) {
+    S.orchestrator = { blurb: '', blurbAt: 0, busy: false, ...(S.orchestrator || {}), ...d }
+    // A frame that only says busy:true/false never carries a stale
+    // `blurb`/`blurbAt` to overwrite the real ones with -- `...d` above is
+    // safe here because such a frame simply omits those two keys.
+    renderBlurb()
+    // the slot just freed -- send whatever was typed while
+    // it was held. This is the ONLY drain trigger, so a queued turn can
+    // never be released while an ask is still running.
+    if (!S.orchestrator.busy) void MCQ.drain()
+  }
+})
+
+// =================================================================== stream
+// The relay's event stream. The DISPATCH lives in stream.js (global MCE); what
+// is left here is this file's own handlers, and the ones below are the ones
+// with no other section to live in. Everything feature-shaped registers beside
+// its feature -- `sessions` in the sessions section, `usage` in metrics, and so
+// on -- so a change to one feature's live update is an edit inside that
+// feature's own section.
 const connect = () => {
-  const src = new EventSource('/api/stream')
   const pill = $('conn')
   pill.dataset.tip = `Connecting\nReaching the relay at ${location.origin}…`
-  src.addEventListener('open', () => {
-    S.connected = true
-    S.connectedAt = Date.now()
-    pill.className = 'pill ok'; pill.lastElementChild.textContent = 'live'
-    pill.dataset.tip = `Live\nSubscribed to the relay's event stream at ${location.origin}.\n`
-      + 'Sessions, events, questions and project scans all arrive over this one connection.'
-  })
-  src.addEventListener('error', () => {
-    S.connected = false
-    S.connectedAt = null
-    pill.className = 'pill down'; pill.lastElementChild.textContent = 'reconnecting'
-    pill.dataset.tip = `Reconnecting\nThe relay at ${location.origin} stopped answering.\n`
-      + 'The browser retries on its own; nothing here needs a reload. Numbers on screen are the last ones received.'
-    MCD.onDisconnect()
-  })
-  src.addEventListener('snapshot', (m) => {
-    const d = JSON.parse(m.data)
-    S.sessions = d.sessions; S.events = d.events; S.questions = d.questions
-    S.approvals = d.approvals; S.links = d.links
-    S.viewers = d.viewers ?? 1
-    S.projects = d.projects ?? []
-    MCP.render()
-    S.dispatch = d.dispatch ?? { requests: [] }
-    S.steering = d.steering ?? { custom: [] }
-    // The bootstrap renderSteer() call ran before the stream connected, against
-    // the default empty list -- a page load (or a reconnect) is exactly when a
-    // custom button already on disk needs to appear.
-    renderSteer(); syncArmed()
-    S.canvas = d.canvas ?? S.canvas
-    // snapshot()'s shape (relay.mjs) differs on purpose from the `usage` SSE
-    // event's below: snapshot carries `usage`/`usageHistory`/`afterReset.queue`
-    // as three top-level fields (see relay.mjs's snapshot() comment), while
-    // the `usage` event and GET /api/usage both carry the bundled
-    // {usage, history, queue} shape defines for those two.
-    S.usage = d.usage ?? null
-    S.usageHistory = d.usageHistory ?? []
-    S.afterReset = d.afterReset ?? { queue: [] }
-    S.voice = d.voice ?? S.voice
-    S.hud = d.hud ?? S.hud
-    // Whether a password is configured (and not SZG_PANE_PASSWORD_DISABLED)
-    // doesn't change over a connection's lifetime outside a relay restart, so
-    // reading it only off the snapshot -- never the lighter deltas below --
-    // is enough.
-    S.auth = d.auth ?? { enabled: false }
-    renderAuthSection()
-    warnIfReadsAreOpen()
-    // No `?? default` here on purpose (the older-relay rule, /): an
-    // older relay sends no `orchestrator` key at all, and `d.orchestrator`
-    // then reads `undefined`, which renderBlurb() already treats as "no
-    // blurb" without needing a distinct sentinel.
-    S.orchestrator = d.orchestrator
-    renderBlurb()
-    if (!S.focus && S.sessions.length) S.focus = bestFocus()
-    renderAll()
-    refreshPinnedLastMessage()
-    renderVoiceSettings()
-    renderHudSettings()
-    MCV.refresh()
-  })
-  src.addEventListener('sessions', (m) => {
-    S.sessions = JSON.parse(m.data)
-    if (!S.sessions.find((s) => s.id === S.focus)) S.focus = bestFocus()
-    renderCards(); renderTiles(); renderHeat(); recomputeMood(); renderPills(); MCC.render()
-    refreshPinnedLastMessage()
-  })
-  src.addEventListener('events', (m) => {
-    const incoming = JSON.parse(m.data)
-    S.events = [...S.events, ...incoming].slice(-400)
-    for (const e of incoming) firePulse(e.status === 'deny' ? 1.4 : 0.75)
-    renderFeed(); recomputeMood()
-  })
-  src.addEventListener('questions', (m) => { S.questions = JSON.parse(m.data); renderInbox() })
-  src.addEventListener('approvals', (m) => { S.approvals = JSON.parse(m.data); renderInbox() })
-  src.addEventListener('links', (m) => { S.links = JSON.parse(m.data); layoutWires(); MCC.render() })
-  src.addEventListener('dispatch', (m) => { S.dispatch = JSON.parse(m.data); MCD.render() })
-  src.addEventListener('steering', (m) => { S.steering = JSON.parse(m.data); renderSteer(); syncArmed() })
-  src.addEventListener('scope', (m) => { MCD.onScope(JSON.parse(m.data)) })
-  src.addEventListener('projects', (m) => { S.projects = JSON.parse(m.data); MCP.render(); MCD.render() })
-  src.addEventListener('canvas', (m) => { S.canvas = JSON.parse(m.data); MCC.render() })
-  // Its own event, never the whole snapshot -- same discipline as `canvas`.
-  // `MCV.refresh()` re-runs discovery immediately rather than waiting for an
-  // unrelated DOM mutation, so a toggle in another tab removes or adds every
-  // mic button here within one SSE round trip.
-  src.addEventListener('voice', (m) => {
-    S.voice = JSON.parse(m.data)
-    renderVoiceSettings()
-    MCV.refresh()
-    renderModeline()
-  })
-  // Its own event, never the whole snapshot -- same discipline as `voice`.
-  // Fires when this tab's own gear writes a pin, and when another tab (or
-  // `just spinner`, or a hand edit) does -- so two open panes stay in sync.
-  src.addEventListener('hud', (m) => { S.hud = JSON.parse(m.data); renderHudSettings() })
-  src.addEventListener('viewers', (m) => { S.viewers = JSON.parse(m.data).viewers; renderPills() })
-  // One event, two shapes (the transport scoping.mjs's own 'scope' event
-  // already uses): a blurb update carries {blurb, blurbAt, busy} with no
-  // `id`; an ask-turn frame carries {id, delta|done|error, text?, actions?}
-  // and may ALSO carry `busy` (both ask() and refreshBlurb() broadcast
-  // their own busy:true/false around the ONE shared concurrency slot -- see
-  // orchestrator.mjs). Either half may be present alone or together, so both
-  // branches below are unconditional on what the frame actually carries.
-  //
-  // orchestrator.busy is what drives the presence swarm's streams
-  // look thinking indicator too (swarm-math.js's easeThinking) -- renderBlurb
-  // runs on every S.orchestrator change (this handler, the snapshot, and
-  // sendAsk's own optimistic busy toggles), so ONE call site there is enough;
-  // see renderBlurb's own body for the actual MCS.setBusy call.
-  src.addEventListener('orchestrator', (m) => {
-    const d = JSON.parse(m.data)
-    if ('busy' in d || 'blurb' in d) {
-      S.orchestrator = { blurb: '', blurbAt: 0, busy: false, ...(S.orchestrator || {}), ...d }
-      // A frame that only says busy:true/false never carries a stale
-      // `blurb`/`blurbAt` to overwrite the real ones with -- `...d` above is
-      // safe here because such a frame simply omits those two keys.
-      renderBlurb()
-      // the slot just freed -- send whatever was typed while
-      // it was held. This is the ONLY drain trigger, so a queued turn can
-      // never be released while an ask is still running.
-      if (!S.orchestrator.busy) void drainAskQueue()
-    }
-    if (d.id) {
-      // claim the optimistic turn sendAsk() already echoed into the
-      // transcript, rather than creating a second, duplicate one -- there
-      // is at most one pending, unclaimed turn at a time (the shared
-      // concurrency slot allows only one ask in flight), so the FIRST frame
-      // carrying a real server id binds to it and keeps its `id` (the MCX
-      // key) stable for the rest of the turn's life.
-      let t = S.orchTurns.find((x) => x.serverId === d.id)
-      if (!t) {
-        const pending = S.orchTurns.find((x) => x.pending && x.serverId == null)
-        if (pending) { pending.serverId = d.id; pending.pending = false; t = pending }
-      }
-      if (!t) {
-        // Defensive fallback only -- e.g. a page load that missed sendAsk's
-        // own echo (a reload mid-turn). Still renders something rather than
-        // silently dropping frames for a turn nothing here is tracking.
-        t = { id: 'srv-' + d.id, serverId: d.id, question: '', answer: '', streaming: true, actions: [], rejected: [], error: null }
-        S.orchTurns = [...S.orchTurns, t].slice(-20)
-      }
-      if (typeof d.delta === 'string') {
-        t.answer += d.delta
-        // a delta resets the stall watchdog below. It also REVIVES a
-        // turn the watchdog already parked — the child can go quiet for a
-        // while and then resume, and a turn that started streaming again
-        // must look like it.
-        t.streaming = true
-        noteAskDelta()
-      }
-      // the server's own cleaned text (parseActions, with a parsed
-      // action fence already stripped) replaces whatever raw text streamed
-      // in via deltas above -- identical to it whenever no fence was found,
-      // so this is a no-op for the common case, and sent on BOTH `done` and
-      // `error` (an errored turn keeps whatever real text the model
-      // produced before it stopped).
-      if (typeof d.text === 'string') t.answer = d.text
-      if (d.done) { t.streaming = false; t.actions = d.actions || []; t.rejected = d.rejected || [] }
-      if (d.error) { t.streaming = false; t.error = d.error }
-      if (d.done || d.error) endAskStall()
-      renderOrchTranscript()
-    }
-  })
-  // The relay only sends this on an actual change -- reading, history
-  // ring, after-reset queue, or a threshold crossing -- so every arrival here
-  // is real news, never a 15s heartbeat. `d.crossed` is the relay's own
-  // crossings() output (relay.mjs's usageTick): app.js never recomputes it,
-  // only fires for what it is told already happened.
-  src.addEventListener('usage', (m) => {
-    const d = JSON.parse(m.data)
-    S.usage = d.usage
-    S.usageHistory = d.history ?? []
-    S.afterReset = { queue: d.queue ?? [] }
-    renderTiles()
-    for (const c of d.crossed ?? []) fireUsageAlert(c)
-  })
+  MCE.connect('/api/stream')
 }
+
+MCE.on('open', () => {
+  S.connected = true
+  S.connectedAt = Date.now()
+  const pill = $('conn')
+  pill.className = 'pill ok'; pill.lastElementChild.textContent = 'live'
+  pill.dataset.tip = `Live\nSubscribed to the relay's event stream at ${location.origin}.\n`
+    + 'Sessions, events, questions and project scans all arrive over this one connection.'
+})
+MCE.on('error', () => {
+  S.connected = false
+  S.connectedAt = null
+  const pill = $('conn')
+  pill.className = 'pill down'; pill.lastElementChild.textContent = 'reconnecting'
+  pill.dataset.tip = `Reconnecting\nThe relay at ${location.origin} stopped answering.\n`
+    + 'The browser retries on its own; nothing here needs a reload. Numbers on screen are the last ones received.'
+  MCD.onDisconnect()
+})
+
+// ONE handler, deliberately: its statement order is load-bearing (S.projects is
+// rendered before S.dispatch is even assigned; renderAll must precede
+// MCW.refreshLastMessage), so per-field handlers would reorder it and "no
+// behaviour change" could not be proved. The seam for a NEW field is
+// MCE.onField('thing', fn) from that feature's own file, which runs after all
+// of this because it registers after it.
+MCE.on('snapshot', (d) => {
+  S.sessions = d.sessions; S.events = d.events; S.questions = d.questions
+  S.approvals = d.approvals; S.links = d.links
+  S.viewers = d.viewers ?? 1
+  S.projects = d.projects ?? []
+  MCP.render()
+  S.dispatch = d.dispatch ?? { requests: [] }
+  S.steering = d.steering ?? { custom: [] }
+  // The bootstrap renderSteer() call ran before the stream connected, against
+  // the default empty list -- a page load (or a reconnect) is exactly when a
+  // custom button already on disk needs to appear.
+  renderSteer(); syncArmed()
+  S.canvas = d.canvas ?? S.canvas
+  // snapshot()'s shape (relay.mjs) differs on purpose from the `usage` SSE
+  // event's below: snapshot carries `usage`/`usageHistory`/`afterReset.queue`
+  // as three top-level fields (see relay.mjs's snapshot() comment), while
+  // the `usage` event and GET /api/usage both carry the bundled
+  // {usage, history, queue} shape defines for those two.
+  S.usage = d.usage ?? null
+  S.usageHistory = d.usageHistory ?? []
+  S.afterReset = d.afterReset ?? { queue: [] }
+  S.voice = d.voice ?? S.voice
+  S.hud = d.hud ?? S.hud
+  // Whether a password is configured (and not SZG_PANE_PASSWORD_DISABLED)
+  // doesn't change over a connection's lifetime outside a relay restart, so
+  // reading it only off the snapshot -- never the lighter deltas below --
+  // is enough.
+  S.auth = d.auth ?? { enabled: false }
+  renderAuthSection()
+  warnIfReadsAreOpen()
+  // No `?? default` here on purpose (the older-relay rule, /): an
+  // older relay sends no `orchestrator` key at all, and `d.orchestrator`
+  // then reads `undefined`, which renderBlurb() already treats as "no
+  // blurb" without needing a distinct sentinel.
+  S.orchestrator = d.orchestrator
+  renderBlurb()
+  if (!S.focus && S.sessions.length) S.focus = bestFocus()
+  renderAll()
+  MCW.refreshLastMessage()
+  renderVoiceSettings()
+  renderHudSettings()
+  MCV.refresh()
+})
+
+// A relay predating this field sends no `pasteboard` key at all, so the
+// fan-out's `name in d` guard leaves S.pasteboard undefined and every reader
+// takes it with `?? []`.
+MCE.onField('pasteboard', (v) => { S.pasteboard = v; MCK.render(); MCW.refreshPasteboard() })
+MCE.on('pasteboard', (d) => { S.pasteboard = d.pasteboard ?? []; MCK.render(); MCW.refreshPasteboard() })
+
+MCE.on('dispatch', (d) => { S.dispatch = d; MCD.render() })
+MCE.on('scope', (d) => { MCD.onScope(d) })
+// The projects event carries the DIGEST, the same shape as the snapshot's
+// `projects`: counts and one line per worktree. A view showing a project's
+// contents fetches its document when that project's changedAt moves.
+MCE.on('projects', (d) => { S.projects = d; MCP.render(); MCD.render() })
+MCE.on('canvas', (d) => { S.canvas = d; MCC.render() })
+// Its own event, never the whole snapshot -- same discipline as `canvas`.
+// `MCV.refresh()` re-runs discovery immediately rather than waiting for an
+// unrelated DOM mutation, so a toggle in another tab removes or adds every
+// mic button here within one SSE round trip.
+MCE.on('voice', (d) => {
+  S.voice = d
+  renderVoiceSettings()
+  MCV.refresh()
+  renderModeline()
+})
+// Its own event, never the whole snapshot -- same discipline as `voice`.
+// Fires when this tab's own gear writes a pin, and when another tab (or
+// `just spinner`, or a hand edit) does -- so two open panes stay in sync.
+MCE.on('hud', (d) => { S.hud = d; renderHudSettings() })
+MCE.on('viewers', (d) => { S.viewers = d.viewers; renderPills() })
 
 /* Each of these is a number with no units and no context, which is fine until
    you wonder what it counts. The tooltips are where that lives -- and they are
@@ -3131,6 +3216,9 @@ const setView = (name) => {
   MCP.setView(name)
   MCD.setView(name)
   MCC.setView(name)
+  // Before the next frame, so resize() measures the box the orb is actually
+  // in. The worst case if it ever ran after is one frame at the old size.
+  hostSwarmIn(SWARM_HOSTS[name])
   // The board lives on the control tab now, and was display:none until this
   // moment, so every card measured zero. Rebuild it (which resizes the card
   // sparkline canvases) and re-lay the wires over it.
@@ -3140,7 +3228,7 @@ const setView = (name) => {
 }
 for (const b of document.querySelectorAll('.tab')) b.addEventListener('click', () => setView(b.dataset.view))
 addEventListener('keydown', (e) => {
-  const map = { '1': 'control', '2': 'telemetry', '3': 'projects', '4': 'dispatch', '5': 'canvas' }
+  const map = { '1': 'control', '2': 'telemetry', '3': 'projects', '4': 'dispatch', '5': 'canvas', '6': 'sandbox', '7': 'space', '8': 'peering' }
   if (map[e.key] && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName ?? '')) setView(map[e.key])
 })
 
@@ -3177,6 +3265,8 @@ const renderModeline = () => {
     html = steerForm.goal
       ? `type the goal, then ${KEY('⌘')}${KEY('enter')} — the run arms next, and the session you click starts it · ${KEY('esc')} cancels`
       : `${steerForm.edit ? 'editing' : 'registering'} a steering button — ${KEY('⌘')}${KEY('enter')} saves · ${KEY('esc')} cancels`
+  } else if (fleetForm) {
+    html = `choose who gets <b>${escHtml(fleetForm.cmd.label)}</b> — ${KEY('⌘')}${KEY('enter')} sends · ${KEY('esc')} cancels`
   } else if (S.armed) {
     const what = `<b>${escHtml(S.armed.label)}</b>`
     const tail = marked ? ` · ${marked} marked · ${KEY('enter')} sends them · ${KEY('esc')} cancels`
@@ -3186,10 +3276,10 @@ const renderModeline = () => {
     else html = `${what} is armed — pick a session on the switchboard · ${KEY('⌥')}click marks several${tail}`
   } else if (S.mods.all) {
     html = n
-      ? `${KEY('A')} — a steering button now sends to <b>all ${n} session${n === 1 ? '' : 's'}</b> at once`
+      ? `${KEY('A')} — a steering button now sends to <b>all ${n} session${n === 1 ? '' : 's'}</b> at once · ${KEY('⇧')}click does the same on one button`
       : `${KEY('A')} — broadcast, but no sessions are on the board`
   } else if (S.mods.add) {
-    html = `${KEY('⌥')} — marks several sessions, once a steering button is armed`
+    html = `${KEY('⌥')} — marks several sessions once armed · ${KEY('⌥')}click a steering button picks a subset · ${KEY('⌥')}click the sweep button runs it past its gate`
   }
 
   box.innerHTML = html
@@ -3238,7 +3328,7 @@ const readFolds = () => {
 }
 const writeFolds = (v) => { try { localStorage.setItem(FOLD_KEY, JSON.stringify(v)) } catch {} }
 
-const SECTION = { feed: 'sec-feed', inbox: 'sec-inbox', steer: 'sec-steer' }
+const SECTION = { feed: 'sec-feed', inbox: 'sec-inbox', steer: 'sec-steer', pasteboard: 'sec-pasteboard' }
 const applyFolds = () => {
   const folds = readFolds()
   for (const [name, id] of Object.entries(SECTION)) {
@@ -3356,10 +3446,31 @@ wireAuthSection()
 
 applyTheme((() => { try { return localStorage.getItem(THEME_KEY) } catch { return null } })())
 MCR.attach({ S, steer, toast, el, compact, money, clockOf })
-MCP.attach({ S, post, toast, el, ago })
+MCP.attach({ S, post, toast, el, ago, needsOf })
+// Before MCD, whose create box mounts a preset strip, and before MCQ and MCC, whose capture-phase key listeners must register after this one's.
+MCT.attach({ S, $, el, post, toast })
 MCD.attach({ S, post, toast, el, compact, ago })
-MCC.attach({ S, post, toast, el, ago, openDrawer, openLinkDialog, needsOf, stoppedOf })
+MCW.attach({ S, $, el, post, toast, ago, compact, money, clockOf, nameOf, needsOf, rescope, renderCards })
+// Before MCC: canvas.js registers a capture-phase Escape listener on `window`
+// inside its attach, and capture listeners on one target run in registration
+// order.
+MCQ.attach({ S, $, el, post, toast, ago, needsOf, nameOf, renderOrchTranscript, renderOrchActions,
+             renderBlurb, noteAskDelta, endAskStall })
+// The pasteboard's rail panel, wired from its own module so this file only attaches it.
+MCK.attach({ S, $, el, post, toast, ago, nameOf })
+MCC.attach({ S, post, toast, el, ago, openDrawer: MCW.open, openLinkDialog, needsOf, stoppedOf })
+// Before MCF and MCSQ: both register a loader with it from their own attach,
+// and its `shed` handler must set S.shed before their snapshot handlers draw.
+MCBG.attach({ S, $, el, toast })
+MCF.attach({ S, $, el, post, toast, ago })
+MCTC.attach({ S, $, el, post, toast, ago })
+MCSQ.attach({ S, $, el, post, toast, ago })
 MCV.attach({ state: S, redrawModeline: renderModeline, toast })
+MCN.attach({ S, post, toast, el, ago, fmtBytes, focused, renderOrchTranscript, setView })
+MCPR.attach({ S, $, el, post, toast, ago })
+MCSP.attach({ S, post, toast, el, ago })
+MCG.attach({ S, $, el, post, toast, ago, nameOf })
+MCZ.attach({ S, $, el, post, toast, ago, nameOf, openDrawer: MCW.open })
 renderSteer()
 connect()
 
@@ -3371,6 +3482,25 @@ let swarmTried = false
 const swarmReady = () => {
   if (!swarmTried && window.MCS) { swarmTried = true; window.MCS.attach({ S }) }
   return !!window.MCS?.ready
+}
+
+/* WHICH VIEWS MAY BORROW THE ORB. One renderer and one WebGL context exist,
+   ever: the panel is the shader or nothing, and a second context on one
+   machine's compositor is the failure the context-loss handling exists to
+   survive. Moving a DOM node destroys neither the element nor its context,
+   boot() re-queries the canvas by id, and the two context listeners are on
+   the node itself -- so a view borrows the orb by taking the node and gives
+   it back by leaving. Adding a tab to this map and a positioned host element
+   with that id is the whole cost of putting the orb somewhere else. */
+const SWARM_HOSTS = { projects: 'pj-orb' }
+const swarmHome = () => document.querySelector('.orbpanel > .orbstage')
+const hostSwarmIn = (hostId) => {
+  const host = (hostId && document.getElementById(hostId)) || swarmHome()
+  const c = document.getElementById('swarm')
+  if (!host || !c || c.parentElement === host) return
+  host.appendChild(c)
+  const b = document.getElementById('swarm-mode')
+  if (b) host.appendChild(b)
 }
 
 // The notice is conditional on the thing it describes, never on the feature
@@ -3423,7 +3553,7 @@ const frame = (t) => {
   // from -- see the `events` SSE handler above), so the floor keeps that
   // same scope rather than narrowing to what happens to be on screen.
   if (S.sessions.some(genuinelyWorking)) S.activity = Math.max(S.activity, ACTIVITY_FLOOR)
-  if (S.view === 'control' && swarmReady()) window.MCS.frame(t)
+  if ((S.view === 'control' || SWARM_HOSTS[S.view]) && swarmReady()) window.MCS.frame(t)
   MCR.frame(t)
   requestAnimationFrame(frame)
 }

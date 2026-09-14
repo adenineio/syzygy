@@ -59,22 +59,81 @@ export const parseClaudeOptions = (help) => {
     }
   } catch { efforts = []; models = [] }
 
+  // Presence only, not a value: the flag's own help on 2.1.270 says it "only
+  // works with --print", so knowing it EXISTS is all a probe of --help can
+  // learn. Whether a --bg session actually honours it is a separate, live
+  // question and is not settled here.
+  const maxBudget = /(^|\n)\s{0,4}--max-budget-usd(?![\w-])/.test(String(help ?? ''))
+
   const source = efforts.length || models.length ? 'help' : 'fallback'
-  if (source === 'fallback') return { models: [...FALLBACK_MODELS], efforts: [...FALLBACK_EFFORTS], source }
+  if (source === 'fallback') return { models: [...FALLBACK_MODELS], efforts: [...FALLBACK_EFFORTS], source, maxBudget }
   return {
     models: [...models, ...FALLBACK_MODELS.filter((m) => !models.includes(m))],
     efforts: efforts.length ? efforts : [...FALLBACK_EFFORTS],
     source,
+    maxBudget,
   }
 }
 
 /** One `--help` at relay boot, the way pickClaudeBin probes capability once.
  *  A binary that cannot be run is not an error here -- it is the fallback
- *  list, and `source` reports it. */
+ *  list, and `source` reports it. `agents`/`agentSource` ride on every
+ *  return path -- including the no-bin and throw paths, where the roster
+ *  probe never ran and is reported the same way it reports itself:
+ *  `[]`/`'unavailable'`, never a missing key. */
 export const probeDispatchOptions = async (bin, run) => {
-  if (!bin) return parseClaudeOptions('')
+  if (!bin) return { ...parseClaudeOptions(''), agents: [], agentSource: 'unavailable' }
   try {
     const out = await run(bin, ['--help'], {})
-    return parseClaudeOptions(out?.code === 0 ? out.stdout : '')
-  } catch { return parseClaudeOptions('') }
+    const opts = parseClaudeOptions(out?.code === 0 ? out.stdout : '')
+    const roster = await probeAgentRoster(bin, run)
+    return { ...opts, ...roster }
+  } catch { return { ...parseClaudeOptions(''), agents: [], agentSource: 'unavailable' } }
+}
+
+// ---- the agent roster -------------------------------------------------------
+//
+// `claude --agent <name>` refuses a name that names no real agent, and its
+// refusal lists every agent the binary actually knows about -- personas
+// included, once the personas plugin is installed. That refusal is cheaper
+// and truer than any static list: it costs no turn (nothing after `--agent`
+// runs) and it can never go stale, because it is read off the same binary
+// every spawn uses.
+
+/** A name no template, skill or plugin will ever legitimately register --
+ *  chosen so the refusal this deliberately provokes is unambiguous. */
+export const ROSTER_SENTINEL = '__szg_roster_probe__'
+
+/** Pure. Never throws: an unfamiliar refusal format is an empty roster, not
+ *  a crash on relay boot. */
+export const parseAgentRoster = (text) => {
+  try {
+    const m = String(text ?? '').match(/Available agents:\s*([^\n]*)/)
+    if (!m) return []
+    return m[1].split(',').map((x) => x.trim())
+      .filter((x) => /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(x))
+  } catch { return [] }
+}
+
+/** `run(bin, argv, opts)` is expected to hand back `{ code, stdout, stderr }`.
+ *  The sentinel is refused (a non-zero exit) on every binary that understands
+ *  `--agent` at all, so `code === 0` means the sentinel somehow named a real
+ *  agent -- a coincidence to distrust, not a roster to trust, hence
+ *  `'unavailable'` rather than an empty-but-successful reading. Both stdout
+ *  and stderr are parsed together because the refusal has been observed on
+ *  the combined stream and which one a given build writes to is not part of
+ *  any contract this can rely on. */
+export const probeAgentRoster = async (bin, run) => {
+  const none = { agents: [], agentSource: 'unavailable' }
+  if (!bin) return none
+  try {
+    const out = await run(bin, ['--agent', ROSTER_SENTINEL, '--print', 'x'], {
+      timeout: 8000,
+      env: { ...process.env, SZG_HEADLESS: '1' },
+      closeStdin: true,
+    })
+    if (out?.code === 0) return none
+    const agents = parseAgentRoster(`${out?.stdout ?? ''}\n${out?.stderr ?? ''}`)
+    return agents.length ? { agents, agentSource: 'probe' } : none
+  } catch { return none }
 }

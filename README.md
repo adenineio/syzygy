@@ -77,7 +77,7 @@ one.
 
 ## The dashboard
 
-Five views, served by a local relay on loopback.
+Eight views, served by a local relay on loopback.
 
 - **Control** — the switchboard. Every live session as a card: name, model,
   context, spend, what it last said, whether it is waiting on you. A left rail
@@ -91,9 +91,29 @@ Five views, served by a local relay on loopback.
 - **Dispatch** — the queue. Below.
 - **Canvas** — sessions as draggable nodes with the wires between them, and a
   spawn form that starts a new session in a directory you choose.
+- **Sandbox** — a gallery where new components are tried on live board data
+  before any of them earns a place on a real view.
+- **Space** — every session as a card in 3D, with buckets along the bottom
+  that group them, send them a prompt, or expose files to them.
+- **Peering** — pairing with a second Syzygy on another machine, its health,
+  the asks between the two liaisons, file drops, and the wire log.
 
 Drag one card onto another to open a channel over Claude Code's own cross-session
 messaging bus. It is a real message, not a simulation.
+
+## The macOS app
+
+The dashboard can run as a real app instead of a browser tab:
+
+```
+just app-install             # builds Syzygy.app and puts it in ~/Applications
+```
+
+It opens the same pane the relay serves, keeps the login across launches,
+switches views on ⌘1 to ⌘7 and carries the pane's chords in its menu. If no
+relay answers it starts one the way the band does; quitting the app leaves
+the relay running, since sessions depend on it. The build is ad-hoc signed,
+so macOS asks once before the first launch.
 
 ## The terminal side pane
 

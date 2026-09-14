@@ -244,6 +244,24 @@ func (m Model) headerRow2(f Frame) string {
 	if f.BP == BPL && r.Rest() >= fmtx.W("? help")+1 {
 		help = "? help"
 	}
+	// A mode reached through the leader is on no tab, so no tab above is lit
+	// and its caption is lit here instead, where the help sits: the frame still
+	// holds at most three reverse-video runs. Where the block and a bare ? do
+	// not both fit, the ? keeps its place.
+	if caption, ok := bankCaption(m.mode); ok {
+		block := " " + caption + " "
+		tail := " " + help
+		if fmtx.W(block)+fmtx.W(tail)+1 > r.Rest() {
+			tail = " ?"
+		}
+		if fmtx.W(block)+fmtx.W(tail)+1 <= r.Rest() {
+			r.Add(theme.SBg, strings.Repeat(" ", r.Rest()-fmtx.W(block)-fmtx.W(tail)))
+			r.Add(theme.STab, block)
+			r.Add(theme.SLabel, tail)
+			return r.String()
+		}
+		help = "?"
+	}
 	r.Right(theme.SLabel, help)
 	return r.String()
 }

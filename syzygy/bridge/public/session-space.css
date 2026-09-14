@@ -1,0 +1,190 @@
+/* Syzygy -- the session-space tab. The stage's own session cards over one
+   line canvas, a row of eight buckets pinned to the foot, and a side list of
+   the tmux panes that are not on the board. Every rule is scoped under
+   #view-space, so the sandbox gallery's cards and chrome are untouched.
+   Flat, token-only, no animation or transition anywhere in this file. */
+
+/* `display` is only ever set under .on: an id selector outranks
+   .view:not(.on), so setting it unconditionally would leave the section
+   showing on every other tab. flex:1 is what lets a lone section fill the
+   app's column rather than shrink-wrap to content it does not have. The
+   canvas, the stage, the side list and the mode line are all absolutely
+   positioned; the bucket row is the only child left in flow, packed against
+   the foot. The mode line is pinned to the TOP of the view instead, on its
+   own line above the stage, so it can never sit over the bucket row --
+   however many lines the row wraps to, or how long the line's own text
+   gets -- and the row keeps its full hit area underneath it either way. */
+#view-space { flex: 1; position: relative; min-width: 0; min-height: 420px; }
+#view-space.on { display: flex; flex-direction: column; justify-content: flex-end; padding-block: 12px; }
+
+/* The scrollable stage area: the whole view minus the side column, between
+   the pinned hint line and the bucket row (both sit outside it and never
+   move). When the layout's own reach outgrows it -- more sessions than fit
+   at once -- this is what scrolls; cards keep their drawn size and nothing
+   here ever zooms them down to fit. The sandbox gallery's own `.gwrap`
+   scrolls the same way, one canvas kept over the visible part while the
+   real content moves underneath it. */
+#view-space .kwrap {
+  position: absolute; left: 0; top: 0; bottom: 0; right: 240px;
+  z-index: 1; overflow-y: auto; overflow-x: hidden;
+}
+
+/* The line canvas sits flat behind the cards and never takes a pointer, and
+   never grows with the content -- its own box always matches the wrap's
+   visible box, and the stage keeps it there as the wrap scrolls. */
+#view-space .kwrap #k-lines {
+  position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+  z-index: 0; pointer-events: none;
+}
+
+/* The cards' mount point. A normal (non-absolute) child of the wrap now, so
+   its own box -- grown to the layout's full height in session-space.js,
+   never less than the wrap's visible height -- is what the wrap measures as
+   its scrollable content. Transparent, so the line canvas behind it shows
+   through. */
+#view-space .kstage {
+  position: relative; z-index: 1; min-height: 100%; background: transparent;
+}
+
+/* ------------------------------------------------------------ the side list */
+#view-space .kside {
+  position: absolute; top: 12px; right: 12px; bottom: 12px; width: 228px;
+  z-index: 3; display: flex; flex-direction: column; min-height: 0;
+  border: 1px solid var(--edge); background: var(--surface);
+  border-radius: var(--r-surface);
+}
+#view-space .kside-body { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 0 8px; }
+#view-space .khead {
+  padding: 8px 12px 3px;
+  font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#view-space .krow {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  padding: 3px 12px; font-size: 10.5px; color: var(--text); cursor: default;
+}
+#view-space .krow:hover { background: var(--panel); }
+#view-space .klabel { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#view-space .kpane { flex: none; font-size: 9.5px; color: var(--grey); font-variant-numeric: tabular-nums; }
+#view-space .kquiet { padding: 8px 12px; font-size: 10px; color: var(--grey); }
+
+/* ------------------------------------------------------------ the buckets */
+/* The row spans the width but takes no pointer of its own, so the stage
+   under its empty stretch still answers; its chips and note take them back. */
+#view-space .kbuckets {
+  position: relative; z-index: 2; margin: 0 252px 0 12px;
+  display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px;
+  pointer-events: none;
+}
+#view-space .kbuckets > * { pointer-events: auto; }
+#view-space .kchip {
+  display: flex; align-items: center; gap: 7px; min-width: 0; max-width: 220px;
+  padding: 5px 9px; font: inherit; font-size: 10.5px; color: var(--text);
+  background: var(--panel); cursor: pointer;
+  border: 1px solid var(--edge-hi); border-left: 3px solid var(--szg-grp, #6f86a8);
+  border-radius: var(--r-control);
+}
+#view-space .kchip:hover { border-color: var(--accent-deep); border-left-color: var(--szg-grp, #6f86a8); }
+#view-space .kchip.empty {
+  color: var(--grey); background: transparent; cursor: default;
+  border-style: dashed; border-left-width: 1px; border-color: var(--edge-hi);
+}
+#view-space .kslot {
+  flex: none; font-size: 9.5px; color: var(--dim); font-variant-numeric: tabular-nums;
+}
+#view-space .kname { min-width: 0; color: var(--white); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#view-space .kchip.empty .kname { color: var(--grey); }
+#view-space .kkind { flex: none; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); }
+#view-space .kcount {
+  flex: none; min-width: 14px; padding: 0 4px; font-size: 9px; text-align: center;
+  color: var(--text); border: 1px solid var(--edge-hi); border-radius: var(--r-control);
+}
+#view-space .kadd { justify-content: center; min-width: 30px; color: var(--dim); border-left-width: 1px; border-left-color: var(--edge-hi); }
+#view-space .kadd:hover { color: var(--accent); border-left-color: var(--accent-deep); }
+#view-space .knote {
+  padding: 6px 10px; font-size: 10.5px; color: var(--text);
+  background: var(--panel); border: 1px solid var(--edge); border-left: 3px solid var(--amber);
+  border-radius: var(--r-surface);
+}
+
+/* ------------------------------------------------------------ the mode line */
+/* A slim line pinned to the top of the view, clear of the bucket row at the
+   foot no matter how that row wraps or how long this line's own text runs.
+   Empty text (idle: nothing to say) leaves an empty, invisible line rather
+   than collapsing the box, so nothing else in the view ever shifts. */
+#view-space .kmode {
+  position: absolute; left: 12px; top: 12px; right: 252px; z-index: 2;
+  min-height: 14px; line-height: 14px; pointer-events: none;
+  font-size: 10px; letter-spacing: .04em; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ------------------------------------------------------------ the rings */
+/* A carried card, and a card belonging to a `together` bucket. Outlines, not
+   borders: the card's size is fixed by the stage's layout, and a border
+   width change would move its content. The carried ring sits outside the
+   group ring so a card that is both shows both. */
+#view-space .gcard[data-space-group] { outline: 2px solid var(--szg-grp, #6f86a8); outline-offset: 2px; }
+#view-space .gcard.carried { box-shadow: 0 0 0 6px var(--bg), 0 0 0 8px var(--accent); }
+/* MAGNET: every card that is not already carried wears a faint edge, so what
+   the sweep will pick up is obvious. */
+#view-space.magnet .gcard:not(.carried) { box-shadow: 0 0 0 1px var(--accent-deep); }
+
+/* ------------------------------------------------------------ the gestures */
+/* An empty slot opens its editor, so it is as pressable as a filled one. */
+#view-space .kchip.empty { cursor: pointer; }
+/* The bucket BUCKET mode is aimed at. */
+#view-space .kchip.aimed { border-color: var(--accent); border-left-color: var(--szg-grp, #6f86a8); background: var(--surface); }
+#view-space .kchip.empty.aimed { border-style: solid; border-color: var(--accent); }
+#view-space .krow { cursor: pointer; }
+#view-space .krow.carried { background: var(--panel); box-shadow: inset 2px 0 0 var(--accent); }
+
+/* ------------------------------------------------------------ the editor */
+/* Absolute over the stage, just above the bucket row. `[hidden]` needs its
+   own rule: an author `display` otherwise beats the browser's default. */
+#view-space .keditor {
+  position: absolute; left: 12px; bottom: 72px; z-index: 4;
+  width: 320px; max-width: calc(100% - 24px); box-sizing: border-box;
+  display: flex; flex-direction: column; gap: 9px; padding: 10px 12px 12px;
+  border: 1px solid var(--edge-hi); background: var(--surface);
+  border-radius: var(--r-surface);
+}
+#view-space .keditor[hidden] { display: none; }
+#view-space .kedhead { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--white); }
+#view-space .kedspacer { flex: 1; }
+#view-space .kedrow { display: flex; align-items: flex-end; gap: 10px; }
+#view-space .kedgrow { flex: 1; min-width: 0; }
+#view-space .kedinput {
+  display: block; width: 100%; box-sizing: border-box;
+  padding: 6px 8px; font: inherit; font-size: 11.5px; line-height: 1.4;
+  background: var(--bg); border: 1px solid var(--edge); color: var(--text);
+  border-radius: var(--r-input);
+}
+#view-space textarea.kedinput { resize: vertical; min-height: 64px; }
+#view-space .kedinput:focus { outline: none; border-color: var(--cyan); }
+#view-space .kedinput::placeholder { color: var(--grey); }
+#view-space .kedcolor {
+  display: block; width: 44px; height: 29px; padding: 2px; box-sizing: border-box;
+  background: var(--bg); border: 1px solid var(--edge); cursor: pointer;
+  border-radius: var(--r-input);
+}
+#view-space .kederr {
+  padding: 5px 8px; font-size: 10.5px; color: var(--amber-hot);
+  border-left: 3px solid var(--amber); background: var(--panel);
+  border-radius: var(--r-control);
+}
+#view-space .kederr[hidden] { display: none; }
+#view-space .kedfoot { display: flex; align-items: center; gap: 8px; }
+
+/* Narrow windows: the side list folds to a strip along the right edge, and
+   the stage, the bucket row and the mode line give that width back. */
+@media (max-width: 900px) {
+  #view-space .kwrap { right: 44px; }
+  #view-space .kside { width: 32px; }
+  #view-space .kside .phead { padding: 8px 6px; font-size: 0; gap: 0; justify-content: center; }
+  #view-space .kside .phead .tick { display: none; }
+  #view-space .kside .phead .count { margin-left: 0; font-size: 9.5px; }
+  #view-space .kside-body { display: none; }
+  #view-space .kbuckets { margin-right: 56px; }
+  #view-space .kmode { right: 56px; }
+}

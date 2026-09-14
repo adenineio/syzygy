@@ -124,8 +124,21 @@ export const parseHeader = (source) => {
   // `[^:]*` before the colon admits a qualified label. A plan may write
   // `**Spec (the binding authority):**`, and an exact-match regex silently
   // returns null for it.
+  //
+  // The value continues onto a following line only while the line before it
+  // ends in a comma -- a wrapped `**Tasks:**` list, one reference per line
+  // with a trailing comma, is still one value. A value with no trailing comma
+  // ends at its own line, so a `Spec:` line's wrapped commentary (kept only as
+  // its first token anyway) or ordinary prose below the field is never pulled
+  // in.
   const field = (name) => {
-    const m = new RegExp('^\\*\\*' + name + '[^:]*:\\*\\*\\s*(.*)$', 'm').exec(head)
+    // Each unit is a line ending in a comma, then the newline and any leading
+    // indentation of the next line -- `[^\n]*` alone would greedily swallow
+    // that trailing comma before the literal `,` beside it ever got to match,
+    // which is why a comma is required IN the same token as the line content
+    // rather than tacked on after a separate `.*`. The final `[^\n]*` is the
+    // line that ends the value, with no comma required of it.
+    const m = new RegExp('^\\*\\*' + name + '[^:]*:\\*\\*\\s*((?:[^\\n]*,[ \\t]*\\n[ \\t]*)*[^\\n]*)', 'm').exec(head)
     return m ? m[1].replace(/`/g, '').trim() : ''
   }
   // Real plans write ``**Spec:** `path` -- commentary``, so the value is the

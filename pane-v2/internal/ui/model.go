@@ -96,7 +96,21 @@ type Model struct {
 	// snapshot only once per SSE connection, so without that handler a claim
 	// made after this pane connected never reached MINE. See mine.go.
 	projects []relay.Project
-	viewers  int
+	// pasteboard is PASTE's own data: prompts stashed with the band's marker.
+	pasteboard []relay.Paste
+	// canvas is the session canvas's placement and spawn-tracking state.
+	// Nothing draws it yet.
+	canvas relay.Canvas
+	// chains is CHAIN's own data: each session's compact topic chain, keyed by
+	// session id. nil means the relay predates chains, which is not the same
+	// as a session with no chain yet.
+	chains map[string]relay.Chain
+	// ch is CHAIN's own state: the cursor, what is expanded, the full and
+	// history views, and the detail read per session.
+	ch chState
+	// pb is PASTE's own state: the cursor and the scope.
+	pb      pbState
+	viewers int
 
 	// lastFocused is the last good snapshot of the pinned session, kept so a
 	// vanished session can still be drawn (greyed) rather than blanked.
@@ -122,6 +136,16 @@ type Model struct {
 	spinning bool
 	scroll   int
 	toast    Toast
+	// armed is the one gesture waiting on a second press, live while hasArm.
+	// Its seq comes from the same counter as the toast's. See arm.go.
+	armed  Arm
+	hasArm bool
+	// leader is live while space waits for its second keystroke, until
+	// leaderUntil; it and an arm are never both live. showBank is the leader's
+	// own listing, drawn over the body the way the help overlay is. See bank.go.
+	leader      bool
+	leaderUntil time.Time
+	showBank    bool
 
 	// BOARD's cursor and its list viewport are separate: j/k move the cursor
 	// and the wheel moves the list under it.
@@ -148,13 +172,17 @@ type Model struct {
 	// in card rows, so it stays a number. The gestures reuse dragFrom and
 	// linkFrom. pending is the batch: at most gridPendMax connections,
 	// in-memory only. gridDrag is the pointer while a button is down.
-	gridCursorID string
-	gridTop      int
-	gridBatch    bool
-	pending      []gridConn
-	gridDrag     gridDrag
+	// gridWires shows the settled links, on from the start; gridWiresFocus
+	// narrows them to the cursor card's own.
+	gridCursorID   string
+	gridTop        int
+	gridBatch      bool
+	gridWires      bool
+	gridWiresFocus bool
+	pending        []gridConn
+	gridDrag       gridDrag
 	// hk is HOTKEYS' own state: the two config files as parsed, the cursor,
-	// the scope, the editor and the x arm. Loaded by command on entering the
+	// the scope and the editor. Loaded by command on entering the
 	// mode and after every save -- never on the render path, because it runs
 	// git and reads two files.
 	hk hkState
@@ -222,6 +250,7 @@ func New(src relay.Source, resv ident.Resolver, cfg Config) Model {
 		conn:       relay.Connecting,
 		frame:      NewFrame(0, 0),
 		feedFollow: true,
+		gridWires:  true,
 	}
 }
 

@@ -46,6 +46,28 @@ await ok('sanitizeCanvas drops the three prototype keys instead of writing them 
   assert.equal({}.x, undefined, 'and nothing leaked onto Object.prototype either')
 })
 
+await ok('sanitizeCanvas keeps a well-formed pendingLink and drops a broken one', () => {
+  // world.json is reloaded at every relay start, and sanitizeCanvas rebuilds
+  // each row from a fixed key list -- so a field it does not name is silently
+  // lost on restart, taking the promise with it.
+  const row = { shortId: 'a1', name: 'n', cwd: '/c', spawnedAt: 1, sessionId: null, state: null }
+  const s = C.sanitizeCanvas({ spawnedBy: [
+    { ...row, pendingLink: { from: 'sess-a', note: 'hi' } },
+    { ...row, shortId: 'a2', pendingLink: { from: 'sess-a', note: null } },
+    { ...row, shortId: 'a3', pendingLink: { note: 'no from' } },
+    { ...row, shortId: 'a4', pendingLink: 'nope' },
+    { ...row, shortId: 'a5' },
+    { ...row, shortId: 'a6', pendingLink: { from: 'sess-a', note: null, since: 5 } },
+  ] })
+  assert.deepEqual(s.spawnedBy[0].pendingLink, { from: 'sess-a', note: 'hi' })
+  assert.deepEqual(s.spawnedBy[1].pendingLink, { from: 'sess-a', note: null })
+  assert.equal('pendingLink' in s.spawnedBy[2], false)
+  assert.equal('pendingLink' in s.spawnedBy[3], false)
+  assert.equal('pendingLink' in s.spawnedBy[4], false, 'absent, never null, on an ordinary row')
+  assert.equal(s.spawnedBy[3].shortId, 'a4', 'the rest of the row survives a bad link')
+  assert.deepEqual(s.spawnedBy[5].pendingLink, { from: 'sess-a', note: null, since: 5 }, 'since survives a restart too')
+})
+
 // ---- cwd validation ---------------------------------------------
 await ok('validateCwd refuses a relative path', () => {
   assert.equal(C.validateCwd('relative/dir').ok, false)
@@ -201,6 +223,46 @@ await ok('spawnRequest refuses a prompt beginning with a dash, whatever follows 
   }
   assert.equal(C.spawnRequest({ prompt: 'do the thing --now' }, '/r').ok, true, 'a dash INSIDE the prompt is fine')
 })
+
+// ---- the link carried on a spawn ---------------------------------------------
+// `hasSession` is injected, so these run with no relay anywhere near them.
+const known = new Set(['sess-a', 'sess-b'])
+const has = (id) => known.has(id)
+
+await ok('linkOnSpawn passes an absent link through as null', () => {
+  assert.deepEqual(C.linkOnSpawn(undefined, has), { ok: true, link: null })
+  assert.deepEqual(C.linkOnSpawn(null, has), { ok: true, link: null })
+})
+await ok('linkOnSpawn refuses a link that is not an object, or has no from', () => {
+  assert.equal(C.linkOnSpawn('sess-a', has).ok, false)
+  assert.equal(C.linkOnSpawn([{ from: 'sess-a' }], has).ok, false)
+  assert.equal(C.linkOnSpawn({ note: 'hi' }, has).error, 'link.from is required')
+})
+await ok('linkOnSpawn refuses a from this relay has never registered', () => {
+  const r = C.linkOnSpawn({ from: 'ghost', note: 'hi' }, has)
+  assert.equal(r.ok, false)
+  assert.equal(r.error, 'link.from does not name a session registered with this relay')
+  // And it REFUSES by default, so a caller that forgot the predicate gets no
+  // links rather than unchecked ones.
+  assert.equal(C.linkOnSpawn({ from: 'sess-a' }).ok, false)
+})
+await ok('linkOnSpawn keeps null and an empty string APART, and caps the note', () => {
+  // `null` is "draw the wire and send nothing"; '' is a brief with nothing in
+  // it, which still costs the source a queued command, a tool call and a turn.
+  assert.deepEqual(C.linkOnSpawn({ from: 'sess-a', note: null }, has).link, { from: 'sess-a', note: null })
+  assert.deepEqual(C.linkOnSpawn({ from: 'sess-a' }, has).link, { from: 'sess-a', note: null })
+  assert.deepEqual(C.linkOnSpawn({ from: 'sess-a', note: '' }, has).link, { from: 'sess-a', note: '' })
+  assert.equal(C.linkOnSpawn({ from: 'sess-a', note: 'x'.repeat(9000) }, has).link.note.length, C.LINK_NOTE_MAX)
+})
+await ok('spawnRequest carries a valid link and refuses an invalid one', () => {
+  const r = C.spawnRequest({ prompt: 'go', link: { from: 'sess-a', note: 'brief me' } }, '/r', { hasSession: has })
+  assert.equal(r.ok, true)
+  assert.deepEqual(r.link, { from: 'sess-a', note: 'brief me' })
+  assert.equal(C.spawnRequest({ prompt: 'go' }, '/r').link, null, 'no link is null, not undefined')
+  const bad = C.spawnRequest({ prompt: 'go', link: { from: 'ghost' } }, '/r', { hasSession: has })
+  assert.equal(bad.ok, false)
+})
+
 await ok('spawnArgv is an ARRAY with the prompt behind `--` as its own last element, and no --allowedTools', () => {
   const argv = C.spawnArgv({ name: 'alpha', prompt: 'do the thing --now', model: 'opus', effort: 'high' })
   assert.ok(Array.isArray(argv))
@@ -273,6 +335,72 @@ await ok('spawnArgv adds --plugin-dir BEFORE the sentinel when one is given, and
   assert.deepEqual(C.spawnArgv({ name: 'alpha', prompt: 'go', pluginDir: null }),
     C.spawnArgv({ name: 'alpha', prompt: 'go' }), 'null is production: no trace of it')
 })
+await ok('spawnArgv places --max-budget-usd before the -- sentinel, and omits it when unset', () => {
+  const withBudget = C.spawnArgv({ name: 'n', prompt: 'go', budgetUsd: 25 })
+  const i = withBudget.indexOf('--max-budget-usd')
+  assert.ok(i > 0, 'the flag is present')
+  assert.equal(withBudget[i + 1], '25')
+  assert.ok(i < withBudget.indexOf('--'), 'an OPTION goes before the sentinel, or it arrives as words of the prompt')
+  assert.equal(withBudget[withBudget.length - 1], 'go', 'the prompt is still last')
+  assert.equal(C.spawnArgv({ name: 'n', prompt: 'go' }).includes('--max-budget-usd'), false)
+  assert.equal(C.spawnArgv({ name: 'n', prompt: 'go', budgetUsd: 0 }).includes('--max-budget-usd'), false)
+  // the standing rule, re-asserted where somebody would be tempted to add it
+  assert.equal(withBudget.includes('--allowedTools'), false, '--allowedTools is variadic and would eat the prompt')
+})
+await ok('spawnSession never takes budgetUsd from the request BODY', async () => {
+  // Containment, the same rule requests.mjs applies to branch/sessionName:
+  // /api/spawn is a browser route, and a budget is a kill threshold.
+  const calls = []
+  const canvas = C.emptyCanvas()
+  const run = async (bin, argv) => { calls.push(argv); return { code: 0, stdout: 'backgrounded · ab12 · n', stderr: '' } }
+  await C.spawnSession({ canvas, run, claudeBin: 'claude',
+    body: { cwd: process.cwd(), prompt: 'go', name: 'n', budgetUsd: 999 } })
+  assert.equal(calls[0].includes('--max-budget-usd'), false)
+})
+// ---- which peer a spawn is working for ---------------------------------------
+const PEER_TAG = { peer: 'vm', askId: 'a'.repeat(16) }
+await ok('spawnSession stores a valid forPeer OPTION on the placeholder and the record, never one from the body', async () => {
+  const canvas = C.emptyCanvas()
+  let seenOnPlaceholder = null
+  const run = async () => {
+    seenOnPlaceholder = canvas.spawnedBy.at(-1)?.forPeer ?? null
+    return { code: 0, stdout: 'backgrounded · ab12 · n', stderr: '' }
+  }
+  await C.spawnSession({ canvas, run, claudeBin: 'claude', forPeer: { ...PEER_TAG, extra: 1 },
+    body: { cwd: process.cwd(), prompt: 'go', name: 'n' } })
+  assert.deepEqual(seenOnPlaceholder, PEER_TAG, 'on the placeholder, which is the only row while the child starts')
+  assert.deepEqual(canvas.spawnedBy.at(-1).forPeer, PEER_TAG)
+
+  const fromBody = C.emptyCanvas()
+  await C.spawnSession({ canvas: fromBody, run, claudeBin: 'claude',
+    body: { cwd: process.cwd(), prompt: 'go', name: 'n', forPeer: PEER_TAG } })
+  assert.equal('forPeer' in fromBody.spawnedBy.at(-1), false, 'a body field is never read')
+
+  const malformed = C.emptyCanvas()
+  await C.spawnSession({ canvas: malformed, run, claudeBin: 'claude', forPeer: { peer: 'NOT OK', askId: 'zz' },
+    body: { cwd: process.cwd(), prompt: 'go', name: 'n' } })
+  assert.equal('forPeer' in malformed.spawnedBy.at(-1), false, 'a malformed tag stores nothing')
+})
+await ok('a tagged ledger row keeps its tag through sanitizeCanvas, a settle and an expired link; an untagged row gains no key', () => {
+  const base = { name: 'n', cwd: '/c', model: 'opus', effort: 'high', spawnedAt: 1, sessionId: null, state: null }
+  const s = C.sanitizeCanvas({ spawnedBy: [
+    { ...base, shortId: 't1', forPeer: PEER_TAG, pendingLink: { from: 'sess-a', note: null } },
+    { ...base, shortId: 't2' },
+    { ...base, shortId: 't3', forPeer: { peer: 'vm (forgotten)', askId: 'a'.repeat(16) } },
+  ] })
+  assert.deepEqual(s.spawnedBy[0].forPeer, PEER_TAG)
+  assert.equal('forPeer' in s.spawnedBy[1], false, 'absent, never null, on an ordinary row')
+  assert.equal('forPeer' in s.spawnedBy[2], false, 'a malformed tag is dropped')
+  const settled = C.settleSpawns(s.spawnedBy, [{ id: 't1', sessionId: 'sess-t1', state: 'working' }], 2)
+  assert.equal(settled.changed, true)
+  assert.deepEqual(settled.spawnedBy[0].forPeer, PEER_TAG)
+  assert.equal(settled.spawnedBy[0].sessionId, 'sess-t1')
+  assert.equal('forPeer' in settled.spawnedBy[1], false)
+  const expired = C.dropExpiredLinks(settled.spawnedBy, 1 + C.PENDING_MAX_AGE_MS + 1)
+  assert.equal(expired.changed, true)
+  assert.deepEqual(expired.spawnedBy[0].forPeer, PEER_TAG, 'dropping the promise keeps the tag')
+  assert.deepEqual(C.sanitizeCanvas(JSON.parse(JSON.stringify({ spawnedBy: expired.spawnedBy }))).spawnedBy[0].forPeer, PEER_TAG, 'and it survives a restart')
+})
 // ---- which `claude` ----------------------------------------------------------
 // Installs differ, and a machine can carry more than one: an older build has
 // neither `--bg` nor `attach`, and may still win PATH. Taking `claude` on
@@ -343,6 +471,77 @@ await ok('a pending spawn node is a stale node like any other, so it transfers b
   const r = C.inheritPosition(nodes, { id: 'sess-1', name: 'alpha' }, [{ id: 'sess-1', name: 'alpha' }])
   assert.equal(r.from, 'pending:ab12')
   assert.equal(r.nodes['sess-1'].x, 300)
+})
+
+// ---- resolving a parked link -------------------------------------------------
+// The rules are inheritPosition's, for the same reason: displayName() gives
+// every unnamed session in a worktree the same name, so ambiguity is common.
+const NOW = 1_000_000
+const row = (o) => ({ shortId: 'x', name: 'alpha', cwd: '/c', model: 'opus', effort: 'high', spawnedAt: NOW, sessionId: null, state: null, ...o })
+
+await ok('resolvePendingLink takes the sessionId door when a listing has tied the row down', () => {
+  const led = [row({ shortId: 'a1', name: 'somethingelse', sessionId: 'sess-new', pendingLink: { from: 'sess-a', note: 'hi' } })]
+  const r = C.resolvePendingLink(led, { id: 'sess-new', name: 'whatever' }, [], NOW)
+  assert.equal(r.reason, null)
+  assert.equal(r.record, led[0], 'the exact door needs no name at all')
+})
+await ok('resolvePendingLink takes a UNIQUE name when no listing has ruled yet', () => {
+  const led = [row({ shortId: 'a1', pendingLink: { from: 'sess-a', note: 'hi' } }), row({ shortId: 'a2', name: 'beta' })]
+  const r = C.resolvePendingLink(led, { id: 'sess-new', name: 'alpha' }, [{ id: 'sess-new', name: 'alpha' }], NOW)
+  assert.equal(r.reason, null)
+  assert.equal(r.record.shortId, 'a1')
+})
+await ok('resolvePendingLink refuses when two parked rows share the name', () => {
+  const led = [row({ shortId: 'a1', pendingLink: { from: 'sess-a', note: '1' } }), row({ shortId: 'a2', pendingLink: { from: 'sess-b', note: '2' } })]
+  const r = C.resolvePendingLink(led, { id: 'sess-new', name: 'alpha' }, [{ id: 'sess-new', name: 'alpha' }], NOW)
+  assert.equal(r.record, null)
+  assert.equal(r.reason, 'ambiguous')
+})
+await ok('resolvePendingLink refuses when another LIVE session wears the name', () => {
+  const led = [row({ shortId: 'a1', pendingLink: { from: 'sess-a', note: 'hi' } })]
+  const live = [{ id: 'sess-new', name: 'alpha' }, { id: 'sess-old', name: 'alpha' }]
+  assert.equal(C.resolvePendingLink(led, { id: 'sess-new', name: 'alpha' }, live, NOW).reason, 'ambiguous')
+})
+await ok('resolvePendingLink ignores a row already tied to a DIFFERENT session', () => {
+  // The listing has spoken for it; the name is only ever the fallback door.
+  const led = [row({ shortId: 'a1', sessionId: 'sess-other', pendingLink: { from: 'sess-a', note: 'hi' } })]
+  assert.equal(C.resolvePendingLink(led, { id: 'sess-new', name: 'alpha' }, [], NOW).reason, 'none')
+})
+await ok('resolvePendingLink reports an over-age row as expired, with the row', () => {
+  const led = [row({ shortId: 'a1', spawnedAt: 1, pendingLink: { from: 'sess-a', note: 'hi' } })]
+  const r = C.resolvePendingLink(led, { id: 'sess-new', name: 'alpha' }, [], 1 + C.PENDING_MAX_AGE_MS + 1)
+  assert.equal(r.reason, 'expired')
+  assert.equal(r.record.shortId, 'a1', 'the row comes back so the caller can drop the promise')
+})
+await ok('resolvePendingLink answers none when nothing is parked, or the session has no id', () => {
+  assert.equal(C.resolvePendingLink([row({})], { id: 'sess-new', name: 'alpha' }, [], NOW).reason, 'none')
+  assert.equal(C.resolvePendingLink([], { id: 'x' }, [], NOW).reason, 'none')
+  assert.equal(C.resolvePendingLink([row({ pendingLink: { from: 'a', note: '' } })], {}, [], NOW).reason, 'none')
+})
+await ok('resolvePendingLink will not hand a parked link to a session that started before the spawn was requested', () => {
+  // hud.tsx re-registers after every relay blip, and a parked link survives a
+  // restart -- so an OLDER session wearing the name can reach the name door
+  // before the child does, while it is the only live session wearing it.
+  const led = [row({ shortId: 'a1', pendingLink: { from: 'sess-a', note: 'hi', since: NOW } })]
+  assert.equal(C.resolvePendingLink(led, { id: 'sess-old', name: 'alpha', startedAt: NOW - 1 }, [{ id: 'sess-old', name: 'alpha' }], NOW).reason, 'none')
+  assert.equal(C.resolvePendingLink(led, { id: 'sess-new', name: 'alpha', startedAt: NOW + 5 }, [{ id: 'sess-new', name: 'alpha' }], NOW).reason, null)
+  // No startedAt, or a row parked before `since` existed: skipped, not failed.
+  assert.equal(C.resolvePendingLink(led, { id: 'sess-new', name: 'alpha' }, [], NOW).reason, null)
+  assert.equal(C.resolvePendingLink([row({ shortId: 'a2', pendingLink: { from: 'sess-a', note: 'hi' } })], { id: 'sess-new', name: 'alpha', startedAt: 1 }, [], NOW).reason, null)
+  // The sessionId door is a fact, and a clock never second-guesses it.
+  const tied = [row({ shortId: 'a3', sessionId: 'sess-old', pendingLink: { from: 'sess-a', note: 'hi', since: NOW } })]
+  assert.equal(C.resolvePendingLink(tied, { id: 'sess-old', name: 'x', startedAt: 1 }, [], NOW).reason, null)
+})
+
+await ok('dropExpiredLinks strips the promise past its age and touches nothing else', () => {
+  const led = [row({ shortId: 'a1', spawnedAt: 1, pendingLink: { from: 'sess-a', note: 'hi' } }), row({ shortId: 'a2', spawnedAt: 1 })]
+  const out = C.dropExpiredLinks(led, 1 + C.PENDING_MAX_AGE_MS + 1)
+  assert.equal(out.changed, true)
+  assert.equal('pendingLink' in out.spawnedBy[0], false)
+  assert.equal(out.spawnedBy[0].shortId, 'a1', 'the row itself stays -- the live count is not this function’s business')
+  const same = C.dropExpiredLinks(led, NOW)
+  assert.equal(same.changed, false)
+  assert.equal(same.spawnedBy, led, 'unchanged means the SAME array, so the caller can skip a write')
 })
 
 // ---- the live count ----------------------------------------------------------
@@ -648,6 +847,51 @@ await ok('an unknown width falls back to four columns and an empty list to an em
   assert.equal(out.s3.y, out.s0.y, 'four fit on the first row')
   assert.deepEqual(MCL.defaultLayout([], { width: 500 }), {})
 })
+await ok('plusRect is the right-hand strip of the VISIBLE band, in scrolled coordinates', () => {
+  // An absolutely positioned child of a scroll container scrolls WITH its
+  // content, which is why `left` adds scrollLeft -- the same arithmetic the
+  // spawn form's clamp already does.
+  assert.deepEqual(MCL.plusRect({ scrollLeft: 0, scrollTop: 0, clientWidth: 800, clientHeight: 500 }),
+    { left: 800 - MCL.PLUS_W, top: 0, width: MCL.PLUS_W, height: 500 })
+  assert.deepEqual(MCL.plusRect({ scrollLeft: 300, scrollTop: 120, clientWidth: 800, clientHeight: 500 }),
+    { left: 300 + 800 - MCL.PLUS_W, top: 120, width: MCL.PLUS_W, height: 500 })
+})
+await ok('plusRect never spills past a band narrower than itself', () => {
+  const r = MCL.plusRect({ scrollLeft: 0, scrollTop: 0, clientWidth: 40, clientHeight: 200 })
+  assert.equal(r.left, 0)
+  assert.equal(r.width, 40)
+  assert.deepEqual(MCL.plusRect({}), { left: 0, top: 0, width: 0, height: 0 }, 'and an unmeasured stage is not a throw')
+})
+await ok('dropMode is two INDEPENDENT flags, so there is no precedence to remember', () => {
+  assert.deepEqual(MCL.dropMode({}), { inherit: false, brief: true })
+  assert.deepEqual(MCL.dropMode({ shiftKey: true }), { inherit: true, brief: true })
+  assert.deepEqual(MCL.dropMode({ altKey: true }), { inherit: false, brief: false })
+  assert.deepEqual(MCL.dropMode({ shiftKey: true, altKey: true }), { inherit: true, brief: false })
+})
+await ok('suggestName walks past every name already spoken for', () => {
+  // Not politeness: /api/register matches a parked link by NAME, and two
+  // sessions wearing one name is exactly the case that refuses to link.
+  assert.equal(MCL.suggestName('alpha', []), 'alpha')
+  assert.equal(MCL.suggestName('alpha', ['alpha']), 'alpha-2')
+  assert.equal(MCL.suggestName('alpha', ['alpha', 'alpha-2', 'alpha-3']), 'alpha-4')
+  assert.equal(MCL.suggestName('alpha-2', ['alpha', 'alpha-2']), 'alpha-3', 'an existing suffix is a base, not a prefix')
+  assert.equal(MCL.suggestName('', []), 'session')
+})
+await ok('modelOption maps a reported model label onto the spawn form, or gives up', () => {
+  // Sessions report a DISPLAY label (hud.tsx's shortModel: "opus 5", "fable
+  // 5.1"), while the spawn form's <select> offers bare aliases. Without this,
+  // ⇧-drop could never inherit a model from a session the canvas did not start.
+  const opts = ['opus', 'sonnet', 'haiku', 'fable']
+  assert.equal(MCL.modelOption('opus', opts), 'opus')
+  assert.equal(MCL.modelOption('opus 5', opts), 'opus')
+  assert.equal(MCL.modelOption('fable 5.1', opts), 'fable')
+  assert.equal(MCL.modelOption('Haiku 4.5', opts), 'haiku')
+  assert.equal(MCL.modelOption('claude-sonnet-5', opts), 'sonnet')
+  assert.equal(MCL.modelOption('opus-4-8[1m]', opts), 'opus')
+  assert.equal(MCL.modelOption('unknown', opts), '', 'an unrecognised label is dropped, not assigned')
+  assert.equal(MCL.modelOption('', opts), '')
+  assert.equal(MCL.modelOption(undefined, opts), '')
+})
 
 // ---- the live relay: real subprocess, fake `claude` ------------------
 // The endpoints live in relay.mjs's HTTP handler, so they are tested against
@@ -678,6 +922,9 @@ await ok('an unknown width falls back to four columns and an empty list to an em
     // FIRST branch: --version is asked right after, and only on success.
     'if [ "$1" = "--help" ]; then echo "  --bg   run in the background"; echo "  attach   attach to a session"; exit 0; fi',
     'if [ "$1" = "--version" ]; then echo "0.0.0-fake (canvas harness)"; exit 0; fi',
+    // The relay's boot-time roster probe sends this before the spawn-recording
+    // branch below would otherwise mistake it for a real spawn request.
+    'if [ "$1" = "--agent" ]; then echo "Available agents: claude, Explore"; exit 1; fi',
     // The listing branch counts its own invocations (so a test can prove the
     // poller asked exactly as often as it should) and, while the slow marker
     // exists, takes a whole second -- longer than the harness's 300 ms poll --
@@ -928,6 +1175,25 @@ await ok('an unknown width falls back to four columns and an empty list to an em
       assert.notEqual(h.port, 0)
     })
 
+    // A stale client and a missing feature are otherwise indistinguishable:
+    // bridge/public/* is served off disk every load while relay.mjs is a
+    // long-lived process node never hot-reloads. These two
+    // fields are how you interrogate the PROCESS instead of the checkout.
+    await ok('/api/health carries the payload version and a build stamp, and the payload agrees', async () => {
+      const h = await (await fetch(base + '/api/health')).json()
+      assert.equal(typeof h.payloadVersion, 'number')
+      assert.ok(h.payloadVersion >= 1, 'the version starts at 1 and is bumped by hand')
+      assert.ok(h.build && typeof h.build === 'object', 'no build stamp on /api/health')
+      assert.equal(typeof h.build.sha, 'string')
+      // Never empty and never absent: git may not exist, the bridge may not be
+      // a checkout, and 'unknown' is the honest answer for both. A MISSING key
+      // would be a third state every reader would have to handle.
+      assert.ok(h.build.sha.length > 0, "sha is 'unknown', never empty")
+      assert.ok(Number.isFinite(h.build.startedAt) && h.build.startedAt > 0)
+      const s = await state()
+      assert.equal(s.payloadVersion, h.payloadVersion, 'the payload and the health stamp must report the same version')
+    })
+
     await ok('the poller folds `claude agents --json` onto the ledger, moves the pending node, and brings the count down', async () => {
       writeFileSync(agentsFile, JSON.stringify([
         { id: 'fake0001', sessionId: 'sess-alpha', kind: 'background', state: 'working' },
@@ -1002,6 +1268,92 @@ await ok('an unknown width falls back to four columns and an empty list to an em
       await new Promise((r) => setTimeout(r, 1200))    // let the last slow pass drain
     })
 
+    // ---- link on spawn, resolved at /api/register ---------------------------
+    // The child's id is unknowable until it registers, so the promise waits on
+    // the ledger. These drive the whole round trip against the fake `claude`.
+    const drain = async (id) =>
+      (await (await fetch(`${base}/api/commands/${encodeURIComponent(id)}?token=${RELAY_TOKEN}`)).json()).commands
+
+    await ok('POST /api/spawn refuses a link whose from is not registered, and runs nothing', async () => {
+      const before = readFileSync(countFile, 'utf8').trim()
+      const r = await post('/api/spawn', { cwd: rootDir, name: 'orphan', prompt: 'x', link: { from: 'nobody', note: 'hi' } })
+      assert.equal(r.status, 400)
+      assert.match(r.error, /registered with this relay/)
+      assert.equal(readFileSync(countFile, 'utf8').trim(), before, 'the fake claude was not invoked')
+    })
+
+    await ok('POST /api/spawn parks a link on the ledger row', async () => {
+      await register('sess-src', 'source')
+      const r = await post('/api/spawn', { cwd: rootDir, name: 'child-one', prompt: 'x', link: { from: 'sess-src', note: 'read the plan' } })
+      assert.equal(r.status, 200, JSON.stringify(r))
+      const row = (await state()).canvas.spawnedBy.find((x) => x.name === 'child-one')
+      const { since, ...rest } = row.pendingLink
+      assert.deepEqual(rest, { from: 'sess-src', note: 'read the plan' })
+      assert.equal(typeof since, 'number', 'the request time rides with the promise')
+    })
+
+    await ok('/api/register claims the promise: a link is drawn and the SOURCE is briefed', async () => {
+      await drain('sess-src')                       // clear the queue first
+      await register('sess-child-one', 'child-one')
+      const s = await state()
+      const link = s.links.find((l) => l.from === 'sess-src' && l.to === 'sess-child-one')
+      assert.ok(link, 'the wire exists the moment the child reports in')
+      assert.equal(link.kind, 'brief')
+      const q = await drain('sess-src')
+      assert.equal(q.length, 1)
+      assert.equal(q[0].verb, 'send-message')
+      assert.equal(q[0].payload.note, 'read the plan')
+      assert.equal(q[0].payload.toId, 'sess-child-one')
+      const row = s.canvas.spawnedBy.find((x) => x.name === 'child-one')
+      assert.equal('pendingLink' in row, false, 'a promise is attempted once')
+    })
+
+    await ok('a null note draws the wire and interrupts nobody', async () => {
+      await drain('sess-src')
+      await post('/api/spawn', { cwd: rootDir, name: 'child-quiet', prompt: 'x', link: { from: 'sess-src', note: null } })
+      await register('sess-child-quiet', 'child-quiet')
+      const s = await state()
+      assert.ok(s.links.find((l) => l.to === 'sess-child-quiet'), 'the link is recorded and drawn')
+      assert.deepEqual(await drain('sess-src'), [], 'and nothing is queued for the source')
+    })
+
+    await ok('two parked rows sharing a name refuse, and both promises stay put', async () => {
+      await drain('sess-src')
+      await post('/api/spawn', { cwd: rootDir, name: 'twin', prompt: 'x', link: { from: 'sess-src', note: 'one' } })
+      await post('/api/spawn', { cwd: rootDir, name: 'twin', prompt: 'x', link: { from: 'sess-src', note: 'two' } })
+      await register('sess-twin', 'twin')
+      const s = await state()
+      assert.equal(s.links.some((l) => l.to === 'sess-twin'), false, 'linking the wrong one is worse than linking nothing')
+      assert.deepEqual(await drain('sess-src'), [])
+      assert.equal(s.canvas.spawnedBy.filter((x) => x.name === 'twin' && x.pendingLink).length, 2)
+    })
+
+    await ok('an OLDER session wearing the parked name does not take the promise', async () => {
+      // What a relay blip looks like from here: a session that started long
+      // before the spawn re-registers under the parked name before the child.
+      await drain('sess-src')
+      await post('/api/spawn', { cwd: rootDir, name: 'elder', prompt: 'x', link: { from: 'sess-src', note: 'not for you' } })
+      await register('sess-elder', 'elder', { startedAt: 1 })
+      const s = await state()
+      assert.equal(s.links.some((l) => l.to === 'sess-elder'), false)
+      assert.deepEqual(await drain('sess-src'), [])
+      assert.ok(s.canvas.spawnedBy.find((x) => x.name === 'elder').pendingLink, 'the promise waits for the real child')
+    })
+
+    await ok('a registering session can never tag itself as working for a peer', async () => {
+      // A tag comes only from an apply the relay resolved against its own ask
+      // log. A well-formed forPeer in a register body must not survive the merge,
+      // on the first registration or on a later one.
+      const forged = { peer: 'vm', askId: 'a'.repeat(16) }
+      assert.equal((await register('sess-forged', 'forged-tag', { forPeer: forged })).status, 200)
+      let row = (await state()).sessions.find((x) => x.id === 'sess-forged')
+      assert.ok(row, 'the session registered')
+      assert.equal('forPeer' in row, false, 'no forPeer from a register body')
+      assert.equal((await register('sess-forged', 'forged-tag', { forPeer: forged })).status, 200)
+      row = (await state()).sessions.find((x) => x.id === 'sess-forged')
+      assert.equal('forPeer' in row, false, 'nor from a re-registration')
+    })
+
     await ok('SIGINT flushes the canvas to world.json', async () => {
       // n1 inherited 'omega' at (300, 200) earlier, but the reset check above
       // empties nodes -- so put a plain moved node back, to prove the flush
@@ -1011,7 +1363,8 @@ await ok('an unknown width falls back to four columns and an empty list to an em
       child.kill('SIGINT')
       await new Promise((r) => child.on('exit', r))
       const w = JSON.parse(readFileSync(join(dataDir, 'world.json'), 'utf8'))
-      assert.equal(w.canvas.spawnedBy.length, 3)
+      // Five link spawns above (child-one, child-quiet, twin ×2, elder) add rows; the refused orphan adds none.
+      assert.equal(w.canvas.spawnedBy.length, 8)
       assert.equal(w.canvas.nodes['sess-alpha'].x, 400)
       assert.equal(w.canvas.nodes.n1.name, 'omega')
     })
@@ -1020,6 +1373,88 @@ await ok('an unknown width falls back to four columns and an empty list to an em
   }
   rmSync(dataDir, { recursive: true, force: true })
   rmSync(fakeDir, { recursive: true, force: true })
+}
+
+// ---- ghost nodes: the board emptying must be broadcast -----------------------
+// When the LAST session expires, the 10 s sweep used to compare sessions.size
+// before and after its own live() call -- but rescan() calls live() every 4 s
+// and prunes first, so the sweep saw no change and emitted nothing. The board
+// then kept ghosts until a page reload. It only ever bit when the board
+// emptied completely, because any other beating session's /api/stats
+// broadcasts anyway.
+//
+// The TTL is 90 s in production, so this needs its OWN relay with the two
+// timing knobs turned down -- a timing bug the suite cannot reach is a timing
+// bug that comes back.
+{
+  const { spawn } = await import('node:child_process')
+  const dataDir = tmp()
+  const TOKEN2 = 'ghost-harness-token'
+  const child = spawn(process.execPath, [join(ROOT, 'syzygy', 'bridge', 'relay.mjs')], {
+    cwd: ROOT,
+    env: {
+      ...process.env, SZG_PORT: '0', SZG_TOKEN: TOKEN2, SZG_DATA_DIR: dataDir,
+      SZG_CLAUDE_BIN: '/usr/bin/false', SZG_TMUX_BIN: '/usr/bin/false',
+      SZG_SESSION_TTL_MS: '700', SZG_SWEEP_MS: '120',
+      SZG_PANE_PASSWORD_DISABLED: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let err2 = ''
+  child.stderr.on('data', (c) => { err2 += c })
+  const port2 = await new Promise((res, rej) => {
+    let out = ''
+    const on = (c) => { out += c; const m = out.match(/relay on http:\/\/127\.0\.0\.1:(\d+)/); if (m) { child.stdout.off('data', on); res(Number(m[1])) } }
+    child.stdout.on('data', on)
+    child.on('exit', (code) => rej(new Error(`ghost relay exited early (${code}): ${err2}`)))
+    setTimeout(() => rej(new Error('ghost relay did not report a port')), 8000)
+  })
+  const b2 = `http://127.0.0.1:${port2}`
+
+  try {
+    await ok('the sweep broadcasts when the LAST session expires', async () => {
+      // The first SSE read in this harness: every other canvas assertion goes
+      // through /api/state, which calls live() itself and so would pass even
+      // with the broadcast broken. The bug is in the BROADCAST, so the frame
+      // is the only thing worth reading.
+      const frames = []
+      const ac = new AbortController()
+      const stream = await fetch(`${b2}/api/stream?token=${TOKEN2}`, { signal: ac.signal })
+      const reader = stream.body.getReader()
+      const dec = new TextDecoder()
+      let buf = ''
+      const pump = (async () => {
+        try {
+          for (;;) {
+            const { value, done } = await reader.read()
+            if (done) break
+            buf += dec.decode(value, { stream: true })
+            let cut
+            while ((cut = buf.indexOf('\n\n')) !== -1) {
+              const raw = buf.slice(0, cut); buf = buf.slice(cut + 2)
+              const ev = /^event: (.+)$/m.exec(raw), data = /^data: (.*)$/m.exec(raw)
+              if (ev && data) frames.push({ type: ev[1], data: JSON.parse(data[1]) })
+            }
+          }
+        } catch { /* aborted */ }
+      })()
+
+      await fetch(`${b2}/api/register`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token: TOKEN2, session: { id: 'ghost-1', name: 'lonely' } }),
+      })
+      // TTL 700 ms, sweep every 120 ms: 2 s is comfortably past both and still
+      // a fraction of what a 90 s TTL would have cost.
+      const deadline = Date.now() + 2500
+      const emptied = () => frames.some((f) => f.type === 'sessions' && Array.isArray(f.data) && f.data.length === 0)
+      while (Date.now() < deadline && !emptied()) await new Promise((r) => setTimeout(r, 100))
+      ac.abort(); await pump
+      assert.ok(frames.some((f) => f.type === 'sessions' && f.data.some?.((s) => s.id === 'ghost-1')), 'the arrival was broadcast')
+      assert.ok(emptied(), 'and so was the board emptying -- otherwise every pane keeps a ghost until a reload')
+    })
+  } finally {
+    child.kill('SIGKILL')
+  }
 }
 
 // ---- closing a session ------------------------------------------------------

@@ -1,0 +1,597 @@
+{
+  "projects": [
+    {
+      "key": "/work/demo",
+      "name": "alpha",
+      "isGit": true,
+      "mainRoot": "/work/demo",
+      "overCap": {
+        "projects": 0,
+        "worktrees": 0
+      },
+      "roll": {
+        "onlyHere": 2,
+        "removed": 1,
+        "doneHere": 8,
+        "behind": 1
+      },
+      "efforts": [
+        {
+          "name": "alpha-plan.md",
+          "title": "Alpha Plan",
+          "rel": "docs/plans/alpha-plan.md",
+          "done": 12,
+          "reported": 3,
+          "total": 36,
+          "shipped": null,
+          "live": true,
+          "copies": 1,
+          "behind": 0,
+          "currentItemId": "item-current",
+          "currentItem": "Step 4: build the thing",
+          "checkedAt": 1700000002000,
+          "at": "main",
+          "claimedBy": [
+            {
+              "id": "s1",
+              "name": "one"
+            }
+          ]
+        },
+        {
+          "name": "broken-plan.md",
+          "title": "Broken Plan",
+          "rel": "docs/plans/broken-plan.md",
+          "done": 0,
+          "reported": 0,
+          "total": 5,
+          "shipped": null,
+          "live": true,
+          "copies": 1,
+          "behind": 0,
+          "currentItemId": "item-1",
+          "currentItem": "Step 1: figure out the missing reference",
+          "checkedAt": 0,
+          "at": "main",
+          "claimedBy": []
+        },
+        {
+          "name": "shipped-plan.md",
+          "title": "Shipped Plan",
+          "rel": "docs/plans/shipped-plan.md",
+          "done": 0,
+          "reported": 0,
+          "total": 20,
+          "shipped": {
+            "date": "2026-01-02",
+            "commit": "aa11bb2"
+          },
+          "live": false,
+          "copies": 1,
+          "behind": 0,
+          "currentItemId": null,
+          "currentItem": null,
+          "checkedAt": 0,
+          "at": "main",
+          "claimedBy": []
+        },
+        {
+          "name": "shared-plan.md",
+          "title": "Shared Plan",
+          "rel": "docs/plans/shared-plan.md",
+          "done": 8,
+          "reported": 0,
+          "total": 10,
+          "shipped": null,
+          "live": true,
+          "copies": 2,
+          "behind": 1,
+          "currentItemId": "item-shared",
+          "currentItem": "Step 3: wire it up",
+          "checkedAt": 1700000003000,
+          "at": "main",
+          "claimedBy": []
+        }
+      ],
+      "planCollisions": [
+        {
+          "worktree": "/work/demo/.worktrees/feature-x",
+          "name": "dup-plan.md",
+          "rels": [
+            "docs/plans/dup-plan.md",
+            "docs/superpowers/plans/dup-plan.md"
+          ]
+        }
+      ],
+      "features": [
+        {
+          "rel": "docs/FEATURES.md",
+          "name": "Notify users",
+          "date": "2026-01-05",
+          "slug": "notify-users"
+        },
+        {
+          "rel": "docs/FEATURES.md",
+          "name": "notify   users",
+          "date": null,
+          "slug": "notify-users"
+        },
+        {
+          "rel": "docs/FEATURES.md",
+          "name": "Widget export",
+          "date": "2026-01-06",
+          "slug": "widget-export"
+        }
+      ],
+      "featureCollisions": [
+        {
+          "slug": "notify-users",
+          "names": [
+            "Notify users",
+            "notify   users"
+          ]
+        }
+      ],
+      "specs": [
+        {
+          "name": "alpha-spec.md",
+          "rel": "docs/specs/alpha-spec.md",
+          "title": "Alpha spec",
+          "mtimeMs": 1700000000000
+        },
+        {
+          "name": "beta-spec.md",
+          "rel": "docs/specs/beta-spec.md",
+          "title": "Beta spec",
+          "mtimeMs": 1700000001000
+        }
+      ],
+      "brokenRefs": [
+        {
+          "from": "docs/plans/broken-plan.md",
+          "kind": "backlog",
+          "ref": "docs/TASKS.md#missing-heading"
+        },
+        {
+          "from": "docs/plans/broken-plan.md",
+          "kind": "spec",
+          "ref": "none"
+        }
+      ],
+      "malformedShipped": [
+        {
+          "rel": "docs/plans/broken-plan.md",
+          "value": "no"
+        }
+      ],
+      "unresolvedClaims": [
+        {
+          "sessionId": "s9",
+          "name": "ghost",
+          "kind": "plan",
+          "id": "missing-plan.md"
+        }
+      ],
+      "gitGraph": {
+        "base": "main",
+        "branches": [
+          {
+            "name": "main",
+            "head": "abc1234",
+            "isMain": true,
+            "ahead": 0,
+            "behind": 0,
+            "commits": [
+              {
+                "sha": "1111111111111111111111111111111111111a",
+                "parents": [
+                  "2222222222222222222222222222222222222b"
+                ],
+                "subject": "docs: close out the milestone",
+                "at": 1700000010000
+              },
+              {
+                "sha": "2222222222222222222222222222222222222b",
+                "parents": [
+                  "3333333333333333333333333333333333333c",
+                  "4444444444444444444444444444444444444d"
+                ],
+                "subject": "Merge branch feature-x into main",
+                "at": 1700000009000
+              },
+              {
+                "sha": "3333333333333333333333333333333333333c",
+                "parents": [
+                  "5555555555555555555555555555555555555e"
+                ],
+                "subject": "feat: add the thing",
+                "at": 1700000008000
+              }
+            ],
+            "truncated": false
+          },
+          {
+            "name": "feature-x",
+            "head": "def5678",
+            "isMain": false,
+            "ahead": 2,
+            "behind": 1,
+            "commits": [
+              {
+                "sha": "6666666666666666666666666666666666666f",
+                "parents": [
+                  "1111111111111111111111111111111111111a"
+                ],
+                "subject": "feat: work on feature x",
+                "at": 1700000011000
+              }
+            ],
+            "truncated": true
+          }
+        ],
+        "builtAt": 1700000020000,
+        "truncated": true
+      },
+      "worktrees": [
+        {
+          "path": "/work/demo",
+          "branch": "main",
+          "head": "abc1234",
+          "isMain": true,
+          "detached": false,
+          "locked": false,
+          "sessions": [
+            {
+              "id": "s1",
+              "name": "one",
+              "working": true
+            }
+          ],
+          "plans": [
+            {
+              "rel": "docs/plans/alpha-plan.md",
+              "dir": "plans",
+              "title": "Alpha Plan",
+              "spec": "docs/specs/alpha-spec.md",
+              "tasks": [
+                "docs/TASKS.md#backlog-item-two"
+              ],
+              "shipped": null,
+              "shippedMalformed": null,
+              "items": [],
+              "currentItemId": "item-current",
+              "done": 12,
+              "reported": 3,
+              "total": 36,
+              "owner": {
+                "id": "s1",
+                "name": "one",
+                "source": "sole-session"
+              },
+              "diff": "same",
+              "mtimeMs": 1700000000000,
+              "resolvedTasks": [
+                {
+                  "ref": "docs/TASKS.md#backlog-item-two",
+                  "rel": "docs/TASKS.md",
+                  "slug": "backlog-item-two",
+                  "text": "Backlog item two"
+                }
+              ],
+              "resolvedSpec": {
+                "ref": "docs/specs/alpha-spec.md",
+                "name": "alpha-spec.md",
+                "title": "Alpha spec"
+              }
+            },
+            {
+              "rel": "docs/plans/broken-plan.md",
+              "dir": "plans",
+              "title": "Broken Plan",
+              "spec": "none",
+              "tasks": [
+                "docs/TASKS.md#missing-heading"
+              ],
+              "shipped": null,
+              "shippedMalformed": "no",
+              "items": [],
+              "currentItemId": "item-1",
+              "done": 0,
+              "reported": 0,
+              "total": 5,
+              "owner": null,
+              "diff": "same",
+              "mtimeMs": 1700000000000,
+              "resolvedTasks": [
+                {
+                  "ref": "docs/TASKS.md#missing-heading",
+                  "broken": true
+                },
+                {
+                  "ref": "docs/TASKS.md#backlog-item-one",
+                  "rel": "docs/TASKS.md",
+                  "slug": "backlog-item-one",
+                  "text": "Backlog item one"
+                }
+              ],
+              "resolvedSpec": {
+                "ref": "none",
+                "broken": true
+              }
+            },
+            {
+              "rel": "docs/plans/shipped-plan.md",
+              "dir": "plans",
+              "title": "Shipped Plan",
+              "spec": null,
+              "tasks": [],
+              "shipped": {
+                "date": "2026-01-02",
+                "commit": "aa11bb2"
+              },
+              "shippedMalformed": null,
+              "items": [],
+              "currentItemId": null,
+              "done": 0,
+              "reported": 0,
+              "total": 20,
+              "owner": null,
+              "diff": "same",
+              "mtimeMs": 1700000000000,
+              "resolvedTasks": [],
+              "resolvedSpec": null
+            },
+            {
+              "rel": "docs/plans/shared-plan.md",
+              "dir": "plans",
+              "title": "Shared Plan",
+              "spec": null,
+              "tasks": [],
+              "shipped": null,
+              "shippedMalformed": null,
+              "items": [],
+              "currentItemId": "item-shared",
+              "done": 8,
+              "reported": 0,
+              "total": 10,
+              "owner": {
+                "id": "s1",
+                "name": "one",
+                "source": "sole-session"
+              },
+              "diff": "same",
+              "mtimeMs": 1700000000000,
+              "resolvedTasks": [],
+              "resolvedSpec": null
+            }
+          ],
+          "tasks": [
+            {
+              "rel": "docs/TASKS.md",
+              "items": [
+                {
+                  "id": "backlog-one",
+                  "kind": "section",
+                  "text": "Backlog item one",
+                  "checked": null,
+                  "reported": false,
+                  "depth": 0,
+                  "line": 5,
+                  "slug": "backlog-item-one",
+                  "history": {
+                    "firstSeen": 1700000000000,
+                    "checkedAt": null,
+                    "checkedBy": null,
+                    "uncheckedAt": null,
+                    "removedAt": null
+                  },
+                  "diff": "same",
+                  "claimedBy": [
+                    {
+                      "id": "s1",
+                      "name": "one"
+                    }
+                  ]
+                },
+                {
+                  "id": "backlog-two",
+                  "kind": "section",
+                  "text": "Backlog item two",
+                  "checked": null,
+                  "reported": false,
+                  "depth": 0,
+                  "line": 20,
+                  "slug": "backlog-item-two",
+                  "history": {
+                    "firstSeen": 1700000000000,
+                    "checkedAt": null,
+                    "checkedBy": null,
+                    "uncheckedAt": null,
+                    "removedAt": null
+                  },
+                  "diff": "same",
+                  "claimedBy": []
+                }
+              ]
+            }
+          ],
+          "taskFile": "docs/TASKS.md",
+          "taskAuthority": "docs",
+          "specs": [
+            "docs/specs/alpha-spec.md",
+            "docs/specs/beta-spec.md"
+          ],
+          "skipped": [],
+          "claims": {
+            "s9": {
+              "name": "ghost",
+              "items": [
+                {
+                  "kind": "plan",
+                  "id": "missing-plan.md"
+                }
+              ],
+              "note": "auto: first edit",
+              "inheritedFrom": null,
+              "claimedAt": 1700000000000,
+              "updatedAt": 1700000000000
+            }
+          }
+        },
+        {
+          "path": "/work/demo/.worktrees/feature-x",
+          "branch": "feature-x",
+          "head": "def5678",
+          "isMain": false,
+          "detached": false,
+          "locked": true,
+          "sessions": [],
+          "plans": [
+            {
+              "rel": "docs/plans/shared-plan.md",
+              "dir": "plans",
+              "title": "Shared Plan",
+              "spec": null,
+              "tasks": [],
+              "shipped": null,
+              "shippedMalformed": null,
+              "items": [],
+              "currentItemId": "item-shared-behind",
+              "done": 3,
+              "reported": 0,
+              "total": 10,
+              "owner": null,
+              "diff": "same",
+              "mtimeMs": 1700000000000,
+              "resolvedTasks": [],
+              "resolvedSpec": null
+            }
+          ],
+          "tasks": [
+            {
+              "rel": "docs/TASKS.md",
+              "items": [
+                {
+                  "id": "backlog-one",
+                  "kind": "section",
+                  "text": "Backlog item one",
+                  "checked": null,
+                  "reported": false,
+                  "depth": 0,
+                  "line": 5,
+                  "slug": "backlog-item-one",
+                  "history": {
+                    "firstSeen": 1700000000000,
+                    "checkedAt": null,
+                    "checkedBy": null,
+                    "uncheckedAt": null,
+                    "removedAt": null
+                  },
+                  "diff": "same",
+                  "claimedBy": []
+                },
+                {
+                  "id": "backlog-two",
+                  "kind": "section",
+                  "text": "Backlog item two",
+                  "checked": null,
+                  "reported": false,
+                  "depth": 0,
+                  "line": 20,
+                  "slug": "backlog-item-two",
+                  "history": {
+                    "firstSeen": 1700000000000,
+                    "checkedAt": null,
+                    "checkedBy": null,
+                    "uncheckedAt": null,
+                    "removedAt": null
+                  },
+                  "diff": "same",
+                  "claimedBy": []
+                }
+              ]
+            }
+          ],
+          "taskFile": "docs/TASKS.md",
+          "taskAuthority": "docs",
+          "specs": [
+            "docs/specs/alpha-spec.md",
+            "docs/specs/beta-spec.md"
+          ],
+          "skipped": [],
+          "claims": {}
+        }
+      ]
+    },
+    {
+      "key": "/work/demo2",
+      "name": "beta",
+      "isGit": true,
+      "mainRoot": "/work/demo2",
+      "overCap": {
+        "projects": 0,
+        "worktrees": 0
+      },
+      "roll": {
+        "onlyHere": 0,
+        "removed": 0,
+        "doneHere": 0,
+        "behind": 0
+      },
+      "efforts": [],
+      "planCollisions": [],
+      "features": [],
+      "featureCollisions": [],
+      "specs": [],
+      "brokenRefs": [],
+      "malformedShipped": [],
+      "unresolvedClaims": [],
+      "gitGraph": {
+        "base": "main",
+        "branches": [
+          {
+            "name": "main",
+            "head": "beefbee1",
+            "isMain": true,
+            "ahead": 0,
+            "behind": 0,
+            "commits": [
+              {
+                "sha": "7777777777777777777777777777777777777a",
+                "parents": [],
+                "subject": "init",
+                "at": 1700000000000
+              }
+            ],
+            "truncated": false
+          }
+        ],
+        "builtAt": 1700000000500,
+        "truncated": false
+      },
+      "worktrees": [
+        {
+          "path": "/work/demo2",
+          "branch": "main",
+          "head": "beefbee1",
+          "isMain": true,
+          "detached": false,
+          "locked": false,
+          "sessions": [],
+          "plans": [],
+          "tasks": [
+            {
+              "rel": "docs/TASKS.md",
+              "items": []
+            }
+          ],
+          "taskFile": "docs/TASKS.md",
+          "taskAuthority": "docs",
+          "specs": [],
+          "skipped": [],
+          "claims": {}
+        }
+      ]
+    }
+  ]
+}

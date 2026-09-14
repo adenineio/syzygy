@@ -7,7 +7,7 @@
 
 import { readFileSync } from 'node:fs'
 import { sep } from 'node:path'
-import { topologyOf, probe } from './tasks-git.mjs'
+import { topologyOf, probe, graphOf } from './tasks-git.mjs'
 import { discover, CAPS } from './tasks-discover.mjs'
 import { parseItems, parseHeader, parseFeatures } from './tasks-parse.mjs'
 import { labelItems, rollUp } from './tasks-diff.mjs'
@@ -21,6 +21,13 @@ import { readClaims } from './claims.mjs'
 // topologyOf already makes -- without importing tasks-git.mjs directly.
 // "Only tasks.mjs is imported by relay.mjs" stays true this way.
 export { probe }
+
+// The projection the wire carries, re-exported for the same reason: the relay
+// builds the digest and the documents from the scan without a second import.
+export {
+  DIGEST_EFFORTS, projectDigest, digestProjects, projectDocument,
+  documentProjects, foldPlans, foldBacklog, needsFlags, stampChanged,
+} from './tasks-digest.mjs'
 
 const OWNER_WINDOW_MS = 15 * 60 * 1000
 
@@ -226,6 +233,34 @@ export const resolveDeclaredRefs = (built, index) => {
     }
   }
   return brokenRefs
+}
+
+/** One scanned plan in full, steps and history included, found by the
+ *  worktree path and plan rel the payload already carries. Both come from a
+ *  browser, so both must equal a scanned record exactly: nothing here builds a
+ *  path or touches the disk, and anything else is null. */
+export const planRecord = (projects, wt, rel) => {
+  if (typeof wt !== 'string' || typeof rel !== 'string' || !wt || !rel) return null
+  for (const proj of projects ?? []) {
+    const w = (proj?.worktrees ?? []).find((x) => x.path === wt)
+    const plan = w ? (w.plans ?? []).find((p) => p.rel === rel) : null
+    if (plan) return plan
+  }
+  return null
+}
+
+/** One scanned task file in full, items and history included, found by the
+ *  worktree path and file rel the digest already carries. Both come from a
+ *  browser, so both must equal a scanned record exactly: nothing here builds a
+ *  path or touches the disk, and anything else is null. */
+export const backlogRecord = (projects, wt, rel) => {
+  if (typeof wt !== 'string' || typeof rel !== 'string' || !wt || !rel) return null
+  for (const proj of projects ?? []) {
+    const w = (proj?.worktrees ?? []).find((x) => x.path === wt)
+    const file = w ? (w.tasks ?? []).find((t) => t.rel === rel) : null
+    if (file) return file
+  }
+  return null
 }
 
 export const createScanner = ({ registerFile }) => {
@@ -484,6 +519,11 @@ export const createScanner = ({ registerFile }) => {
       const { efforts, collisions, unresolvedClaims: planUnresolved } = foldEfforts(built)
       const backlogUnresolved = resolveBacklogClaims(built)
 
+      // Bounded, cached on the worktree heads, and null on any failure --
+      // the Graph panel says "history needs a relay restart" for an absent
+      // key and "no history" for a null one, which are different facts.
+      const gitGraph = proj.isGit ? await graphOf(proj.key, built) : null
+
       out.push({
         key: proj.key, name: proj.name, isGit: proj.isGit, mainRoot: proj.mainRoot,
         overCap: { projects: projectsOverCap, worktrees: worktreesOverCap },
@@ -501,6 +541,7 @@ export const createScanner = ({ registerFile }) => {
             .filter((pl) => pl.shippedMalformed)
             .map((pl) => ({ rel: pl.rel, value: pl.shippedMalformed }))),
         unresolvedClaims: [...planUnresolved, ...backlogUnresolved],
+        gitGraph,
         worktrees: built,
       })
     }

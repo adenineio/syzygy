@@ -1,9 +1,11 @@
 // Drives the compiled hooks module against a mock $, with real process calls
 // and a real transcript, and checks its token math against an independent pass
-// over the same file. Run via `just test`.
+// over the same file. Run via `just test` (two synthetic fixtures, hermetic)
+// or `just test-live [session]` (a real transcript, for a by-hand check).
 
 import { spawnSync } from 'node:child_process'
 import { readFileSync, existsSync } from 'node:fs'
+import { resolve as resolvePath, basename } from 'node:path'
 import { homedir } from 'node:os'
 import assert from 'node:assert/strict'
 // The real id list, not a hand-copied one -- spinner-frames.js is plain JS and
@@ -38,11 +40,18 @@ const textOf = (node) => {
   return (Array.isArray(kids) ? kids : [kids]).map(textOf).join(' ')
 }
 
-/** Stands in for `<cwd>/.claude/syzygy-hud-hotkeys.json`. Overrides slot 2,
+/** Stands in for `<worktree root>/.claude/syzygy-hud-hotkeys.json`. Overrides slot 2,
  *  adds slot 5, turns the spinner picker on and picks the narrow pie. */
 // The basename of both config files; the plugin's own HOTKEYS_FILE. Spelt once
 // here because the mock $ matches on the argv that carries it.
 const HOTKEYS_FILE = 'syzygy-hud-hotkeys.json'
+
+// The worktree root the mocked `git rev-parse --show-toplevel` answers. A path
+// that exists nowhere, deliberately: if the plugin ever stops asking git and
+// falls back to the cwd, the project fixture below is not served and the merge
+// assertions fail, instead of the harness quietly reading the developer's own
+// file out of the real checkout.
+const HARNESS_ROOT = '/tmp/szg-harness-worktree'
 
 // `~/.claude/<HOTKEYS_FILE>`, as a fixture rather than as whatever the
 // developer running the tests happens to keep there. Every value below is the
@@ -66,16 +75,31 @@ const PROJECT_CONFIG = JSON.stringify({
 })
 
 // --- the mock $ --------------------------------------------------------------
-const makeDollar = ({ sessionId, cwd, model }) => {
+// `fixtureTranscript`, when set, is the absolute path of a synthetic transcript
+// fixture. The module finds its own transcript with one real `find` call
+// against `~/.claude/projects` (`findTranscript` in hud.tsx); answering that
+// exact call from here, matched on the filename it searches for, means the
+// module never touches the real directory at all -- the fixture run reads
+// only the file this harness was pointed at.
+const makeDollar = ({ sessionId, cwd, model, fixtureTranscript = null }) => {
   const store = new Map()
   const timers = []
   const invalidations = []
   const registered = []
   const calls = []
   const submitted = []
-  return {
+  const filled = []
+  const gitRootCalls = []
+  const catPaths = []
+  const dollarSelf = {
     _store: store, _timers: timers, _invalidations: invalidations,
-    _registered: registered, _calls: calls, _submitted: submitted,
+    _registered: registered, _calls: calls, _submitted: submitted, _filled: filled,
+    // The one knob a test flips: `prompt.fill` resolves { isFilled: false }
+    // where no box can take the text (a dialog is up, or the session is
+    // headless), and that is a real branch the band has to report rather than
+    // swallow.
+    _fillAnswers: true,
+    _gitRootCalls: gitRootCalls, _catPaths: catPaths,
     process: {
       run: async (argv, init = {}) => {
         // Keep the test hermetic: never write the user's relay config and never
@@ -92,7 +116,27 @@ const makeDollar = ({ sessionId, cwd, model }) => {
         // is how `$.fs.readFile` stayed mocked green for a build on which it
         // threw. Ordered project-first: the global path ends in the same
         // basename.
+        // The band resolves the project override at the worktree ROOT, the way
+        // pane-v2's HOTKEYS mode writes it. Answered here so the test does not
+        // depend on where the harness happens to be checked out.
+        if (argv[0] === 'git' && argv[1] === 'rev-parse' && argv[2] === '--show-toplevel') {
+          gitRootCalls.push(init.cwd ?? cwd)
+          return { exitCode: 0, stdout: `${HARNESS_ROOT}\n`, stderr: '' }
+        }
+        // hud.tsx's own transcript lookup: `find <home>/.claude/projects
+        // -maxdepth 2 -name <sessionId>.jsonl`. Matched on the filename alone,
+        // not the home directory it built the search path from, so this
+        // answers the call however the real $HOME resolves on the machine
+        // running the test.
+        if (fixtureTranscript && argv[0] === 'find' && argv.at(-1) === `${sessionId}.jsonl`) {
+          return { exitCode: 0, stdout: `${fixtureTranscript}\n`, stderr: '' }
+        }
+        if (argv[0] === 'cat' && argv[1] === `${HARNESS_ROOT}/.claude/${HOTKEYS_FILE}`) {
+          catPaths.push(argv[1])
+          return { exitCode: 0, stdout: PROJECT_CONFIG, stderr: '' }
+        }
         if (argv[0] === 'cat' && argv[1] === `.claude/${HOTKEYS_FILE}`) {
+          catPaths.push(argv[1])
           return { exitCode: 0, stdout: PROJECT_CONFIG, stderr: '' }
         }
         if (argv[0] === 'cat' && String(argv[1]).endsWith(`/.claude/${HOTKEYS_FILE}`)) {
@@ -113,7 +157,10 @@ const makeDollar = ({ sessionId, cwd, model }) => {
       list: async () => [],
     },
     agent: { list: async () => [{ id: 'ag1', description: 'demo', type: 'Explore', status: 'running' }], spawn: async () => ({ text: '' }) },
-    prompt: { submit: async (p) => void submitted.push(p) },
+    prompt: {
+      submit: async (p) => void submitted.push(p),
+      fill: async (p) => { filled.push(p); return { isFilled: dollarSelf._fillAnswers } },
+    },
     turn: { abort: async () => {} },
     audio: { speak: async () => ({}), play: async () => {} },
     model: { complete: async () => 'Reading the lexer to trace a token bug.', classify: async () => undefined, fork: async () => null },
@@ -155,6 +202,7 @@ const makeDollar = ({ sessionId, cwd, model }) => {
       ask: async () => '',
     },
   }
+  return dollarSelf
 }
 
 // --- independent recount, to check the module against ------------------------
@@ -184,20 +232,44 @@ const recount = (path) => {
 }
 
 // --- run ---------------------------------------------------------------------
-const sessionId = process.argv[2]
-if (!sessionId) { console.error('usage: harness.mjs <session-id>'); process.exit(2) }
+// Two ways in: `--transcript <path>` or a bare path names a fixture on disk
+// directly, and the harness never shells out to find anything -- the session
+// id is taken from the fixture's own filename, so a fixture named
+// `session-alarm.jsonl` runs as session `session-alarm`. Anything else is
+// read as a session id and resolved against the real `~/.claude/projects` the
+// way this harness always has, for `just test-live`'s by-hand check.
+const usage = 'usage: harness.mjs <session-id> | --transcript <path> | <path-to-transcript.jsonl>'
+const [arg2, arg3] = process.argv.slice(2)
+let sessionId, transcript, fixtureTranscript = null
 
-const found = spawnSync('find', [`${homedir()}/.claude/projects`, '-maxdepth', '2', '-name', `${sessionId}.jsonl`], { encoding: 'utf8' })
-const transcript = (found.stdout || '').split('\n').find((l) => l.trim())?.trim()
-assert.ok(transcript && existsSync(transcript), `no transcript found for session ${sessionId}`)
+if (arg2 === '--transcript') {
+  if (!arg3) { console.error(usage); process.exit(2) }
+  fixtureTranscript = resolvePath(arg3)
+  assert.ok(existsSync(fixtureTranscript), `no transcript fixture at ${fixtureTranscript}`)
+  sessionId = basename(fixtureTranscript).replace(/\.jsonl$/, '')
+  transcript = fixtureTranscript
+} else if (arg2 && existsSync(arg2)) {
+  fixtureTranscript = resolvePath(arg2)
+  sessionId = basename(fixtureTranscript).replace(/\.jsonl$/, '')
+  transcript = fixtureTranscript
+} else {
+  sessionId = arg2
+  if (!sessionId) { console.error(usage); process.exit(2) }
+  const found = spawnSync('find', [`${homedir()}/.claude/projects`, '-maxdepth', '2', '-name', `${sessionId}.jsonl`], { encoding: 'utf8' })
+  transcript = (found.stdout || '').split('\n').find((l) => l.trim())?.trim()
+  assert.ok(transcript && existsSync(transcript), `no transcript found for session ${sessionId}`)
+}
 console.log(`transcript: ${transcript}`)
 
 const {
   register,
-  modelKey, windowFor, snapWindow, windowAtLeast, derivedWindow, pie,
-  parseHotkeys, mergeHotkeys, buttonWidth, fitHotkeys,
+  modelKey, windowFor, snapWindow, windowAtLeast, derivedWindow,
+  pie, PIE_STEPS, pieStep, pressureOf,
+  parseHotkeys, mergeHotkeys, buttonWidth, fitHotkeys, projectHotkeysPath,
   displayWidth, fitVitals, parseSettings, mergeSettings, resolveSpinnerId, paneLabel, needsHuman,
-  lastAnswerOf, planFromToolCall,
+  normalizeMarker, parseStash, stashReason, runCommand,
+  lastAnswerOf, planFromToolCall, hasLineEvidence, chainPromptOf,
+  bandSpendBody,
 } = await import('../build/hud.js')
 
 const hooks = []
@@ -208,6 +280,10 @@ register((...args) => {
 }, {})
 
 const byEvent = (name) => hooks.find((x) => x.event === name)
+// byEvent finds the FIRST hook for an event, which is the right answer
+// everywhere it is already used. A test that means every hook on an event, to
+// count them, has to say so.
+const byEventAll = (name) => hooks.filter((x) => x.event === name)
 /** There are now two ui.render hooks; pick the one for a given component. */
 const byComponent = (c) => hooks.find((x) => x.event === 'ui.render' && x.matcher?.component === c)
 assert.ok(byEvent('session.start'), 'session.start hook registered')
@@ -216,7 +292,7 @@ assert.ok(byComponent('AbovePrompt'), 'AbovePrompt render hook registered')
 assert.ok(byComponent('Spinner'), 'Spinner render hook registered')
 console.log(`hooks: ${hooks.map((x) => x.event).join(', ')}`)
 
-const $ = makeDollar({ sessionId, cwd: process.cwd(), model: 'Opus 5' })
+const $ = makeDollar({ sessionId, cwd: process.cwd(), model: 'Opus 5', fixtureTranscript })
 const echo = (e) => Promise.resolve(e)
 echo.signal = new AbortController().signal
 echo.event = 'session.start'
@@ -284,7 +360,8 @@ console.log(`✔ guardrail count incremented on deny (${g0} → ${g1})`)
 const toolNames = $._registered.map((t) => t.name).sort()
 assert.deepEqual(
   toolNames,
-  ['ask_human', 'calc', 'claim_work', 'pane_event', 'recall', 'release_work', 'remember', 'think_harder'],
+  ['ask_human', 'calc', 'claim_work', 'pane_event', 'propose_pattern', 'recall',
+   'release_work', 'remember', 'report_finding', 'think_harder'],
   'registered tools',
 )
 console.log(`✔ registered tools: ${toolNames.join(', ')}`)
@@ -300,7 +377,12 @@ const calcRes = await star.hook(
   { tool: 'mcp__syzygy__calc', tool_use_id: 'c1', expression: '(1200*0.15)/3' },
   calcNext,
 )
-assert.equal(calcRes.result.text, '60', 'calc evaluates exactly')
+// A plugin tool answers with a PLAIN STRING. On 2.1.270 the engine checks a
+// hook's result against the tool's output shape (string | array | undefined)
+// and rejects `{ text }`: "tool.call step resolved <tool> with a result that
+// does not match its output shape" -- while the tool's side effect still runs.
+assert.equal(typeof calcRes.result, 'string', 'a plugin tool answers with a plain string, not { text }')
+assert.equal(calcRes.result, '60', 'calc evaluates exactly')
 console.log('✔ calc tool served by the plugin, not the engine (60)')
 
 const badCalc = await star.hook(
@@ -308,8 +390,96 @@ const badCalc = await star.hook(
   { tool: 'mcp__syzygy__calc', tool_use_id: 'c2', expression: 'process.exit(1)' },
   calcNext,
 )
-assert.ok(/error/.test(badCalc.result.text), 'calc refuses anything that is not arithmetic')
+assert.equal(typeof badCalc.result, 'string', 'a refusal is a plain string too')
+assert.ok(/error/.test(badCalc.result), 'calc refuses anything that is not arithmetic')
 console.log('✔ calc refuses non-arithmetic input')
+
+// --- report_finding ----------------------------------------------------------
+// Same `calcNext` shape as above: the engine must never see a plugin tool call.
+const findNext = () => Promise.reject(new Error('the engine must not see a plugin tool call'))
+findNext.signal = new AbortController().signal
+findNext.event = 'tool.call'
+findNext.is = (name) => name === 'tool.call'
+findNext.origin = 'test'
+
+const noLine = await star.hook($, {
+  tool: 'mcp__syzygy__report_finding', tool_use_id: 'f1',
+  surprise: 'the flag is variadic', kind: 'constraint',
+  evidence: ['syzygy/bridge/dispatch.mjs'],
+}, findNext)
+assert.equal(typeof noLine.result, 'string', 'a refusal is a plain string')
+assert.match(noLine.result, /line number/i,
+  'evidence with no line number is refused in the plugin, before any POST')
+console.log('✔ report_finding refuses evidence with no line number')
+
+const noSurprise = await star.hook($, {
+  tool: 'mcp__syzygy__report_finding', tool_use_id: 'f2',
+  kind: 'drift', evidence: ['syzygy/bridge/relay.mjs:738'],
+}, findNext)
+assert.equal(typeof noSurprise.result, 'string')
+assert.match(noSurprise.result, /surprise/i, 'no surprise, no finding')
+console.log('✔ report_finding refuses a record with no surprise')
+
+// The mock $'s http.fetch answers ok:false, so the relay is DOWN for this
+// harness by construction (see makeDollar). A well-formed call therefore
+// exercises the relay path and must come back with the honest message rather
+// than throwing. The POST body's own shape is pinned relay-side, in
+// test/fleet-harness.mjs, where a real relay answers.
+const relayDown = await star.hook($, {
+  tool: 'mcp__syzygy__report_finding', tool_use_id: 'f3',
+  surprise: '--allowedTools is variadic and swallows the prompt',
+  kind: 'constraint', touched: ['syzygy/bridge/dispatch.mjs'],
+  evidence: ['syzygy/bridge/dispatch.mjs:167'],
+}, findNext)
+assert.equal(typeof relayDown.result, 'string')
+assert.match(relayDown.result, /relay/i, 'a well-formed finding reaches the relay path')
+console.log('✔ report_finding reports honestly when the relay is down')
+
+// --- propose_pattern ---------------------------------------------------------
+// Same `findNext` shape as report_finding above: the engine must never see a
+// plugin tool call. The relay is down here, so nothing is POSTed.
+const ppNoEvidence = await star.hook($, {
+  tool: 'mcp__syzygy__propose_pattern', tool_use_id: 'pp1',
+  title: 'A pattern', idea: 'an idea', methodology: 'steps', kind: 'skill', evidence: [],
+}, findNext)
+assert.equal(typeof ppNoEvidence.result, 'string', 'a refusal is a plain string')
+assert.match(ppNoEvidence.result, /evidence/)
+console.log('✔ propose_pattern refuses a call with no evidence')
+
+const ppNoMethod = await star.hook($, {
+  tool: 'mcp__syzygy__propose_pattern', tool_use_id: 'pp2',
+  title: 'A pattern', idea: 'an idea', evidence: ['a.mjs:1'],
+}, findNext)
+assert.equal(typeof ppNoMethod.result, 'string')
+assert.match(ppNoMethod.result, /methodology/)
+console.log('✔ propose_pattern refuses a write-up missing its methodology')
+
+const ppDown = await star.hook($, {
+  tool: 'mcp__syzygy__propose_pattern', tool_use_id: 'pp3',
+  title: 'A pattern', idea: 'an idea', methodology: '1. do it', kind: 'skill',
+  evidence: ['syzygy/bridge/fleet.mjs:226'],
+}, findNext)
+assert.equal(typeof ppDown.result, 'string')
+assert.match(ppDown.result, /relay/i, 'a well-formed proposal reaches the relay path')
+console.log('✔ propose_pattern reports honestly when the relay is down')
+
+// Read the schema off what registerTools actually passed to $.tool.register --
+// check the key name it uses before trusting `inputSchema` here.
+const ppTool = $._registered.find((t) => t.name === 'propose_pattern')
+assert.ok(ppTool, 'propose_pattern is registered')
+assert.deepEqual([...ppTool.inputSchema.required].sort(), ['evidence', 'idea', 'methodology', 'title'])
+assert.deepEqual(ppTool.inputSchema.properties.kind.enum, ['skill', 'shape', 'kickoff', 'claude-md'])
+console.log('✔ propose_pattern is registered with its four required inputs')
+
+// hud.tsx carries its own copy of findings.mjs's hasLineEvidence: the hooks
+// module cannot import a bridge module, which pulls in node:fs. The two copies
+// are held together here, over one table.
+const { hasLineEvidence: storeHasLine } = await import('../syzygy/bridge/findings.mjs')
+for (const ev of [['a.js:12'], ['a.js:12:3'], ['README.md', 'a.js:9'], ['a.js'], ['a.js:'],
+  [], 'a.js:12', null, [12], ['  a.js:7  '], ['a.js:12x']]) {
+  assert.equal(hasLineEvidence(ev), storeHasLine(ev), `the two copies agree on ${JSON.stringify(ev)}`)
+}
+console.log('✔ hasLineEvidence: the hooks copy agrees with findings.mjs')
 
 // Render.
 const renderNext = (e) => Promise.resolve(e)
@@ -348,7 +518,9 @@ const narrow = textOf(await byComponent('AbovePrompt').hook(
   renderNext,
 ))
 assert.ok(!narrow.includes('⎇'), 'narrow band drops the second row')
-assert.ok(/[○◔◑◕●]/.test(narrow), 'narrow band keeps the context pie')
+// Any step of the table counts: past three quarters the pie is the alarm glyph,
+// which a fixed list of circles would miss.
+assert.ok(PIE_STEPS.some((s) => narrow.includes(s.circle)), 'narrow band keeps the context pie')
 console.log('✔ collapses on a narrow terminal')
 
 // The spinner site draws the chosen spinner, not the engine's line.
@@ -419,34 +591,394 @@ console.log('✔ the statusline fallback refuses to guess rather than guessing')
 
 // The gauge reads what is LEFT, not what is used: untouched is a full moon and
 // drained is a new moon. It is the waning sequence, whose lit face shrinks --
-// the waxing glyphs are its mirror images and would run the wrong way.
+// the waxing glyphs are its mirror images and would run the wrong way. The
+// sixth step is not a phase: it is the alarm that replaces a gauge with nothing
+// left to say.
 const VS16 = '\uFE0F'
 assert.equal(pie(0), '🌕' + VS16, 'an untouched context is a FULL moon -- the big set is the default')
-assert.equal(pie(1), '🌑' + VS16, 'a drained context is a new moon')
-assert.equal(pie(0.5), '🌗' + VS16, 'half used is the last quarter')
-assert.equal(pie(0.2), '🌖' + VS16, 'a fifth used is waning gibbous, not the waxing mirror 🌔')
-assert.equal(pie(0.8), '🌘' + VS16, 'four fifths used is waning crescent, not the waxing mirror 🌒')
+assert.equal(pie(1), '❗' + VS16, 'a drained context is well past the alarm, not merely dark')
+
+// The table is the contract. Ascending, six steps, and the colour rides beside
+// the glyph so the two cannot drift apart.
+assert.equal(PIE_STEPS.length, 6, 'six steps: four phases, the held crescent, the alarm')
+for (let i = 1; i < PIE_STEPS.length; i += 1) {
+  assert.ok(PIE_STEPS[i].from > PIE_STEPS[i - 1].from, 'the table ascends -- the lookup scans it in order')
+}
+assert.deepEqual(PIE_STEPS.map((s) => s.from), [0, 0.20, 0.35, 0.50, 0.66, 0.75], 'the six thresholds')
+assert.deepEqual(PIE_STEPS.map((s) => s.moon), ['🌕', '🌖', '🌗', '🌘', '🌑', '❗'], 'the moon set, then the alarm')
+assert.deepEqual(PIE_STEPS.map((s) => s.circle), ['●', '◕', '◑', '◔', '○', '!'], 'the narrow set runs the same way')
+assert.deepEqual(
+  PIE_STEPS.map((s) => s.pressure),
+  ['green', 'green', 'green', 'yellow', 'red', 'red'],
+  'yellow with the crescent at 50%, red with the dark moon at 66%',
+)
+assert.equal(new Set(PIE_STEPS.map((s) => s.moon)).size, 6, 'every moon step is a distinct glyph')
+assert.equal(new Set(PIE_STEPS.map((s) => s.circle)).size, 6, 'and so is every circle step')
+
+// Every boundary, from BOTH sides. A threshold table whose order or comparison
+// is wrong degrades into the wrong glyph, never into an error.
+const BOUNDARIES = [
+  { at: 0.20, below: ['🌕', '●'], above: ['🌖', '◕'] },
+  { at: 0.35, below: ['🌖', '◕'], above: ['🌗', '◑'] },
+  { at: 0.50, below: ['🌗', '◑'], above: ['🌘', '◔'] },
+  { at: 0.66, below: ['🌘', '◔'], above: ['🌑', '○'] },
+  { at: 0.75, below: ['🌑', '○'], above: ['❗', '!'] },
+]
+for (const b of BOUNDARIES) {
+  assert.equal(pie(b.at - 0.0001), b.below[0] + VS16, `just under ${b.at} still draws ${b.below[0]}`)
+  assert.equal(pie(b.at), b.above[0] + VS16, `at exactly ${b.at} the moon steps to ${b.above[0]}`)
+  assert.equal(pie(b.at - 0.0001, 'circle'), b.below[1], `just under ${b.at} the narrow set still draws ${b.below[1]}`)
+  assert.equal(pie(b.at, 'circle'), b.above[1], `at exactly ${b.at} the narrow set steps to ${b.above[1]}`)
+}
+
+// The escalation's three promises, as assertions.
+assert.equal(pie(0.55), '🌘' + VS16, 'past half is the last crescent, and it HOLDS there')
+assert.equal(pie(0.65), '🌘' + VS16, '...all the way to two thirds')
+assert.equal(pie(0.66), '🌑' + VS16, 'dark by two thirds')
+assert.equal(pie(0.80), '❗' + VS16, 'and louder than a glyph after three quarters')
 assert.equal(pie(-1), '🌕' + VS16, 'out of range clamps full')
-assert.equal(pie(9), '🌑' + VS16, 'out of range clamps empty')
+assert.equal(pie(9), '❗' + VS16, 'out of range clamps to the alarm')
+
+// Colour comes from the same table, so the border and the glyph change together.
+assert.equal(pressureOf(0), 'green', 'a fresh session is green')
+assert.equal(pressureOf(0.4999), 'green', 'green right up to half')
+assert.equal(pressureOf(0.50), 'yellow', 'yellow arrives WITH the crescent')
+assert.equal(pressureOf(0.6599), 'yellow', 'and holds to two thirds')
+assert.equal(pressureOf(0.66), 'red', 'red arrives WITH the dark moon')
+assert.equal(pressureOf(1), 'red', 'and stays')
+for (const s of PIE_STEPS) {
+  assert.equal(pressureOf(s.from), s.pressure, `the colour at ${s.from} is the table's own`)
+  assert.equal(pieStep(s.from).moon, s.moon, `and so is the glyph at ${s.from}`)
+}
 
 // Every moon carries VARIATION SELECTOR-16. Without it the FULL moon alone
 // renders as a monochrome circle wherever a symbol font that covers U+1F315 --
 // and, oddly, none of the other four phases -- sits ahead of the colour emoji
 // font -- an ordinary thing for a terminal's fallback chain to contain, which
 // is how the quirk was found.
-for (const p of [0, 0.25, 0.5, 0.75, 1]) {
-  assert.ok(pie(p).endsWith(VS16), `the moon at ${p * 100}% asks for emoji presentation`)
-  assert.equal(displayWidth(pie(p)), 2, 'and VS16 costs no columns')
+for (const s of PIE_STEPS) {
+  assert.ok(pie(s.from).endsWith(VS16), `the moon at ${s.from * 100}% asks for emoji presentation`)
+  assert.equal(displayWidth(pie(s.from)), 2, 'and VS16 costs no columns')
+  assert.equal(displayWidth(pie(s.from, 'circle')), 1, 'while the narrow set is one column at every step')
 }
 assert.ok(!pie(0, 'circle').includes(VS16), 'the one-column set needs no presentation selector')
-assert.equal(pie(0, 'circle'), '●', 'the narrow set runs the same way')
-assert.equal(pie(1, 'circle'), '○', 'so switching pieStyle never inverts the reading')
+console.log('✔ the context pie escalates by threshold: dark at 66%, an alarm at 75%')
 
-// Monotonic, and a guard against anyone "correcting" it back to a filling pie.
-const ramp = [0, 0.25, 0.5, 0.75, 1].map((p) => pie(p, 'circle'))
-assert.deepEqual(ramp, ['●', '◕', '◑', '◔', '○'], 'the circle set empties as context fills')
-assert.equal(new Set(ramp).size, 5, 'and every step is a distinct glyph')
-console.log('✔ the context pie is a depletion gauge: full at 0%, empty at 100%')
+// --- the band's spend estimate ------------------------------------------------
+// Mirrored inline in spend.mjs's estimateTokens, since a hooks module cannot
+// import a node module -- the two must agree independently, not by sharing code.
+const { estimateTokens: realEstimateTokens } = await import('../syzygy/bridge/spend.mjs')
+assert.deepEqual(bandSpendBody('narrate', 'haiku', 'abcd', 'abcdefgh'), {
+  kind: 'band', site: 'narrate', model: 'haiku',
+  usage: { input: 1, output: 2 }, estimated: true,
+}, 'bandSpendBody shapes a band record with estimated tokens')
+for (const s of ['', 'a', 'x'.repeat(4001)]) {
+  assert.equal(
+    bandSpendBody('x', 'm', s, '').usage.input, realEstimateTokens(s),
+    `the band's inline estimate agrees with spend.mjs's estimateTokens on a ${s.length}-character string`,
+  )
+}
+console.log("✔ bandSpendBody's estimate matches spend.mjs's estimateTokens")
+
+// --- the pasteboard marker ---------------------------------------------------
+// The whole feature turns on one pure function, because a hooks module cannot
+// read the composer: the text is first visible at prompt.submit, so the stash
+// is a LEADING MARKER the submit hook recognises and swallows.
+assert.equal(normalizeMarker(undefined), ',,', 'the default marker is two commas')
+assert.equal(normalizeMarker(',,'), ',,')
+assert.equal(normalizeMarker(';;'), ';;', 'any short punctuation run is allowed')
+assert.equal(normalizeMarker('>'), '>', 'one character is allowed -- it is the user\'s risk to take')
+assert.equal(normalizeMarker(''), '', 'the empty string DISABLES the feature, and that is a real setting')
+// Rejections all disable rather than silently reverting to the default: a
+// substituted default would start eating prompts the user never asked to have
+// eaten, which is the wrong failure direction for a mechanism whose job is
+// destroying what you typed.
+assert.equal(normalizeMarker('aa'), '', 'a letter would eat ordinary prompts')
+assert.equal(normalizeMarker('1'), '', 'and so would a digit')
+assert.equal(normalizeMarker(', '), '', 'whitespace is out -- a marker must be typeable as one gesture')
+assert.equal(normalizeMarker(',,,,,'), '', 'over four characters is not a marker, it is a prefix')
+assert.equal(normalizeMarker('/x'), '', 'a leading / is the engine\'s: it runs a command')
+assert.equal(normalizeMarker('!x'), '', 'a leading ! is bash mode')
+assert.equal(normalizeMarker('#x'), '', 'a leading # is a memory line')
+assert.equal(normalizeMarker('@x'), '', 'a leading @ is a file mention')
+assert.equal(normalizeMarker(42), '', 'a non-string is not a marker')
+
+assert.deepEqual(parseStash('just a prompt', ',,'), { stash: false }, 'an ordinary prompt is untouched')
+assert.deepEqual(parseStash('see a,,b', ',,'), { stash: false }, 'the marker must be LEADING, not contained')
+assert.deepEqual(parseStash('  ,,x', ',,'), { stash: false },
+  'index 0 exactly: trimming first would make "did this get eaten?" depend on invisible characters')
+assert.deepEqual(parseStash(',,hello', ''), { stash: false }, 'a disabled marker matches nothing at all')
+
+assert.deepEqual(parseStash(',,hello there', ',,'),
+  { stash: true, text: 'hello there', title: null, scope: 'session' })
+assert.deepEqual(parseStash(',,,hello there', ',,'),
+  { stash: true, text: 'hello there', title: null, scope: 'global' },
+  'one more of the same key is the same action, wider')
+assert.deepEqual(parseStash(',,@argv the argv must be an array', ',,'),
+  { stash: true, text: 'the argv must be an array', title: 'argv', scope: 'session' })
+assert.deepEqual(parseStash(',,,@argv the argv must be an array', ',,'),
+  { stash: true, text: 'the argv must be an array', title: 'argv', scope: 'global' },
+  'the two modifiers compose')
+assert.deepEqual(parseStash(',,@x', ',,'), { stash: true, text: '', title: 'x', scope: 'session' },
+  'a title with nothing after it is the empty case, and the hook refuses it')
+assert.deepEqual(parseStash(',,@ body', ',,'), { stash: true, text: '@ body', title: null, scope: 'session' },
+  'a bare @ names nothing, so it is text rather than an empty title')
+assert.equal(parseStash(',,@' + 'z'.repeat(90) + ' body', ',,').title.length, 60, 'the title is capped at 60')
+assert.deepEqual(parseStash('finish the harness first,,,', ',,'),
+  { stash: true, text: 'finish the harness first', title: null, scope: 'global' }, 'a trailing triple stashes to the global board')
+assert.deepEqual(parseStash('finish the harness first,,', ',,'),
+  { stash: true, text: 'finish the harness first', title: null, scope: 'session' }, 'a trailing double stashes to this session')
+assert.deepEqual(parseStash('finish the harness first ,,,  ', ',,'),
+  { stash: true, text: 'finish the harness first', title: null, scope: 'global' }, 'trailing whitespace around a trailing marker is dropped')
+assert.deepEqual(parseStash(',,lead wins,,,', ',,'),
+  { stash: true, text: 'lead wins,,,', title: null, scope: 'session' }, 'a leading marker wins over a trailing one')
+assert.deepEqual(parseStash('a, b, and c,', ',,'), { stash: false }, 'one trailing comma is prose, not a marker')
+assert.deepEqual(parseStash(',,,', ',,'), { stash: true, text: '', title: null, scope: 'global' }, 'a bare triple still reads as leading, with nothing to stash')
+assert.deepEqual(parseStash(',,', ',,'), { stash: true, text: '', title: null, scope: 'session' })
+assert.deepEqual(parseStash(',,,', ',,'), { stash: true, text: '', title: null, scope: 'global' })
+// Longest match first, or every global stash lands on the session board with a
+// leading comma glued to its text.
+assert.equal(parseStash(',,,x', ',,').text, 'x')
+assert.equal(parseStash(',,,x', ',,').scope, 'global')
+// Multi-line survives: a stash is usually the paragraph you were composing.
+assert.equal(parseStash(',,one\ntwo', ',,').text, 'one\ntwo')
+// A marker whose own characters repeat must not confuse the triple test.
+assert.deepEqual(parseStash(';;;x', ';;'), { stash: true, text: 'x', title: null, scope: 'global' })
+console.log('✔ the pasteboard marker parses: three forms, leading only, longest match first')
+
+// The reason string the engine shows where the prompt would have gone. It is
+// the only confirmation guaranteed to be seen, so it is a pure function and is
+// asserted rather than eyeballed.
+assert.match(
+  stashReason({ ok: true, index: 0, count: 1, scope: 'session', text: 'hello', attachments: 0, restored: false }),
+  /^stashed/,
+)
+assert.match(
+  stashReason({ ok: true, index: 2, count: 7, scope: 'global', text: 'hello', attachments: 0, restored: false }),
+  /3 of 7 on the global board/,
+  'the index is 1-based for a human',
+)
+assert.match(
+  stashReason({ ok: true, index: 0, count: 1, scope: 'session', text: 'x', attachments: 2, restored: false }),
+  /2 attachments were not kept/,
+  'a dropped image must be said out loud, not discovered later',
+)
+assert.match(
+  stashReason({ ok: false, error: 'board full', scope: 'session', text: 'x', attachments: 0, restored: true }),
+  /your text is back in the composer/,
+  'a refused stash must never be a lost draft',
+)
+assert.ok(
+  stashReason({ ok: false, error: 'unreachable', scope: 'session', text: 'a lost thought', attachments: 0, restored: false })
+    .includes('a lost thought'),
+  'if even the restore failed, the reason is the last copy of the text and carries it verbatim',
+)
+// The relay owns the cap; the band only reports the length it was handed, so a
+// changed limit never leaves a stale number in the sentence.
+assert.match(
+  stashReason({ ok: false, error: 'too long', scope: 'session', text: 'x'.repeat(41022), attachments: 0, restored: true }),
+  /41,022 characters/,
+  'a text refused as too long says how long it was',
+)
+console.log('✔ the drop reason says what happened to the text, every time')
+
+// --- the fill verb -----------------------------------------------------------
+// The pane's half of the loop: the relay enqueues { verb: 'fill' }, the band
+// drains it and writes the text into the composer. `$.prompt.fill` REPLACES
+// what the box held, which is why every surface that offers it says so.
+$._filled.length = 0
+$._fillAnswers = true
+await runCommand($, { verb: 'fill', payload: { text: 'the stash comes back' } })
+assert.equal($._filled.length, 1, 'the fill verb calls $.prompt.fill exactly once')
+assert.deepEqual($._filled[0], { text: 'the stash comes back' }, '...with the text and nothing else')
+
+$._filled.length = 0
+await runCommand($, { verb: 'fill', payload: {} })
+assert.equal($._filled.length, 0, 'a fill with no text does nothing at all')
+
+$._filled.length = 0
+await runCommand($, { verb: 'fill', payload: { text: 'x' } })
+assert.equal($._filled.length, 1)
+// A refusal is a real outcome -- a permission dialog holds the keys -- and it
+// has to be reported, not swallowed, or the pane looks broken.
+$._fillAnswers = false
+$._filled.length = 0
+await runCommand($, { verb: 'fill', payload: { text: 'refused' } })
+assert.equal($._filled.length, 1, 'it still tried')
+$._fillAnswers = true
+console.log('✔ the fill verb writes a stash back into the composer, and says when it cannot')
+
+// The hook itself. It is NOT in the '*' collector -- that runs for every event
+// and is the hot path -- so its own registration is the thing to assert.
+assert.ok(byEvent('prompt.submit'), 'the stash hook is registered on prompt.submit')
+assert.equal(byEvent('prompt.submit').matcher, undefined,
+  'and unfiltered: the origin gate is a line in the hook, not a matcher, because ' +
+  'a matcher on e.origin.kind would silently stop matching if the engine added a kind')
+
+// The topic chain notes every prompt's origin on the same event. The engine
+// throws on a second registration of one event without a matcher, and a
+// matcher would narrow which origins are noted, so the note is a line at the
+// top of the stash hook, ahead of its origin gate -- one hook, still unfiltered.
+const submitHooks = byEventAll('prompt.submit')
+assert.equal(submitHooks.length, 1,
+  'one hook on prompt.submit: the chain note is a line in the stash hook, because a repeated ' +
+  'registration without a matcher throws')
+assert.equal(submitHooks[0].matcher, undefined,
+  'and unfiltered: the origin gate is a line in the hook, not a matcher, and the chain note runs ' +
+  'before that gate so it sees every origin')
+const chainSubmitHook = submitHooks[0]
+
+// The origin match, as a pure function: the head is the turn's own text, and
+// the origin is whatever prompt.submit saw for the same head.
+{
+  const q = [
+    { head: 'A', origin: 'composer' },
+    { head: 'B', origin: 'bridge' },
+    { head: 'C', origin: 'sdk' },
+  ]
+  assert.deepEqual(chainPromptOf('C', q), { prompt: { head: 'C', origin: 'sdk' }, pending: [] },
+    'a match takes its origin and drops every entry queued before it')
+  assert.deepEqual(chainPromptOf('B', q),
+    { prompt: { head: 'B', origin: 'bridge' }, pending: [{ head: 'C', origin: 'sdk' }] },
+    'and keeps every entry queued after it')
+  assert.deepEqual(chainPromptOf('Z', q), { prompt: { head: 'Z', origin: 'unknown' }, pending: q },
+    'no match says unknown, keeps its own head, and leaves the queue alone')
+  assert.notEqual(chainPromptOf('Z', q).pending, q, 'the queue handed back is a copy, never the one passed in')
+  assert.equal(q.length, 3, 'and the one passed in is not modified')
+  assert.deepEqual(
+    chainPromptOf('A', [{ head: 'A', origin: 'composer' }, { head: 'A', origin: 'sdk' }]),
+    { prompt: { head: 'A', origin: 'composer' }, pending: [{ head: 'A', origin: 'sdk' }] },
+    'two prompts with one head: the first queued is the one matched')
+  assert.deepEqual(chainPromptOf('', [{ head: '', origin: 'composer' }]),
+    { prompt: { head: '', origin: 'unknown' }, pending: [{ head: '', origin: 'composer' }] },
+    'a turn started with no text matches nothing, not even an empty head')
+  assert.deepEqual(chainPromptOf(undefined, []), { prompt: { head: '', origin: 'unknown' }, pending: [] },
+    'and an absent text does not throw')
+  const long = 'x'.repeat(1000)
+  assert.equal(chainPromptOf(long, []).prompt.head, long.slice(0, 400), 'the head is cut at 400 characters')
+  assert.equal(chainPromptOf(long, [{ head: long.slice(0, 400), origin: 'composer' }]).prompt.origin, 'composer',
+    'and a long prompt still matches, head against head')
+}
+console.log('✔ chainPromptOf matches a turn to its prompt by text, never by position')
+
+// --- the stash hook, driven -----------------------------------------------------
+// A fresh `next` per submission, recording whether the prompt was let through.
+// It answers the way the engine does for a prompt that entered: `{ text }`.
+const submitNext = () => {
+  const calls = []
+  const next = (e) => { calls.push(e); return Promise.resolve({ text: e.text }) }
+  next.calls = calls
+  next.signal = new AbortController().signal
+  next.event = 'prompt.submit'
+  next.is = (name) => name === 'prompt.submit'
+  next.origin = 'test'
+  return next
+}
+const submitPrompt = async (e) => {
+  const next = submitNext()
+  const out = await byEvent('prompt.submit').hook($, { wait: false, ...e }, next)
+  return { out, calls: next.calls }
+}
+
+$._filled.length = 0
+$._fillAnswers = true
+{
+  const { out, calls } = await submitPrompt({ text: ',,x', origin: { kind: 'plugin', name: 'syzygy' } })
+  assert.equal(calls.length, 1, "this plugin's own submitted prompt passes through, marker and all")
+  assert.equal($._filled.length, 0, 'and nothing is written back into the composer')
+  assert.equal(out?.drop, undefined, 'and nothing is dropped')
+}
+{
+  const { calls } = await submitPrompt({ text: 'just a prompt', origin: { kind: 'composer' } })
+  assert.equal(calls.length, 1, 'an ordinary typed prompt passes through')
+}
+{
+  const { out, calls } = await submitPrompt({ text: ',,', origin: { kind: 'composer' } })
+  assert.match(out?.drop ?? '', /nothing after the marker/, 'a bare marker is refused by name')
+  assert.equal(calls.length, 0, 'and never reaches the model')
+  assert.equal($._filled.length, 0, 'and there is nothing to put back')
+}
+{
+  // The relay is down here: the default fetch stub answers ok:false.
+  const { out, calls } = await submitPrompt({ text: ',,hello', origin: { kind: 'composer' } })
+  assert.equal(calls.length, 0, 'a stash never reaches the model, even a refused one')
+  assert.match(out?.drop ?? '', /relay is not answering/, 'a stopped relay is named as the reason')
+  assert.match(out?.drop ?? '', /back in the composer/, 'and the reason says the draft survived')
+  assert.deepEqual($._filled, [{ text: ',,hello' }], 'the draft is restored exactly as typed, marker included')
+}
+{
+  $._filled.length = 0
+  $._fillAnswers = false
+  const { out } = await submitPrompt({ text: ',,hello', origin: { kind: 'composer' } })
+  assert.ok((out?.drop ?? '').includes('hello'), 'when the restore fails too, the reason carries the text')
+  assert.doesNotMatch(out?.drop ?? '', /back in the composer/, 'and does not claim a restore that did not happen')
+  $._fillAnswers = true
+  $._filled.length = 0
+}
+console.log('✔ the stash hook swallows only a typed marker, and a refusal never loses the draft')
+
+// --- the chain observer and the turn events, driven --------------------------
+// A prompt is submitted through the one prompt.submit hook, which notes it for
+// the chain before deciding anything about a stash.
+const chainSubmit = async (e) => {
+  const next = submitNext()
+  const out = await chainSubmitHook.hook($, { wait: false, ...e }, next)
+  return { out, calls: next.calls }
+}
+// A `next` that narrows for the event it is handed, so the '*' hook takes the
+// turn branches rather than falling straight through.
+const turnNext = (event) => {
+  const next = (e) => Promise.resolve(event === 'turn.start' ? { turnId: e.turnId } : { text: e.answer ?? '' })
+  next.signal = new AbortController().signal
+  next.event = event
+  next.is = (name) => name === event
+  next.origin = 'test'
+  return next
+}
+const startTurn = (text, turnId) => star.hook($, { text, turnId }, turnNext('turn.start'))
+const completeTurn = (turnId, extra = {}) => star.hook(
+  $,
+  { turnId, reason: 'answer', answer: 'done', durationMs: 1234, isAborted: false, ...extra },
+  turnNext('turn.complete'),
+)
+const settleChain = () => new Promise((r) => setTimeout(r, 50))
+
+{
+  // Noting a prompt for the chain changes nothing about it: a prompt that is
+  // not a stash comes back as exactly what next(e) resolved to, and the event
+  // forwarded is the one received, nothing rewritten, nothing added.
+  const answered = { text: 'passes through' }
+  const forwarded = []
+  const next = (ev) => { forwarded.push(ev); return Promise.resolve(answered) }
+  Object.assign(next, { signal: new AbortController().signal, event: 'prompt.submit', is: (n) => n === 'prompt.submit', origin: 'test' })
+  const e = { wait: false, text: 'passes through', origin: { kind: 'composer' } }
+  const out = await chainSubmitHook.hook($, e, next)
+  assert.equal(out, answered, 'the chain observer returns exactly what next(e) resolved to')
+  assert.equal(forwarded.length, 1, 'and calls next once')
+  assert.equal(forwarded[0], e, 'with the very event it received')
+  assert.deepEqual(e, { wait: false, text: 'passes through', origin: { kind: 'composer' } },
+    'which it has not added to or changed')
+  const plain = await chainSubmit({ text: 'a typed prompt', origin: { kind: 'composer' } })
+  assert.deepEqual(plain.out, { text: 'a typed prompt' }, 'a prompt that entered passes through unchanged')
+  assert.equal(plain.calls.length, 1)
+}
+{
+  // The relay is down here: the default fetch stub answers ok:false, so the
+  // band never marked it up. A finished turn must not even try.
+  const fetchBefore = $.http.fetch
+  const chainFetches = []
+  $.http.fetch = async (url, init) => {
+    if (String(url).includes('/api/chain')) chainFetches.push(String(url))
+    return fetchBefore(url, init)
+  }
+  await chainSubmit({ text: 'offline prompt', origin: { kind: 'composer' } })
+  await startTurn('offline prompt', 'off1')
+  await assert.doesNotReject(completeTurn('off1'), 'a finished turn with the relay down does not throw')
+  await settleChain()
+  $.http.fetch = fetchBefore
+  assert.deepEqual(chainFetches, [], 'and makes no chain call at all')
+}
+console.log('✔ noting a prompt for the chain changes nothing, and a turn with the relay down posts nothing')
 
 // A moon is ONE code point and TWO columns. Everything that measures the row
 // has to ask displayWidth, or the vitals row is budgeted a column short per
@@ -457,6 +989,12 @@ assert.equal(displayWidth('○'), 1, 'the narrow pie is one column')
 assert.equal(displayWidth('⎇ develop*'), 10, 'the band\'s other non-ASCII is single-width')
 assert.equal(displayWidth('↑1.2M ↓3k'), 9, 'so are the arrows')
 assert.equal(displayWidth('🌖 316k'), 7, 'mixed content adds up')
+// The alarm is the case a .length measure gets wrong in the OTHER direction
+// from the moons: one UTF-16 unit, two columns.
+assert.equal(displayWidth('❗'), 2, 'the warning glyph is two columns like the moons it replaces')
+assert.equal('❗'.length, 1, '...and ONE UTF-16 unit, where a moon is two')
+assert.equal(displayWidth('❗ 940k / 1.00M'), 15, 'so a warning row is budgeted correctly')
+assert.equal(displayWidth('!'), 1, 'the narrow set warns in one column')
 console.log('✔ display width counts columns, not code units')
 
 // The vitals row drops by PRIORITY, not by position: what sits rightmost is
@@ -687,6 +1225,34 @@ assert.ok(!merged.some((h) => h.key === '9'), 'an empty prompt turns a global sl
 assert.deepEqual(mergeHotkeys([], []), [], 'no config, no slots')
 console.log('✔ project hotkeys override the global ones slot by slot')
 
+// WHERE the project file is read from. pane-v2's HOTKEYS mode writes
+// <worktree root>/.claude/<file> (git -C <cwd> rev-parse --show-toplevel); the
+// band read <session cwd>/.claude/<file>, so a session started in a
+// subdirectory edited one file in the pane and read another in the band, with
+// nothing reporting it.
+assert.equal(
+  projectHotkeysPath('/w/t'), `/w/t/.claude/${HOTKEYS_FILE}`,
+  'inside a worktree the override is read at the ROOT',
+)
+assert.equal(
+  projectHotkeysPath(''), `.claude/${HOTKEYS_FILE}`,
+  'outside git the cwd-relative read stands -- no root is not an error',
+)
+assert.ok(
+  $._catPaths.includes(`${HARNESS_ROOT}/.claude/${HOTKEYS_FILE}`),
+  `the band read the project file at the git root; it read: ${$._catPaths.join(', ')}`,
+)
+assert.ok(
+  !$._catPaths.includes(`.claude/${HOTKEYS_FILE}`),
+  'and never by the bare relative path while a root is known',
+)
+assert.ok($._gitRootCalls.length >= 1, 'the root really was asked of git')
+assert.ok(
+  $._gitRootCalls.length <= 2,
+  `the root is memoised, not re-asked every turn boundary (asked ${$._gitRootCalls.length} times)`,
+)
+console.log(`✔ the project hotkeys file is resolved at the git root (${$._gitRootCalls.length} git call(s))`)
+
 // The one-row fit ladder. A wrapped row is not a cosmetic problem: AbovePrompt
 // clips a tall tree and disarms every hotkey in it.
 const row = [
@@ -795,8 +1361,10 @@ assert.ok(!labelsDrawn.includes('global two'), 'and does not win slot 2, which t
 assert.ok(hotkeysDrawn.includes('5'), 'hotkey 5 is a prompt slot now, not next-spinner')
 // PROJECT_CONFIG asks for the narrow set, so this is the circle glyphs and is
 // also proof that settings.pieStyle is threaded through to the render.
-assert.ok(/[○◔◑◕●]/.test(bandText), 'the band draws the context pie in the configured set')
-assert.ok(!/[🌕🌖🌗🌘🌑]/u.test(bandText), 'and not the default moon set, since the project overrode it')
+// Past three quarters either set draws its alarm glyph, so both checks read the
+// whole table: some circle step is drawn, and no moon step is.
+assert.ok(PIE_STEPS.some((s) => bandText.includes(s.circle)), 'the band draws the context pie in the configured set')
+assert.ok(!PIE_STEPS.some((s) => bandText.includes(s.moon)), 'and not the default moon set, since the project overrode it')
 
 // The vitals are ONE row now: the model, branch and diff moved up beside the
 // context meter, off the second line they used to own.
@@ -892,6 +1460,228 @@ console.log('✔ a session auto-claims a plan on its first edit, and only once')
 
 $.http.fetch = realFetch
 
+// --- a stash reaches the relay, and a refusal is named ----------------------
+// M.relayUp is still true from the block above. Every other route answers ok,
+// so a heartbeat landing mid-check cannot flip the relay down underneath it.
+{
+  const fetchBefore = $.http.fetch
+  const stashPosts = []
+  let answer = { status: 200, ok: true, headers: {}, text: '{"ok":true,"index":0,"count":1}' }
+  $.http.fetch = async (url, init) => {
+    if (url.includes('/api/pasteboard/create') && init?.body) {
+      stashPosts.push(JSON.parse(init.body))
+      return answer
+    }
+    return { status: 200, ok: true, headers: {}, text: '{}' }
+  }
+
+  const stored = await submitPrompt({ text: ',,,@t body', origin: { kind: 'composer' } })
+  assert.equal(stored.calls.length, 0, 'a stash never reaches the model')
+  assert.equal(stashPosts.length, 1, 'one submission, one POST')
+  assert.equal(stashPosts[0].scope, 'global', 'the triple marker files on the global board')
+  assert.equal(stashPosts[0].sessionId, null, 'and a global stash carries no session id')
+  assert.equal(stashPosts[0].title, 't', 'the @ word is the title')
+  assert.equal(stashPosts[0].text, 'body', 'and the rest is the text, marker and title stripped')
+  assert.match(stored.out?.drop ?? '', /^stashed as "t"/, 'the reason confirms the stash by its title')
+  assert.match(stored.out?.drop ?? '', /on the global board/, 'and says which board')
+
+  answer = { status: 400, ok: false, headers: {}, text: '{"error":"board full"}' }
+  const full = await submitPrompt({ text: ',,,@t body', origin: { kind: 'composer' } })
+  assert.match(full.out?.drop ?? '', /board is full/, "the relay's refusal is named, not collapsed into unreachable")
+
+  $.http.fetch = fetchBefore
+  $._filled.length = 0
+}
+console.log('✔ a typed stash posts to the relay, and a full board says so')
+
+{
+  const fetchBefore = $.http.fetch
+  const posts = []
+  $.http.fetch = async (url, init) => {
+    if (String(url).includes('/api/skills/propose')) posts.push(JSON.parse(init.body))
+    return { status: 200, ok: true, headers: {}, text: '{"ok":true}' }
+  }
+  const out = await star.hook($, {
+    tool: 'mcp__syzygy__propose_pattern', tool_use_id: 'pp4',
+    title: 'A pattern', idea: 'an idea', methodology: '1. do it', kind: 'skill',
+    evidence: ['syzygy/bridge/fleet.mjs:226'], session: 'somebody-else', project: 'not-mine',
+  }, findNext)
+  $.http.fetch = fetchBefore
+  assert.equal(typeof out.result, 'string')
+  assert.equal(posts.length, 1)
+  assert.notEqual(posts[0].session, 'somebody-else')
+  assert.notEqual(posts[0].project, 'not-mine')
+  assert.equal(posts[0].source, 'session')
+  assert.deepEqual(posts[0].sessions, [posts[0].session])
+  console.log('✔ propose_pattern posts the plugin\'s session and project, never the model\'s')
+}
+
+// --- the topic chain: one record per finished turn ---------------------------
+// A fresh boot against a relay that answers, so the band marks it up and every
+// turn field starts empty. Records the chain POSTs, the register body and the
+// heartbeat's body.
+{
+  const fetchBefore = $.http.fetch
+  const chainPosts = []
+  const registers = []
+  const pushes = []
+  $.http.fetch = async (url, init) => {
+    const u = String(url)
+    const body = init?.body ? JSON.parse(init.body) : null
+    if (body && u.includes('/api/chain/turn')) chainPosts.push(body)
+    if (body && u.includes('/api/register')) registers.push(body)
+    if (body && u.includes('/api/stats')) pushes.push(body)
+    return { status: 200, ok: true, headers: {}, text: '{}' }
+  }
+  await byEvent('session.start').hook($, { cwd: process.cwd(), surface: 'terminal' }, echo)
+  await new Promise((r) => setTimeout(r, 300))
+  const turnsOf = () => chainPosts.map((p) => p.turn)
+
+  // The transcript path, in the register body and on the heartbeat.
+  assert.ok(registers.length >= 1, 'boot registered with the relay')
+  assert.ok('transcript' in registers.at(-1).session, 'the register body carries a transcript key')
+  assert.equal(typeof registers.at(-1).session.transcript, 'string', 'as a string, never null')
+  for (const until = Date.now() + 5_000; Date.now() < until && pushes.length === 0;) {
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  assert.ok(pushes.length >= 1, 'the heartbeat pushed stats')
+  assert.ok('transcript' in pushes.at(-1), 'the heartbeat body carries a transcript key too')
+  assert.equal(pushes.at(-1).transcript, transcript, 'naming the file the band reads')
+
+  // One turn: the record's shape, both heads cut, this turn's own files.
+  const longPrompt = 'p'.repeat(1000)
+  // Longer than the drawer's 2048-character cap, and different at each end, so
+  // an excerpt taken from the wrong end or through that cap cannot pass.
+  const longAnswer = '  ' + Array.from({ length: 320 }, (_, i) => `step ${i}.`).join(' ') + '\n'
+  await chainSubmit({ text: longPrompt, origin: { kind: 'composer' } })
+  await startTurn(longPrompt, 'ch1')
+  await star.hook($, { tool: 'Edit', tool_use_id: 'ce1', file_path: '/tmp/szg-chain-a.ts', old_string: 'a', new_string: 'b' }, planEditNext)
+  await star.hook($, { tool: 'Bash', tool_use_id: 'ce2', command: 'true' }, planEditNext)
+  await completeTurn('ch1', { answer: longAnswer, durationMs: 4321 })
+  await settleChain()
+  assert.equal(chainPosts.length, 1, 'one finished turn, one POST to /api/chain/turn')
+  assert.deepEqual(Object.keys(chainPosts[0]).sort(), ['sessionId', 'token', 'turn'],
+    'the body is the session id and the turn, beside the token every POST carries')
+  assert.equal(chainPosts[0].sessionId, sessionId)
+  const [first] = turnsOf()
+  assert.deepEqual(Object.keys(first).sort(),
+    ['answerHead', 'at', 'durationMs', 'files', 'id', 'origin', 'promptHead', 'reason', 'subturns', 'tools'],
+    'the turn record carries exactly these fields')
+  assert.equal(first.id, 'ch1', 'the id is the turn id')
+  assert.equal(typeof first.at, 'number')
+  assert.equal(first.durationMs, 4321)
+  assert.equal(first.reason, 'answer')
+  assert.equal(first.origin, 'composer')
+  assert.equal(first.promptHead, longPrompt.slice(0, 400), 'the prompt head is cut at 400 characters')
+  assert.ok(longAnswer.trim().length > 2048, 'the answer is longer than the drawer keeps')
+  assert.equal(first.answerHead, longAnswer.trim().slice(-400),
+    'the answer excerpt is the last 400 characters of the trimmed answer, where a turn says what it did')
+  assert.ok(!first.answerHead.includes('…'), 'with no elision marker')
+  assert.deepEqual(first.files, ['/tmp/szg-chain-a.ts'], 'the file edited during the turn')
+  assert.equal(first.tools, 2, 'every tool call during the turn is counted')
+  assert.equal(first.subturns, 0)
+
+  // Two prompts queued before either turn starts: each turn reports its own
+  // head and origin, in order, and its own files rather than the session's.
+  chainPosts.length = 0
+  await chainSubmit({ text: 'first prompt', origin: { kind: 'composer' } })
+  await chainSubmit({ text: 'second prompt', origin: { kind: 'sdk' } })
+  await startTurn('first prompt', 'ch2')
+  await star.hook($, { tool: 'Write', tool_use_id: 'ce3', file_path: '/tmp/szg-chain-b.ts', content: 'x' }, planEditNext)
+  await completeTurn('ch2')
+  await startTurn('second prompt', 'ch3')
+  await completeTurn('ch3')
+  await settleChain()
+  assert.deepEqual(turnsOf().map((t) => [t.id, t.promptHead, t.origin]),
+    [['ch2', 'first prompt', 'composer'], ['ch3', 'second prompt', 'sdk']],
+    'each turn reports its own prompt head and origin, in order')
+  assert.deepEqual(turnsOf()[0].files, ['/tmp/szg-chain-b.ts'],
+    'a turn reports the file it edited, not the one an earlier turn edited')
+  assert.deepEqual(turnsOf()[1].files, [], 'and a turn that edited nothing reports no files')
+  assert.equal(turnsOf()[1].tools, 0, 'nor any tool calls')
+
+  // A prompt delivered into a running turn starts no turn of its own, and must
+  // not shift the turn after it.
+  chainPosts.length = 0
+  await chainSubmit({ text: 'prompt A', origin: { kind: 'composer' } })
+  await chainSubmit({ text: 'prompt B', origin: { kind: 'bridge' } })
+  await chainSubmit({ text: 'prompt C', origin: { kind: 'sdk' } })
+  await startTurn('prompt C', 'ch4')
+  await completeTurn('ch4')
+  await startTurn('prompt A', 'ch5')
+  await completeTurn('ch5')
+  await startTurn('prompt B', 'ch6')
+  await completeTurn('ch6')
+  await settleChain()
+  assert.deepEqual(turnsOf().map((t) => [t.promptHead, t.origin]),
+    [['prompt C', 'sdk'], ['prompt A', 'unknown'], ['prompt B', 'unknown']],
+    'the turn for C reports C, and A and B, queued before it, were dropped with the match')
+
+  // No match: an honest unknown, the turn's own head, and the queue untouched.
+  chainPosts.length = 0
+  await chainSubmit({ text: 'queued prompt', origin: { kind: 'sdk' } })
+  await startTurn('rewritten on the way down', 'ch7')
+  await completeTurn('ch7')
+  await startTurn('queued prompt', 'ch8')
+  await completeTurn('ch8')
+  await startTurn('', 'ch9')
+  await completeTurn('ch9')
+  await settleChain()
+  assert.deepEqual(turnsOf().map((t) => [t.id, t.promptHead, t.origin]), [
+    ['ch7', 'rewritten on the way down', 'unknown'],
+    ['ch8', 'queued prompt', 'sdk'],
+    ['ch9', '', 'unknown'],
+  ], 'an unmatched turn says unknown and leaves the queue alone; an empty text is an empty head')
+
+  // The queue is capped, oldest out first.
+  chainPosts.length = 0
+  for (let i = 0; i < 10; i++) await chainSubmit({ text: `burst ${i}`, origin: { kind: 'bridge' } })
+  await startTurn('burst 0', 'ch10')
+  await completeTurn('ch10')
+  await startTurn('burst 2', 'ch11')
+  await completeTurn('ch11')
+  await settleChain()
+  assert.deepEqual(turnsOf().map((t) => t.origin), ['unknown', 'bridge'],
+    'the queue keeps the newest eight prompts, so the oldest has aged out')
+
+  // A subagent's turn is counted into its parent's record and never posted.
+  chainPosts.length = 0
+  await startTurn('', 'ch12')
+  await completeTurn('sub1', { agentId: 'agent-1' })
+  await completeTurn('sub2', { agentId: 'agent-1' })
+  await settleChain()
+  assert.equal(chainPosts.length, 0, "a subagent's turn posts nothing")
+  await completeTurn('ch12')
+  await settleChain()
+  assert.equal(chainPosts.length, 1, 'the parent turn posts once')
+  assert.equal(turnsOf()[0].subturns, 2, 'and reports both subagent turns')
+  await startTurn('', 'ch13')
+  await completeTurn('ch13')
+  await settleChain()
+  assert.equal(turnsOf()[1].subturns, 0, 'the count starts again at the next turn')
+
+  // A fresh boot inherits no turn in flight.
+  chainPosts.length = 0
+  await chainSubmit({ text: 'before the reboot', origin: { kind: 'composer' } })
+  await startTurn('before the reboot', 'ch14')
+  await star.hook($, { tool: 'Edit', tool_use_id: 'ce4', file_path: '/tmp/szg-chain-c.ts', old_string: 'a', new_string: 'b' }, planEditNext)
+  await completeTurn('sub3', { agentId: 'agent-2' })
+  await chainSubmit({ text: 'queued before the reboot', origin: { kind: 'composer' } })
+  await byEvent('session.start').hook($, { cwd: process.cwd(), surface: 'terminal' }, echo)
+  await new Promise((r) => setTimeout(r, 300))
+  await completeTurn('ch14')
+  await startTurn('queued before the reboot', 'ch15')
+  await completeTurn('ch15')
+  await settleChain()
+  assert.deepEqual(turnsOf().map((t) => [t.promptHead, t.origin, t.files, t.tools, t.subturns]), [
+    ['', 'unknown', [], 0, 0],
+    ['queued before the reboot', 'unknown', [], 0, 0],
+  ], 'boot clears the running prompt, the queue, the files and both counts')
+
+  $.http.fetch = fetchBefore
+}
+console.log('✔ the band posts one chain record per finished turn, heads only, matched by text')
+
 // --- settings.spinner reaches the real band, end to end ---------------------
 // A scoped fixture swap rather than adding a pin to GLOBAL_CONFIG/
 // PROJECT_CONFIG above: those two are shared by every assertion in this file,
@@ -903,11 +1693,15 @@ $.http.fetch = realFetch
 const realRun = $.process.run
 const PINNED_CONFIG = JSON.stringify({ settings: { spinner: 'orrery' } })
 $.process.run = async (argv, init) => {
+  // Project first, at either spelling: the global matcher below is an endsWith
+  // on the same basename and would otherwise answer the project read as well,
+  // which would pass this check on a pin the GLOBAL file never supplied.
+  if (argv[0] === 'cat' &&
+      (argv[1] === `${HARNESS_ROOT}/.claude/${HOTKEYS_FILE}` || argv[1] === `.claude/${HOTKEYS_FILE}`)) {
+    return { exitCode: 0, stdout: '', stderr: '' } // no project override this time
+  }
   if (argv[0] === 'cat' && String(argv[1]).endsWith(`/.claude/${HOTKEYS_FILE}`)) {
     return { exitCode: 0, stdout: PINNED_CONFIG, stderr: '' }
-  }
-  if (argv[0] === 'cat' && argv[1] === `.claude/${HOTKEYS_FILE}`) {
-    return { exitCode: 0, stdout: '', stderr: '' } // no project override this time
   }
   return realRun(argv, init)
 }
@@ -927,6 +1721,57 @@ assert.ok(pinnedSpin.replace(/\s+/g, '').includes('Simmering'), 'and still keeps
 console.log('✔ settings.spinner in the global config pins the live band, through the real session.start path')
 
 $.process.run = realRun
+
+// --- an unusable pasteboard marker turns stashing off, and says so once -----
+// The same scoped fixture swap as above, so the shared configs stay untouched.
+// A letter marker would eat ordinary prompts, so it disables the feature rather
+// than falling back to `,,` -- and the warning reaches the feed through the
+// relay push, which is the only place a note is observable from outside.
+{
+  const runBefore = $.process.run
+  const fetchBefore = $.http.fetch
+  const BAD_MARKER_CONFIG = JSON.stringify({ settings: { pasteboardMarker: 'aa' } })
+  const pushed = []
+  $.process.run = async (argv, init) => {
+    if (argv[0] === 'cat' &&
+        (argv[1] === `${HARNESS_ROOT}/.claude/${HOTKEYS_FILE}` || argv[1] === `.claude/${HOTKEYS_FILE}`)) {
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+    if (argv[0] === 'cat' && String(argv[1]).endsWith(`/.claude/${HOTKEYS_FILE}`)) {
+      return { exitCode: 0, stdout: BAD_MARKER_CONFIG, stderr: '' }
+    }
+    return runBefore(argv, init)
+  }
+  $.http.fetch = async (url, init) => {
+    if (url.includes('/api/stats') && init?.body) pushed.push(...(JSON.parse(init.body).events ?? []))
+    return { status: 200, ok: true, headers: {}, text: '{}' }
+  }
+  await byEvent('session.start').hook($, { cwd: process.cwd(), surface: 'terminal' }, echo)
+
+  // The config is read inside a background refresh: submit until the default
+  // marker stops being honoured, which is the moment the file has landed.
+  let through = null
+  for (const until = Date.now() + 10_000; Date.now() < until;) {
+    const probe = await submitPrompt({ text: ',,hello', origin: { kind: 'composer' } })
+    if (probe.calls.length === 1) { through = probe; break }
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  assert.ok(through, 'with an unusable marker configured, a ",," prompt passes straight through')
+  assert.equal(through.out?.drop, undefined, 'and is not dropped')
+  const again = await submitPrompt({ text: ',,hello', origin: { kind: 'composer' } })
+  assert.equal(again.calls.length, 1, 'every time, not only the first')
+
+  const warned = () => pushed.filter((ev) => ev.label === 'pasteboard marker ignored')
+  for (const until = Date.now() + 5_000; Date.now() < until && warned().length === 0;) {
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  assert.equal(warned().length, 1, 'the unusable marker is reported once, not once per prompt')
+  assert.ok(warned()[0].detail.includes('"aa"'), 'and the report names the value it refused')
+
+  $.process.run = runBefore
+  $.http.fetch = fetchBefore
+}
+console.log('✔ an unusable pasteboard marker disables stashing and is reported once')
 
 // --- SZG_HEADLESS: a relay-owned child pays for nothing --------------------
 // The orchestrator's ask and blurb turns, and every scoping turn, are
@@ -958,6 +1803,15 @@ $.process.run = realRun
 
   await byEvent('session.start').hook($, { cwd: process.cwd(), surface: 'terminal' }, echo)
   await new Promise((r) => setTimeout(r, 400))
+
+  // Nor does a finished turn reach the topic chain. A headless boot never
+  // clears a relay an earlier boot marked up, so when one did, the headless
+  // check is the only thing keeping this silent.
+  await chainSubmit({ text: 'a headless prompt', origin: { kind: 'sdk' } })
+  await startTurn('a headless prompt', 'hl1')
+  await star.hook($, { tool: 'Edit', tool_use_id: 'hl-e', file_path: '/tmp/szg-chain-h.ts', old_string: 'a', new_string: 'b' }, planEditNext)
+  await completeTurn('hl1')
+  await new Promise((r) => setTimeout(r, 100))
 
   assert.deepEqual(fetches, [], `a headless session made ${fetches.length} HTTP call(s): ${fetches.join(', ')}`)
   const ran = argvs.map((a) => a.join(' '))

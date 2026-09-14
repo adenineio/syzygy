@@ -31,7 +31,7 @@ func frameTick() tea.Cmd {
 // ticker is not rescheduled and the pane goes quiet -- a side pane that burns a
 // core beside an idle session is a worse bug than a stiff animation.
 func (m Model) animating() bool {
-	if m.mode != ModeVitals || m.frame.BP < BPS || m.showHelp || m.gridForm.Open {
+	if m.mode != ModeVitals || m.frame.BP < BPS || m.showHelp || m.showBank || m.gridForm.Open {
 		return false
 	}
 	if m.now.Before(m.spinPreview) {

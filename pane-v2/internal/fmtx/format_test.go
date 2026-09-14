@@ -100,3 +100,22 @@ func TestMsFormatting(t *testing.T) {
 		t.Errorf("Ms(0) = %q, want empty", got)
 	}
 }
+
+func TestPlainReplacesControlBytesAndNothingElse(t *testing.T) {
+	if got := Plain("no controls here"); got != "no controls here" {
+		t.Errorf("an untouched string must come back identical, got %q", got)
+	}
+	for _, c := range []struct{ in, want string }{
+		{"a\x1b[31mb", "a [31mb"},
+		{"bell\x07", "bell "},
+		{"del\x7f", "del "},
+		{"c1x", "c1 x"},
+	} {
+		if got := Plain(c.in); got != c.want {
+			t.Errorf("Plain(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	if W(Plain("a\x1b[31mb")) != W("a [31mb") {
+		t.Error("a sanitised string must measure what it draws")
+	}
+}

@@ -92,15 +92,26 @@ func TestTheTickerStopsWhenNothingIsAnimating(t *testing.T) {
 }
 
 // spin is optional on the wire: an older plugin, or a session that has not
-// rendered a Spinner yet, sends nothing. Every reader tolerates the nil.
+// rendered a Spinner yet, sends nothing. Every reader tolerates the nil. The
+// fixture's working session now carries a spin field of its own (needed by
+// the reflection tests over the whole payload), so this test clears it on a
+// copy rather than relying on the fixture to omit it.
 func TestASessionWithNoSpinFieldStillRenders(t *testing.T) {
-	m := workingModel(t, 60, 30)
+	st := loadFixture(t)
+	if !st.Sessions[0].Working {
+		t.Fatal("fixture session 0 is not working; the spinner tests need one that is")
+	}
+	st.Sessions[0].Spin = nil
+	self := st.Sessions[0].ID
+	m, _ := newModel(t, 60, 30, ident.Result{ID: self, How: ident.PaneTree})
+	m = feed(t, m, relay.SnapshotMsg(st), IdentResult(ident.Result{ID: self, How: ident.PaneTree}))
+
 	s, ok := m.focusedOrLast()
 	if !ok {
 		t.Fatal("no focused session")
 	}
 	if s.Spin != nil {
-		t.Fatal("the fixture now carries a spin field; this test needs one without")
+		t.Fatal("clearing Spin on the copy did not reach the model")
 	}
 	if got := m.spinStateOf(s, 60, 8).Mode; got != "thinking" {
 		t.Fatalf("nil Spin fell back to mode %q, want the thinking default", got)

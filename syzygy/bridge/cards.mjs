@@ -1,9 +1,10 @@
-// A session card's own outline colour, set from the drawer's colour picker
-// so a card you keep coming back to is easy to find again. AUTHORITATIVE,
-// not derived: a colour exists nowhere else, so every
-// write serializes FIRST, goes to a temp file in the same directory, and is
-// renamed over the target -- a failed serialize leaves the previous file
-// intact. Same contract as claims.mjs and findings.mjs, for the same reason.
+// A session card's own outline colour and whether it is a favourite -- both
+// set from the drawer, so a card you keep coming back to is easy to find and
+// quick to reach. AUTHORITATIVE, not derived: neither exists anywhere else,
+// so every write serializes FIRST, goes to a temp file in the same
+// directory, and is renamed over the target -- a failed serialize leaves the
+// previous file intact. Same contract as claims.mjs and findings.mjs, for
+// the same reason.
 //
 // Keyed by the session's NAME, not its id -- the opposite of claims.mjs and
 // canvas.mjs's position store, which are id-keyed with name carried as a
@@ -40,16 +41,26 @@ export const validateColor = (raw) => {
   return { ok: true, color: v.toLowerCase() }
 }
 
-/** One stored entry, or `null` if it says nothing worth keeping. A name-less
- *  or colour-less entry cannot be looked up by anything, so it is dropped
- *  here rather than carried through to a consumer that assumes both. */
+/** A favourite is a plain boolean and nothing else: anything looser and a
+ *  hand-edited `"yes"` would read as true on one path and false on another. */
+export const validateFavourite = (raw) => {
+  if (typeof raw !== 'boolean') return { ok: false, error: 'favourite must be true or false' }
+  return { ok: true, favourite: raw }
+}
+
+/** One stored entry, or `null` if it says nothing worth keeping. An entry is
+ *  worth keeping when it carries a colour OR a favourite: it used to require
+ *  a colour, which would have dropped every favourite on the next read. */
 const sanitizeEntry = (name, raw) => {
   if (!name || !isPlainObject(raw)) return null
-  const r = validateColor(raw.color)
-  if (!r.ok || !r.color) return null
+  const c = validateColor(raw.color)
+  const color = c.ok ? c.color : ''
+  const favourite = raw.favourite === true
+  if (!color && !favourite) return null
   return {
     id: typeof raw.id === 'string' ? raw.id : '',
-    color: r.color,
+    color,
+    favourite,
     updatedAt: Number(raw.updatedAt) || 0,
   }
 }
@@ -119,18 +130,61 @@ export const createCards = ({ file, now = Date.now }) => {
       const r = validateColor(color)
       if (!r.ok) return r
       if (!name) return { ok: true, color: r.color }
+      const prior = byName[name]
       if (!r.color) {
-        if (!(name in byName)) return { ok: true, color: '' }
+        // A cleared colour removes the entry only when nothing else lives on
+        // it. An entry that is still a favourite keeps its place.
+        if (!prior) return { ok: true, color: '' }
+        if (prior.favourite) {
+          byName = { ...byName, [name]: { ...prior, id: id || prior.id || '', color: '', updatedAt: now() } }
+          flush()
+          return { ok: true, color: '' }
+        }
         const next = { ...byName }
         delete next[name]
         byName = next
         flush()
         return { ok: true, color: '' }
       }
-      byName = { ...byName, [name]: { id: id || '', color: r.color, updatedAt: now() } }
+      byName = { ...byName, [name]: { ...prior, id: id || '', color: r.color, favourite: prior?.favourite === true, updatedAt: now() } }
       flush()
       return { ok: true, color: r.color }
     },
+
+    /** Set (or clear) the favourite flag under `name`, the same
+     *  serialize-then-rename write `set` makes. Clearing the last signal on an
+     *  entry removes it, so the file never fills with empty records. */
+    setFavourite(name, id, on) {
+      const r = validateFavourite(on)
+      if (!r.ok) return r
+      if (!name) return { ok: true, favourite: r.favourite }
+      const prior = byName[name]
+      if (!r.favourite) {
+        if (!prior) return { ok: true, favourite: false }
+        if (!prior.color) {
+          const next = { ...byName }
+          delete next[name]
+          byName = next
+        } else {
+          byName = { ...byName, [name]: { ...prior, favourite: false, updatedAt: now() } }
+        }
+        flush()
+        return { ok: true, favourite: false }
+      }
+      byName = {
+        ...byName,
+        [name]: { id: id || prior?.id || '', color: prior?.color || '', favourite: true, updatedAt: now() },
+      }
+      flush()
+      return { ok: true, favourite: true }
+    },
+
+    /** The favourites, ascending by name -- which is the order the deck's
+     *  digits follow, so starring something that sorts last moves no digit. */
+    favourites: () => Object.entries(byName)
+      .filter(([, e]) => e && e.favourite === true)
+      .map(([name, e]) => ({ name, color: e.color || '' }))
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
 
     flush,
   }

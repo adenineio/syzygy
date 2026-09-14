@@ -49,9 +49,9 @@ func claimedByID(cs []relay.Claimer, sessionID string) bool {
 
 // mineClaims filters the payload down to sessionID's own claims: its plans
 // (efforts[].claimedBy) and its claimed backlog sections
-// (worktrees[].tasks[].items[].claimedBy, kind=="section" only -- a claimed
-// step is not a section and is not shown here). Folded across every project
-// the relay reports, since a session's claim is scoped to a worktree, not to
+// (worktrees[].claimedSections[].claimedBy -- every entry there is already a
+// section heading, so no kind is tested). Folded across every project the
+// relay reports, since a session's claim is scoped to a worktree, not to
 // whichever project happens to be listed first.
 func mineClaims(st relay.State, sessionID string) (efforts []mineEffort, sections []mineSection) {
 	for _, proj := range st.Projects {
@@ -63,11 +63,9 @@ func mineClaims(st relay.State, sessionID string) (efforts []mineEffort, section
 			}
 		}
 		for _, w := range proj.Worktrees {
-			for _, tf := range w.Tasks {
-				for _, it := range tf.Items {
-					if it.Kind == "section" && claimedByID(it.ClaimedBy, sessionID) {
-						sections = append(sections, mineSection{Text: it.Text})
-					}
+			for _, cs := range w.ClaimedSections {
+				if claimedByID(cs.ClaimedBy, sessionID) {
+					sections = append(sections, mineSection{Text: cs.Text})
 				}
 			}
 		}

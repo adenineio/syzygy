@@ -9,6 +9,12 @@ licences, which are preserved in the files themselves:
   syzygy/bridge/public/vendor/three.slim.min.js; the SPDX identifier and the
   copyright line from the upstream build are kept in it verbatim. README.md
   says how it is built and what it contains.
+- Motion (https://motion.dev), Copyright (c) 2024 Motion B.V., MIT licence.
+  A pinned, minified bundle is vendored at
+  syzygy/bridge/public/vendor/motion.min.js; its upstream build carries no
+  licence banner of its own, so one is written into the bundle at build time
+  and kept in it verbatim. README.md says how it is built and what it
+  contains.
 
 Everything else in this repository is licensed under the Apache License,
 Version 2.0. See LICENSE.

@@ -28,9 +28,6 @@ export type DrawCtx = {
    *  it today -- the shuffles that did are gone -- but it is part of the
    *  context every draw() is handed, and cheap to keep. */
   turn: number
-  /** True when this turn was escalated to a stronger model; every spinner
-   *  takes the escalation tint so the change is visible at a glance. */
-  escalated?: boolean
 }
 
 export type SpinnerDef = {

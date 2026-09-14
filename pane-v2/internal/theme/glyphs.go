@@ -30,6 +30,7 @@ const (
 	GBoxBL    = "└" // └
 	GBoxBR    = "┘" // ┘
 	GBoxV     = "│" // │
+	GBoxVR    = "├" // ├ CHAIN's tee, where a branch leaves the spine
 )
 
 // Spark is the sparkline ramp, low to high.
@@ -39,5 +40,5 @@ var Spark = []rune("▁▂▃▄▅▆▇█")
 var All = []string{
 	GTick, GRule, GBarFull, GBarEmpty, GEllipsis, GTool, GTurn, GAgent,
 	GNote, GError, GDeny, GFlag, GBranch, GOn, GOff, GConn, GGrip, GHere, GArrow, GElse, GBrand,
-	GBoxTL, GBoxTR, GBoxBL, GBoxBR, GBoxV,
+	GBoxTL, GBoxTR, GBoxBL, GBoxBR, GBoxV, GBoxVR,
 }

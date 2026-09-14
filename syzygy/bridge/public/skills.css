@@ -1,0 +1,69 @@
+/* Syzygy — the Proposed skills section. Only what this section introduces:
+   .panel, .dsection, .phead, .pbody, .count, .spacer, .btn and .empty come
+   from app.css/dispatch.css and are reused as-is.
+
+   NO ANIMATION AND NO TRANSITION ANYWHERE IN THIS FILE. Every radius reads
+   --r-surface / --r-control / --r-input, never a literal number. */
+
+#skills-panel select {
+  background: var(--surface); color: var(--text); border: 1px solid var(--edge-hi);
+  padding: 4px 7px; font: inherit; font-size: 11px; border-radius: var(--r-control);
+}
+#skills-panel select:focus { outline: none; border-color: var(--cyan); }
+
+/* Review mode's own toggle button, lit while active -- the phead has no
+   other way to say the list below it is not the full one. */
+#sq-review.on { color: var(--bg); background: var(--cyan); border-color: var(--cyan); }
+
+/* The gate line: a shut pass button always explains itself here, the same
+   place findings.css's own gate line lives. */
+.sqgate { padding: 6px 12px; font-size: 11px; letter-spacing: .03em; color: var(--amber); border-bottom: 1px solid var(--edge); }
+
+/* The key layer's own hint, shown only while focus is somewhere inside the
+   panel. Review mode gets its own accent so the hint reads as a mode change,
+   not as the usual reminder row. */
+.sqhint { padding: 6px 12px; font-size: 9.5px; letter-spacing: .04em; color: var(--grey); border-bottom: 1px solid var(--edge); }
+.sqhint.review { color: var(--cyan); border-bottom-color: var(--cyan-deep); }
+
+.sqitem {
+  padding: 9px 10px; margin: 0 12px 8px; border: 1px solid var(--edge-hi);
+  border-left: 3px solid var(--edge-hi); background: var(--panel);
+  border-radius: var(--r-surface);
+}
+/* A row you have moved to with j/k. A flat highlight, never a transition. */
+.sqitem[data-selected="true"] { border-color: var(--cyan); border-left-color: var(--cyan); }
+
+.sqhead { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.sqkind {
+  font-size: 8.5px; letter-spacing: .1em; text-transform: uppercase;
+  padding: 1px 5px; border: 1px solid var(--edge-hi); color: var(--cyan);
+  border-radius: var(--r-control);
+}
+.sqkind.unclassified { color: var(--grey); }
+
+/* One class per mark, so the chip's colour carries the rating at a glance
+   the way .dstate's do for a request's state. */
+.sqmark {
+  font-size: 8.5px; letter-spacing: .1em; text-transform: uppercase;
+  padding: 1px 6px; border: 1px solid var(--edge-hi); color: var(--grey);
+  border-radius: var(--r-control); cursor: pointer;
+}
+.sqmark.unrated  { color: var(--grey); }
+.sqmark.good     { color: var(--bg); background: var(--green); border-color: var(--green); }
+.sqmark.near     { color: var(--bg); background: var(--amber); border-color: var(--amber); }
+.sqmark.potential{ color: var(--bg); background: var(--purple); border-color: var(--purple); }
+
+.sqtitle { font-size: 12px; color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sqseen, .sqago { font-size: 10px; color: var(--grey); flex: 0 0 auto; }
+
+.sqbody { margin-top: 8px; }
+.sqidea { font-size: 12px; color: var(--text); line-height: 1.45; margin-bottom: 6px; }
+.sqmethod { font-size: 11.5px; color: var(--dim); line-height: 1.5; white-space: pre-wrap; margin-bottom: 6px; }
+.sqchips { display: flex; flex-wrap: wrap; gap: 4px; }
+.sqchip {
+  font-size: 9px; padding: 1px 6px; border: 1px solid var(--edge-hi);
+  color: var(--cyan); border-radius: var(--r-control);
+}
+
+.sqactions { display: flex; gap: 6px; margin-top: 8px; }
+.sqprep[data-prepped="true"] { color: var(--grey); border-color: var(--edge-hi); background: transparent; }

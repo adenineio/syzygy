@@ -8,7 +8,8 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
-const { createFindings, readFindings, sanitizeFinding, FINDINGS_MAX, SURPRISE_MAX, LIST_MAX } =
+const { createFindings, readFindings, sanitizeFinding, hasLineEvidence,
+        KINDS, FINDINGS_MAX, FINDINGS_IN_SNAPSHOT, SURPRISE_MAX, LIST_MAX } =
   await import(join(ROOT, 'syzygy', 'bridge', 'findings.mjs'))
 
 let pass = 0
@@ -84,6 +85,43 @@ ok('control characters are stripped, but newlines and tabs survive', () => {
   const store = createFindings({ file: freshFile() })
   const rec = store.add(full({ surprise: 'line one\nline two\x00\x07' }))
   assert.equal(rec.surprise, 'line one\nline two')
+})
+
+// ------------------------------------------------------------- the kind --
+ok('each of the six kinds round-trips', () => {
+  const store = createFindings({ file: freshFile() })
+  for (const k of ['constraint', 'drift', 'hazard', 'dead-code', 'duplicate', 'question']) {
+    assert.equal(store.add(full({ kind: k })).kind, k, k)
+  }
+})
+
+ok('an unknown or absent kind sanitises to "" -- it never defaults', () => {
+  const store = createFindings({ file: freshFile() })
+  assert.equal(store.add(full({ kind: 'architecture' })).kind, '', 'unknown')
+  assert.equal(store.add(full({ kind: 'CONSTRAINT' })).kind, '', 'case matters')
+  assert.equal(store.add(full({ kind: 42 })).kind, '', 'not a string')
+  assert.equal(store.add(full()).kind, '', 'absent')
+})
+
+ok('a record with no kind is still stored -- kind is never required', () => {
+  const store = createFindings({ file: freshFile() })
+  assert.ok(store.add({ surprise: 'still worth keeping' }))
+})
+
+ok('hasLineEvidence is true only when something carries a line number', () => {
+  assert.equal(hasLineEvidence(['syzygy/bridge/relay.mjs:738']), true)
+  assert.equal(hasLineEvidence(['a.js:12:3']), true)
+  assert.equal(hasLineEvidence(['README.md', 'a.js:9']), true, 'one is enough')
+  assert.equal(hasLineEvidence(['syzygy/bridge/relay.mjs']), false)
+  assert.equal(hasLineEvidence(['a.js:']), false)
+  assert.equal(hasLineEvidence([]), false)
+  assert.equal(hasLineEvidence('a.js:12'), false, 'a bare string is not a list')
+  assert.equal(hasLineEvidence(null), false)
+})
+
+ok('FINDINGS_IN_SNAPSHOT is smaller than the store cap', () => {
+  assert.ok(FINDINGS_IN_SNAPSHOT < FINDINGS_MAX)
+  assert.equal(FINDINGS_IN_SNAPSHOT, 50)
 })
 
 // ------------------------------------------------- the sanitising reader --

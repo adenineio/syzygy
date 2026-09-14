@@ -9,6 +9,7 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { validateCwd } from './canvas.mjs'
+import { sanitizeForPeer } from './peer.mjs'
 
 /** A request's `project` becomes a spawn's `cwd` and a `tmux new-window -c`,
  *  so it must be a real directory before it becomes either.
@@ -117,13 +118,52 @@ export const EFFORT_RE = /^[a-z][a-z0-9]{0,15}$/
 /** `branch` and `sessionName` are written by the dispatcher when it actually
  *  creates them, and are never writable from a patch: they name a real git
  *  branch and a real session, and a forged value would point the UI at
- *  something that does not exist. */
-const mergeDispatch = (current, patch) => {
+ *  something that does not exist.
+ *
+ *  `templateId` joins `model` and `effort` as patch-settable: it names a
+ *  session preset, and a preset's id is a slug. A slug sets it, `null` clears
+ *  it, and anything else is ignored -- it is read back into a store lookup
+ *  whose answer reaches the spawn argv. */
+export const mergeDispatch = (current, patch) => {
   const out = { ...(current ?? {}) }
   if (!isPlainPatch(patch)) return out
   if (typeof patch.model === 'string' && MODEL_RE.test(patch.model.trim())) out.model = patch.model.trim()
   if (typeof patch.effort === 'string' && EFFORT_RE.test(patch.effort.trim())) out.effort = patch.effort.trim()
+  if (patch.templateId === null) out.templateId = null
+  else if (typeof patch.templateId === 'string' && SLUG_RE.test(patch.templateId)) out.templateId = patch.templateId
   return out
+}
+
+/** The kinds a request may point back at. Closed, the same way `STATES` is:
+ *  a dispatched session reads this field, so an unrecognised kind is a typo
+ *  worth refusing rather than a new kind worth inventing here. */
+export const RELATES_KINDS = ['backlog', 'plan', 'spec', 'feature']
+const REF_MAX = 200
+
+/** A reference is data a dispatched session acts on, so it is shape-checked
+ *  before it is stored -- the same gate model/effort go through. `null` clears
+ *  it; anything malformed leaves the previous value alone. */
+export const mergeRelatesTo = (current, patch) => {
+  if (patch === null) return null
+  if (!isPlainPatch(patch)) return current ?? null
+  const kind = typeof patch.kind === 'string' ? patch.kind.trim() : ''
+  const ref = typeof patch.ref === 'string' ? patch.ref.trim() : ''
+  if (!RELATES_KINDS.includes(kind) || !ref || ref.length > REF_MAX) return current ?? null
+  return { kind, ref }
+}
+
+/** A fan-out group is minted by the relay from one run, never typed by a
+ *  person, so `create` is its only entry point and this stays private -- a
+ *  patch can never forge one onto a request that was not created with it.
+ *  `n` and `of` are the request's position and the group's size, shape-checked
+ *  because both ride into a title suffix and a branch name downstream. */
+const sanitizeFanout = (v) => {
+  if (!isPlainPatch(v)) return null
+  const id = typeof v.id === 'string' ? v.id.trim() : ''
+  if (!id || id.length > 64) return null
+  const { n, of } = v
+  if (!Number.isInteger(n) || !Number.isInteger(of) || n < 1 || n > of) return null
+  return { id, n, of }
 }
 
 const emptyBrief = () => ({
@@ -194,33 +234,62 @@ export const createStore = ({ file, now = Date.now }) => {
         state: 'draft',
         project,
         title: fields.title ?? 'untitled',
+        titleSource: fields.titleSource === 'auto' ? 'auto' : 'manual',
         slug: slugify(fields.title, taken),
         ask: fields.ask ?? '',
         brief: fields.brief ?? null,
+        relatesTo: mergeRelatesTo(null, fields.relatesTo ?? null),
         scoping: null,
-        dispatch: mergeDispatch({ model: 'opus', effort: 'high', branch: null, sessionName: null },
-          { model: fields.model, effort: fields.effort }),
+        dispatch: mergeDispatch({ model: 'opus', effort: 'high', branch: null, sessionName: null, templateId: null },
+          { model: fields.model, effort: fields.effort, templateId: fields.templateId }),
+        fanout: sanitizeFanout(fields.fanout),
         session: null,
         artifacts: null,
         error: null,
       }
+      // Which peer's ask this request serves, when the relay resolved one at
+      // apply. Added, never defaulted: an ordinary request's shape is unchanged.
+      const forPeer = sanitizeForPeer(fields.forPeer)
+      if (forPeer) r.forPeer = forPeer
       items.push(r)
       dirty = true
       return r
     },
 
     /** Merge a patch into a request. Never changes `state`, `id`, `slug` or
-     *  `createdAt` — state moves only through transition(). A patch that is
-     *  not a plain object (null, an array, a string, ...) is ignored
-     *  entirely: no throw, no mutation. */
+     *  `createdAt` — state moves only through transition(). `titleSource`,
+     *  `fanout` and `forPeer` are dropped from every patch too: provenance is
+     *  set once at create, and a fan-out group is minted by the dispatcher, never
+     *  supplied by a browser. Typing a new `title` always flips
+     *  `titleSource` to 'manual' afterwards -- a human overriding an auto
+     *  title cannot be pushed back by a later patch. A patch that is not a
+     *  plain object (null, an array, a string, ...) is ignored entirely: no
+     *  throw, no mutation. */
     update(id, patch = {}) {
       const r = get(id)
       if (!r) return null
       if (!isPlainPatch(patch)) return r
-      const { id: _i, state: _s, slug: _g, createdAt: _c, ...rest } = sanitizePatch(patch)
+      const { id: _i, state: _s, slug: _g, createdAt: _c, titleSource: _ts, fanout: _fo, forPeer: _fp, ...rest } =
+        sanitizePatch(patch)
       if (rest.brief && r.brief) rest.brief = { ...r.brief, ...rest.brief }
       if ('dispatch' in rest) rest.dispatch = mergeDispatch(r.dispatch, rest.dispatch)
+      if ('relatesTo' in rest) rest.relatesTo = mergeRelatesTo(r.relatesTo, rest.relatesTo)
       Object.assign(r, rest)
+      if (typeof rest.title === 'string' && rest.title.trim()) r.titleSource = 'manual'
+      return touch(r)
+    },
+
+    /** The refine's only write path. Re-slugs, because in `draft` nothing has
+     *  used the slug yet; from `scoped` on it is about to become a directory,
+     *  a branch and a session name, so it is frozen. */
+    retitle(id, title) {
+      const r = get(id)
+      if (!r || r.state !== 'draft') return null
+      const clean = String(title ?? '').trim()
+      if (!clean) return null
+      const taken = items.filter((x) => x.project === r.project && x.id !== id).map((x) => x.slug)
+      r.title = clean
+      r.slug = slugify(clean, taken)
       return touch(r)
     },
 
@@ -232,6 +301,8 @@ export const createStore = ({ file, now = Date.now }) => {
       // reaching Object.assign -- the transition still runs, it just carries
       // no extra fields.
       const clean = sanitizePatch(patch)
+      // The peer tag is set once, at create, and never by a state change.
+      delete clean.forPeer
       // `planned` means a plan file exists. It is never entered on a
       // status field alone, so the store refuses it without a path.
       if (to === 'planned' && !clean?.artifacts?.planPath) {

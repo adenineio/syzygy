@@ -62,9 +62,9 @@ func (m Model) feedEvents() []relay.Event {
 //
 // events must be oldest first, and its last element is the row drawn at the
 // top: scrolling is expressed by handing the widget a shorter slice rather
-// than by an offset it would have to interpret. CONSOLE's mini feed passes its
-// own smaller budget, which is why the budget is a parameter and not FEED's
-// body height.
+// than by an offset it would have to interpret. The budget is a parameter
+// rather than FEED's body height so a caller that wants a shorter feed passes
+// its own.
 func feedRows(f Frame, events []relay.Event, budget int) []string {
 	if budget <= 0 || f.W <= 0 {
 		return nil

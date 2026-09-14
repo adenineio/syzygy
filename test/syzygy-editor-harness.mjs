@@ -64,7 +64,7 @@ console.log(`compiled: syzygy-editor/hooks/editor.tsx → ${built}`)
 const mod = await import(pathToFileURL(built).href)
 const {
   scanRefs, resolvePath, expandTilde, looksLikePath, parseConfig, editArgv, attachPaneFor,
-  label, styleSpans, DEFAULTS, RELATIVE_PATH_RULE, state,
+  label, styleSpans, DEFAULTS, RELATIVE_PATH_RULE, state, folderAction,
 } = mod
 
 const CWD = '/proj'
@@ -223,20 +223,30 @@ const elementTable = () => {
 }
 
 const makeDollar = ({
-  files, cwd = CWD, home = HOME, now = () => 1000,
-  sessionId = 'sess-1', tmuxPane = '%7', panesListing = '',
+  files, dirs = new Set(), cwd = CWD, home = HOME, now = () => 1000,
+  sessionId = 'sess-1', tmuxPane = '%7', panesListing = '', unameOut = 'Darwin\n',
 }) => {
   const runs = []
   const toasts = []
   const store = new Map()
   const registered = []
   const existsCalls = []
+  const statCalls = []
   return {
     _runs: runs, _toasts: toasts, _store: store, _registered: registered, _existsCalls: existsCalls,
+    _statCalls: statCalls,
     plugin: { name: 'syzygy-editor', root: '/plugins/syzygy-editor' },
     session: { cwd: async () => cwd, id: () => sessionId },
     fs: {
-      exists: async (p) => { existsCalls.push(p); return files.has(p) },
+      exists: async (p) => { existsCalls.push(p); return files.has(p) || dirs.has(p) },
+      // $.fs.stat REJECTS on a missing path -- the declarations say so, and
+      // the module's fallback to $.fs.exists exists because of exactly that.
+      stat: async (p) => {
+        statCalls.push(p)
+        if (dirs.has(p)) return { kind: 'dir', size: 0, mtimeMs: 0 }
+        if (files.has(p)) return { kind: 'file', size: 1, mtimeMs: 0 }
+        throw new Error(`ENOENT: ${p}`)
+      },
     },
     clock: { now },
     store: { set: async (k, v) => { store.set(k, v) }, get: async (k) => store.get(k) },
@@ -257,6 +267,7 @@ const makeDollar = ({
         }
         if (argv[0] === 'tmux' && argv[1] === 'list-panes') return { exitCode: 0, stdout: panesListing, stderr: '' }
         if (argv[0] === 'cat') return { exitCode: 1, stdout: '', stderr: 'no such file' }
+        if (argv[0] === 'uname') return { exitCode: 0, stdout: unameOut, stderr: '' }
         return { exitCode: 0, stdout: 'opened %9\n', stderr: '' }
       },
     },
@@ -285,7 +296,8 @@ assert.deepEqual(
 ok('register() adds exactly the five hooks the validator reports')
 
 const FILES = new Set(['/proj/src/app/util.js', '/proj/src/lib/util.js', '/proj/README.md'])
-const $ = makeDollar({ files: FILES })
+const DIRS = new Set(['/proj/src/app', '/proj/docs'])
+const $ = makeDollar({ files: FILES, dirs: DIRS })
 
 // session.start: discovery and the tool
 const next = async (e) => e
@@ -401,16 +413,16 @@ await render($, TEXT)
 assert.equal(state.parses, before, 'three more renders of the same text: zero further parses')
 ok('the parse is memoised on the message text (3 renders → 0 new parses)')
 
-const existsBefore = $._existsCalls.length
+const existsBefore = $._statCalls.length
 await render($, TEXT)
-assert.equal($._existsCalls.length, existsBefore, 'the path cache answered within its TTL')
+assert.equal($._statCalls.length, existsBefore, 'the path cache answered within its TTL')
 ok('path existence is cached with a TTL — no fs call on a repeat render')
 
 const later = makeDollar({ files: FILES, now: () => 1000 + 60_000 })
 Object.assign(later, {})
-const staleBefore = later._existsCalls.length
+const staleBefore = later._statCalls.length
 await render(later, TEXT)
-assert.ok(later._existsCalls.length > staleBefore, 'past the TTL the fs is asked again')
+assert.ok(later._statCalls.length > staleBefore, 'past the TTL the fs is asked again')
 ok('past the TTL the existence question is asked again (a new file becomes pressable)')
 
 // --- 5. the render tree ------------------------------------------------------
@@ -546,7 +558,11 @@ section('open_in_editor')
 
 const callTool = async (input) =>
   (await hookFor(hooks, 'tool.call')($, { tool: 'mcp__syzygy-editor__open_in_editor', tool_use_id: 't1', ...input }, next))
-    .result.text
+    .result
+
+const raw = await hookFor(hooks, 'tool.call')($, { tool: 'mcp__syzygy-editor__open_in_editor', tool_use_id: 't1', path: 'src/app/util.js' }, next)
+assert.equal(typeof raw.result, 'string', 'tool.call must answer with result as a plain string, not an object')
+ok('the tool.call result is a plain string -- 2.1.270 validates it as string | content blocks | undefined')
 
 assert.match(await callTool({ path: 'src/app/util.js' }), /opened src\/app\/util\.js/)
 ok('open_in_editor opens a file that exists')
@@ -578,7 +594,7 @@ assert.deepEqual(parseConfig('{}'), DEFAULTS, 'an empty object is the defaults')
 assert.deepEqual(parseConfig('not json at all'), DEFAULTS, 'a broken file is the defaults')
 assert.deepEqual(parseConfig('[1,2]'), DEFAULTS, 'an array is the defaults')
 assert.deepEqual(parseConfig(JSON.stringify({ relativePathRule: false, editor: 'hx', split: 'right', size: '25%', box: 'inline' })), {
-  relativePathRule: false, editor: 'hx', split: 'right', size: '25%', box: 'inline',
+  relativePathRule: false, editor: 'hx', split: 'right', size: '25%', box: 'inline', folders: 'finder',
 })
 assert.equal(parseConfig(JSON.stringify({ split: 'diagonal' })).split, 'below', 'an unknown split falls back')
 assert.equal(parseConfig(JSON.stringify({ size: 'huge' })).size, '40%', 'a nonsense size falls back')
@@ -594,6 +610,249 @@ assert.deepEqual(recent.paths, ['src/app/util.js', 'src/lib/util.js', 'README.md
 assert.equal(recent.pane, '%7')
 assert.equal(recent.cwd, CWD)
 ok('turn.complete stores the turn\'s existing file references under the session id')
+
+// --- 10b. the kind cache -----------------------------------------------------
+section('the existence cache carries the kind')
+
+state.seen.clear()
+const dirText = 'the folder src/app holds them'
+const dirTree = await render($, dirText)
+assert.equal(labelsOf(dirTree).length, 1, 'a directory reference is still a button')
+assert.deepEqual(state.seen.get('/proj/src/app')[0], 'dir', 'and the cache says it is a dir')
+assert.equal(state.seen.get('/proj/src/app/util.js'), undefined, 'nothing else was probed')
+ok('a directory reference caches kind "dir", not a boolean')
+
+state.seen.clear()
+const statsBefore = $._statCalls.length
+await render($, dirText)
+await render($, dirText)
+assert.equal($._statCalls.length, statsBefore + 1, 'two renders, one stat call')
+ok('the kind is cached: a repeat render asks the fs nothing')
+
+const past = makeDollar({ files: FILES, dirs: DIRS, now: () => 1000 + 60_000 })
+const pastBefore = past._statCalls.length
+await render(past, dirText)
+assert.ok(past._statCalls.length > pastBefore, 'past the TTL the fs is asked again')
+ok('past EXISTS_TTL_MS the kind is asked again')
+
+// $.fs.stat was never probed against a path outside the working directory;
+// only $.fs.exists was. A stat that rejects for any reason but absence must not
+// unbox the reference: exists gets the last word, and the kind is 'other'.
+state.seen.clear()
+const oddDir = '/proj/src/odd.js'
+const odd = makeDollar({ files: new Set(), dirs: new Set() })
+odd.fs.stat = async () => { throw new Error('EPERM') }
+odd.fs.exists = async () => true
+const oddTree = await render(odd, 'look at src/odd.js now')
+assert.deepEqual(labelsOf(oddTree), ['src/odd.js'], 'still boxed')
+assert.equal(state.seen.get(oddDir)[0], 'other', 'kind unknown but present')
+ok('a rejecting $.fs.stat falls back to $.fs.exists, and the reference stays boxed')
+
+state.seen.clear()
+
+// --- 10c. a trailing slash, and the folder label -----------------------------
+section('a folder written with a trailing slash')
+
+assert.deepEqual(paths('see docs/ for the notes'), ['docs/'], 'a top-level folder with a slash')
+ok('`docs/` is a reference (the bare word `docs` is not)')
+
+assert.deepEqual(paths('the dir src/app/ holds it'), ['src/app/'], 'the slash is kept on the token')
+assert.equal(scanRefs('the dir src/app/ holds it', CWD, HOME)[0].abs, '/proj/src/app')
+ok('a trailing slash is kept in the token and collapsed in the absolute path')
+
+assert.equal(scanRefs('src/app and src/app/ again', CWD, HOME).length, 1, 'one path, two spellings')
+ok('`src/app` and `src/app/` in one message are ONE reference')
+
+assert.deepEqual(paths('go up with ../ ok'), [], '`../` resolves, so it has to be refused by shape')
+assert.deepEqual(paths('run ./ here'), [], 'and `./` with it')
+ok('a token that is only dots and slashes is refused: navigation, not a reference')
+
+assert.deepEqual(paths('this is e.g. a thing'), [], 'the false positives still die')
+assert.deepEqual(paths('see https://example.com/src/app/ for it'), [], 'a URL is still masked')
+assert.equal(looksLikePath('a//b'), false, 'a doubled slash is still refused')
+ok('widening the regex costs none of the existing refusals')
+
+const slashIdx = scanRefs('x docs/ y', CWD, HOME)[0]
+assert.equal('x docs/ y'.slice(slashIdx.start, slashIdx.end), 'docs/', 'indices still cut the original text')
+ok('start/end still index the ORIGINAL text with the slash included')
+
+state.seen.clear()
+const folderTree = await render($, 'the folder src/app holds them')
+assert.deepEqual(labelsOf(folderTree), ['src/app/'], 'a folder box wears a trailing slash')
+ok('a directory is labelled with a trailing / so it reads as a folder')
+
+state.seen.clear()
+const mixedTree = await render($, 'See src/app/util.js and src/app there')
+assert.deepEqual(labelsOf(mixedTree), ['src/app/util.js', 'src/app/'], 'a file has no suffix, a folder has one')
+ok('a file and a folder in one reply are told apart by the label alone')
+
+assert.equal(
+  label(CWD, HOME, { abs: '/proj/src/app', rel: 'src/app', raw: '', start: 0, end: 0 }, 'dir'),
+  'src/app/',
+)
+assert.equal(
+  label(CWD, HOME, { abs: '/proj/src/a.ts', rel: 'src/a.ts', raw: '', start: 0, end: 0 }, 'file'),
+  'src/a.ts',
+)
+assert.equal(
+  label(CWD, HOME, { abs: '/proj/src/app', rel: 'src/app', raw: '', start: 0, end: 0 }),
+  'src/app',
+  'no kind given: exactly what it returned before this branch',
+)
+ok('label() takes the kind as an optional fourth argument')
+
+state.seen.clear()
+
+// --- 10d. the OS, and the folders setting ------------------------------------
+section('uname, once, at session.start')
+
+assert.equal(state.os, 'darwin', 'the shared mock answers Darwin')
+assert.ok(
+  $._runs.some((argv) => argv.length === 1 && argv[0] === 'uname'),
+  'asked with a bare `uname` -- `uname -a` also prints the HOSTNAME, and a host' +
+    ' called something-darwin would be a false positive',
+)
+ok('session.start detects macOS with uname')
+
+const linux = makeDollar({ files: FILES, dirs: DIRS, unameOut: 'Linux\n' })
+await hookFor(hooks, 'session.start')(linux, { cwd: CWD }, next)
+assert.equal(state.os, 'other', 'anything but Darwin is "other"')
+ok('a non-Darwin uname is "other"')
+
+const noUname = makeDollar({ files: FILES, dirs: DIRS })
+noUname.process.run = async (argv) => {
+  if (argv[0] === 'uname') return { exitCode: 127, stdout: '', stderr: 'not found' }
+  return { exitCode: 0, stdout: '', stderr: '' }
+}
+await hookFor(hooks, 'session.start')(noUname, { cwd: CWD }, next)
+assert.equal(state.os, 'other', 'a failing uname is "other", never a guess')
+ok('every uname failure means "other" -- the field is only ever raised')
+
+// Restore the shared session.start state the rest of this harness assumes.
+await hookFor(hooks, 'session.start')($, { cwd: CWD }, next)
+assert.equal(state.os, 'darwin')
+assert.equal(state.pane, '%7')
+
+section('folderAction: one pure decision')
+
+const cfgFinder = { ...DEFAULTS, folders: 'finder' }
+const cfgEditor = { ...DEFAULTS, folders: 'editor' }
+
+assert.equal(folderAction(cfgFinder, 'darwin', 'dir'), 'finder')
+assert.equal(folderAction(cfgEditor, 'darwin', 'dir'), 'editor', 'the setting wins on a folder')
+assert.equal(folderAction(cfgFinder, 'other', 'dir'), 'editor', 'no `open` off macOS')
+assert.equal(folderAction(cfgFinder, 'darwin', 'file'), 'editor', 'a file is never Finder')
+assert.equal(folderAction(cfgFinder, 'darwin', 'other'), 'editor', 'unknown kind is never Finder')
+assert.equal(folderAction(cfgFinder, 'darwin', null), 'editor', 'absent is never Finder')
+ok('folderAction: kind and OS are settled before the setting is consulted')
+
+assert.equal(folderAction(cfgEditor, 'darwin', 'dir', 'finder'), 'finder', 'a caller may override')
+assert.equal(folderAction(cfgFinder, 'darwin', 'dir', 'editor'), 'editor', 'both ways')
+assert.equal(folderAction(cfgFinder, 'darwin', 'file', 'finder'), 'editor', 'but never for a file')
+assert.equal(folderAction(cfgFinder, 'other', 'dir', 'finder'), 'editor', 'and never off macOS')
+ok("a caller's `in` is honoured only where Finder was possible anyway")
+
+assert.equal(parseConfig(JSON.stringify({ folders: 'editor' })).folders, 'editor')
+assert.equal(parseConfig(JSON.stringify({ folders: 'nope' })).folders, 'finder', 'unknown falls back')
+assert.equal(parseConfig('{}').folders, 'finder', 'the default is finder')
+ok('`folders` is parsed like every other setting: any failure is the default')
+
+// --- 10e. pressing a folder --------------------------------------------------
+section('pressing a folder')
+
+state.seen.clear()
+const pressTree = await render($, 'the folder src/app holds them')
+let folderPress
+walk(pressTree, (n) => { if (n && n.tag === 'Button') folderPress = n.props.onPress })
+assert.equal(typeof folderPress, 'function')
+const openBefore = $._runs.length
+folderPress()
+await new Promise((r) => setTimeout(r, 5))
+assert.deepEqual(
+  $._runs[openBefore],
+  ['open', '/proj/src/app'],
+  'argv, never a shell string; the ABSOLUTE path, because `open` does not' +
+    " inherit the session's working directory",
+)
+ok('pressing a folder box on macOS runs `open <abs>` -- a Finder window')
+
+assert.match($._toasts[$._toasts.length - 1], /Finder/, 'the toast says where it went')
+ok('the toast names Finder rather than the editor pane')
+
+// The no-regression cases: everything that is not a folder on macOS is
+// EXACTLY what this plugin did before this branch.
+state.seen.clear()
+const fileTree = await render($, 'See src/app/util.js there')
+let filePress
+walk(fileTree, (n) => { if (n && n.tag === 'Button') filePress = n.props.onPress })
+const fileBefore = $._runs.length
+filePress()
+await new Promise((r) => setTimeout(r, 5))
+assert.deepEqual(
+  $._runs[fileBefore],
+  ['/plugins/syzygy-editor/bin/syzygy-edit', '--pane', '%7', '--split', 'below', '--size', '40%', '--', 'src/app/util.js'],
+  'a FILE still goes to the editor pane, untouched',
+)
+ok('pressing a file box is exactly what it was before folders existed')
+
+state.cfg = { ...DEFAULTS, folders: 'editor' }
+state.seen.clear()
+const optOutTree = await render($, 'the folder src/app holds them')
+let optOutPress
+walk(optOutTree, (n) => { if (n && n.tag === 'Button') optOutPress = n.props.onPress })
+const optOutBefore = $._runs.length
+optOutPress()
+await new Promise((r) => setTimeout(r, 5))
+assert.equal($._runs[optOutBefore][0], '/plugins/syzygy-editor/bin/syzygy-edit')
+assert.equal($._runs[optOutBefore][$._runs[optOutBefore].length - 1], 'src/app')
+ok('`folders: "editor"` sends a folder to the editor pane instead')
+state.cfg = { ...DEFAULTS }
+
+state.os = 'other'
+state.seen.clear()
+const offMacTree = await render($, 'the folder src/app holds them')
+let offMacPress
+walk(offMacTree, (n) => { if (n && n.tag === 'Button') offMacPress = n.props.onPress })
+const offMacBefore = $._runs.length
+offMacPress()
+await new Promise((r) => setTimeout(r, 5))
+assert.equal($._runs[offMacBefore][0], '/plugins/syzygy-editor/bin/syzygy-edit', 'no `open` off macOS')
+ok('off macOS a folder box keeps the editor behaviour, with no `open` attempted')
+state.os = 'darwin'
+
+section('open_in_editor takes `in`')
+
+state.seen.clear()
+const toolRunsBefore = $._runs.length
+const finderText = await callTool({ path: 'src/app' })
+assert.match(finderText, /Finder/)
+assert.deepEqual($._runs[toolRunsBefore], ['open', '/proj/src/app'])
+ok('open_in_editor on a folder opens Finder by default on macOS')
+
+state.seen.clear()
+const editorRunsBefore = $._runs.length
+const editorText = await callTool({ path: 'src/app', in: 'editor' })
+assert.match(editorText, /editor pane/)
+assert.equal($._runs[editorRunsBefore][0], '/plugins/syzygy-editor/bin/syzygy-edit')
+ok('`in: "editor"` sends the same folder to the editor pane')
+
+state.seen.clear()
+const fileFinderBefore = $._runs.length
+const fileFinderText = await callTool({ path: 'src/app/util.js', in: 'finder' })
+assert.match(fileFinderText, /editor pane/, 'a FILE is never handed to `open`')
+assert.equal($._runs[fileFinderBefore][0], '/plugins/syzygy-editor/bin/syzygy-edit')
+ok('`in: "finder"` on a file is ignored -- `open` would launch its default app')
+
+assert.match(await callTool({ path: 'src/nope/missing.js' }), /no such file/)
+ok('open_in_editor still refuses a path that is not there')
+
+const toolSpec = $._registered[0]
+assert.equal(toolSpec.inputSchema.properties.in.type, 'string')
+assert.deepEqual(toolSpec.inputSchema.properties.in.enum, ['finder', 'editor'])
+assert.match(toolSpec.description, /folder/i, 'the model is told folders are covered')
+ok('the registered tool advertises `in` and mentions folders')
+
+state.seen.clear()
 
 // --- 11. the script ----------------------------------------------------------
 section('bin/syzygy-edit')

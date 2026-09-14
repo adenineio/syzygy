@@ -172,7 +172,8 @@ func TestBoardListsEverySessionInOrderAndMarksOurOwn(t *testing.T) {
 			t.Errorf("row %d carries %s but is not this window's session", i, theme.GHere)
 		}
 		if !strings.HasPrefix(r, theme.GGrip+theme.GHere+theme.GOn) &&
-			!strings.HasPrefix(r, theme.GGrip+theme.GHere+theme.GOff) {
+			!strings.HasPrefix(r, theme.GGrip+theme.GHere+theme.GOff) &&
+			!strings.HasPrefix(r, theme.GGrip+theme.GHere+theme.GFlag) {
 			t.Errorf("row %d must carry its own state glyph beside the marker: %q", i, r)
 		}
 	}
@@ -831,19 +832,178 @@ func TestBoardKeepsTheDegradedStatesWorking(t *testing.T) {
 	}
 }
 
-// The x kill is deliberately absent until the armed strip lands: a key that
-// silently does nothing is worse than no key.
-func TestBoardHasNoKillKeyYet(t *testing.T) {
-	m, _, src := boardModel(t, 60, 40)
-	before := m.Render()
-	m = pressBoard(t, m, "x")
+// A session waiting on the user flies the flag where the working dot would be,
+// and BOARD's DETAIL says what it is waiting for.
+func TestBoardFliesTheNeedsFlag(t *testing.T) {
+	m, st, _ := boardModel(t, 60, 40)
+	st.Sessions[0].Working = true
+	st.Sessions[0].Waiting = true
+	st.Sessions[0].WaitingFor = "a decision on the schema"
+	m = feed(t, m, relay.SnapshotMsg(st))
+	out := ansi.Strip(m.Render())
+	if !strings.Contains(out, theme.GFlag) {
+		t.Fatalf("no needs-me flag on the row:\n%s", out)
+	}
+	if !strings.Contains(out, "a decision on the schema") {
+		t.Errorf("DETAIL does not say what it is waiting for:\n%s", out)
+	}
+	assertFrame(t, m.Render(), 60, 40)
+	assertPaletteOnly(t, m.Render())
+	if n := invertRuns(m.Render()); n > 3 {
+		t.Errorf("%d inverted runs, want <= 3", n)
+	}
+}
+
+// With nothing waiting, the row and DETAIL are exactly as they were.
+func TestBoardDrawsNoFlagAndNoReasonWhenNothingIsWaiting(t *testing.T) {
+	m, st, _ := boardModel(t, 60, 40)
+	for i := range st.Sessions {
+		st.Sessions[i].Waiting = false
+		st.Sessions[i].WaitingFor = ""
+		st.Sessions[i].Needs = ""
+	}
+	m = feed(t, m, relay.SnapshotMsg(st))
+	out := ansi.Strip(m.Render())
+	if strings.Contains(out, theme.GFlag) {
+		t.Errorf("a flag appeared with nothing waiting:\n%s", out)
+	}
+	if strings.Contains(out, "a decision on the schema") {
+		t.Errorf("DETAIL names a reason with nothing waiting:\n%s", out)
+	}
+}
+
+// x closes the session, and only on the second press. The strip says which
+// mechanism will run, because "stop" and "SIGTERM" are different promises.
+func TestBoardXArmsThenClosesTheSession(t *testing.T) {
+	m, st, src := boardModel(t, 60, 40)
+	st.Sessions[0].Kind = "background"
+	st.Sessions[0].ShortID = "a5eb"
+	// A sessions update rather than a second snapshot: a snapshot re-fed reads
+	// as the relay coming back, and that toast outranks the strip.
+	m = feed(t, m, relay.SessionsMsg(st.Sessions))
+	m, _ = pressCmd(t, m, "x") // the cmd here is the 3 s expiry tick; leave it
 	if len(src.posts) != 0 {
-		t.Fatalf("x wrote to the relay: %v", src.posts)
+		t.Fatalf("the first x wrote to the relay: %v", src.posts)
 	}
-	if m.Render() != before {
-		t.Error("x changed the frame")
+	out := ansi.Strip(m.Render())
+	if !strings.Contains(out, "claude stop a5eb") {
+		t.Fatalf("the strip does not name the mechanism:\n%s", out)
 	}
-	if strings.Contains(ansi.Strip(before), "x kill") {
-		t.Error("the footer offers a kill key that does not exist")
+	m, cmd := pressCmd(t, m, "x")
+	if cmd == nil {
+		t.Fatal("the second x produced no write")
+	}
+	cmd()
+	if len(src.posts) != 1 || src.posts[0] != "/api/session/kill" {
+		t.Fatalf("the second x did not close the session: %v", src.posts)
+	}
+	if src.bodies[0]["id"] != st.Sessions[0].ID {
+		t.Errorf("closed the wrong session: %v", src.bodies[0])
+	}
+	if m.hasArm {
+		t.Error("firing clears the arm")
+	}
+}
+
+// X kills every subagent of the cursor's session, one command per agent.
+func TestBoardShiftXArmsThenKillsEverySubagent(t *testing.T) {
+	m, st, src := boardModel(t, 60, 40)
+	m, _ = pressCmd(t, m, "X")
+	if !strings.Contains(ansi.Strip(m.Render()), "SUBAGENTS") {
+		t.Fatalf("no armed strip for the subagent kill:\n%s", ansi.Strip(m.Render()))
+	}
+	m, cmd := pressCmd(t, m, "X")
+	if cmd == nil {
+		t.Fatal("the second X produced no write")
+	}
+	cmd()
+	if len(src.posts) != len(st.Sessions[0].Agents) {
+		t.Fatalf("want one post per agent, got %v", src.posts)
+	}
+	for i, b := range src.bodies {
+		if b["verb"] != "kill-agent" {
+			t.Errorf("post %d is not a kill: %v", i, b)
+		}
+		p, _ := b["payload"].(map[string]any)
+		if p["agentId"] != st.Sessions[0].Agents[i].ID {
+			t.Errorf("post %d names the wrong agent: %v", i, b)
+		}
+	}
+}
+
+// A session the plan refuses arms nothing and says why.
+func TestBoardRefusesToCloseASessionItCannot(t *testing.T) {
+	m, st, src := boardModel(t, 60, 40)
+	st.Sessions[0].Pid = "0"
+	st.Sessions[0].Kind = ""
+	st.Sessions[0].ShortID = ""
+	m = feed(t, m, relay.SnapshotMsg(st))
+	m, _ = pressCmd(t, m, "x")
+	if m.hasArm {
+		t.Error("nothing should arm")
+	}
+	if len(src.posts) != 0 {
+		t.Errorf("nothing should post: %v", src.posts)
+	}
+	// setToast writes the toast onto the model itself and returns only its
+	// expiry timer, so the refusal is already on the frame.
+	if !strings.Contains(ansi.Strip(m.Render()), "no pid registered") {
+		t.Errorf("the refusal is not said out loud:\n%s", ansi.Strip(m.Render()))
+	}
+}
+
+// alt+enter puts the user in front of the session's own terminal -- but only
+// when the relay has said there is one. The pane decides from the decoded case
+// rather than posting and hoping.
+func TestBoardJumpsOnlyWhenThereIsSomewhereToJumpTo(t *testing.T) {
+	for _, c := range []struct {
+		jump  string
+		posts int
+		say   string
+	}{
+		{"tmux", 1, ""},
+		{"background", 1, ""},
+		{"resume", 0, "resume"},
+		{"outside", 0, "outside"},
+		{"", 0, "nothing to jump to"},
+	} {
+		m, st, src := boardModel(t, 60, 40)
+		st.Sessions[0].Jump = c.jump
+		m = feed(t, m, relay.SnapshotMsg(st))
+		tm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
+		m = tm.(Model)
+		m.now = frozen
+		if c.posts == 1 {
+			if cmd == nil {
+				t.Fatalf("jump %q produced no write", c.jump)
+			}
+			cmd()
+		}
+		if len(src.posts) != c.posts {
+			t.Errorf("jump %q: %d posts, want %d (%v)", c.jump, len(src.posts), c.posts, src.posts)
+		}
+		if c.posts == 1 && src.posts[0] != "/api/jump" {
+			t.Errorf("jump %q posted %q", c.jump, src.posts[0])
+		}
+		// A refusal is a toast, which setToast has already written onto the
+		// model; only its expiry comes back as a command.
+		if c.say != "" && !strings.Contains(ansi.Strip(m.Render()), c.say) {
+			t.Errorf("jump %q does not say why it refused:\n%s", c.jump, ansi.Strip(m.Render()))
+		}
+	}
+}
+
+// J is the twin, for terminals that do not deliver Option as Alt.
+func TestJIsTheJumpTwin(t *testing.T) {
+	m, st, src := boardModel(t, 60, 40)
+	st.Sessions[0].Jump = "tmux"
+	m = feed(t, m, relay.SnapshotMsg(st))
+	_, cmd := pressCmd(t, m, "J")
+	if cmd == nil {
+		t.Fatal("J produced no write")
+	}
+	cmd()
+	if len(src.posts) != 1 || src.posts[0] != "/api/jump" {
+		t.Fatalf("J did not jump: %v", src.posts)
 	}
 }

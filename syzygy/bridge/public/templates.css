@@ -1,0 +1,73 @@
+/* Session presets: the gear's list, the preset editor, and the chip strip a
+   form mounts over its prompt. No transition and no animation anywhere: a
+   chip marks and unmarks instantly. Every radius reads a corner token, so the
+   Corners setting reaches this surface too. */
+
+/* ------------------------------------------------------------- the gear */
+.tplbox { max-width: 240px; }
+.tplbox label.voicerow { align-items: flex-start; }
+.tplbox label.voicerow input[type="checkbox"] { margin-top: 2px; }
+.tpllist { display: flex; flex-direction: column; gap: 3px; }
+.tplrow {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 4px 7px; cursor: pointer; text-align: left;
+  font: inherit; font-size: 10.5px; color: var(--dim);
+  background: transparent; border: 1px solid var(--edge-hi);
+  border-radius: var(--r-control);
+}
+.tplrow:hover { color: var(--accent); border-color: var(--accent-deep); }
+.tplslot { flex: 0 0 auto; min-width: 1ch; font-size: 9px; color: var(--grey); }
+.tplname {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tplrow .chip { flex: 0 0 auto; }
+.tplrow .tplpersona { color: var(--purple); border-color: var(--purple); }
+
+/* ------------------------------------------------------------ the strip */
+.tplstrip {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+  outline: none; border-radius: var(--r-control);
+}
+/* Nothing mounted, nothing shown: the form keeps its own spacing. */
+.tplstrip:empty { display: none; }
+/* The display above would otherwise beat the browser's own [hidden] rule,
+   the same trap .voicerow[hidden] guards against in app.css. */
+.tplstrip[hidden] { display: none !important; }
+/* The reconciled chips flow in the strip's own row. */
+.tplchips { display: contents; }
+.tplchip {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
+  padding: 2px 7px; cursor: pointer;
+  font: inherit; font-size: 10px; color: var(--dim);
+  background: transparent; border: 1px solid var(--edge-hi);
+  border-radius: var(--r-control);
+}
+.tplchip:hover { color: var(--accent); border-color: var(--accent-deep); }
+.tplchipname { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Applied: the one preset whose persona and tools ride along with a start. */
+.tplchip.applied { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+.tplchip.applied .tplslot { color: inherit; }
+.tplchip.tplsave { border-style: dashed; color: var(--grey); }
+.tplclear {
+  padding: 2px 6px; cursor: pointer;
+  font: inherit; font-size: 10px; line-height: 1; color: var(--grey);
+  background: transparent; border: 1px solid transparent;
+  border-radius: var(--r-control);
+}
+.tplclear:hover { color: var(--red-hot); border-color: var(--red-hot); }
+/* Template mode: the strip holds the keyboard until a digit, esc, or any
+   other key hands it back. */
+.tplstrip.tplmode { outline: 1px dashed var(--accent); outline-offset: 3px; }
+.tplstrip.tplmode .tplslot { color: var(--accent-hot); font-weight: 700; }
+.tplhint { flex: 1 0 100%; font-size: 9.5px; letter-spacing: .04em; color: var(--grey); }
+.tplhint kbd { background: var(--panel); border: 1px solid var(--edge-hi); padding: 1px 4px; color: var(--dim); }
+
+/* ----------------------------------------------------------- the editor */
+#tplmodal .mpanel { max-height: 92vh; overflow-y: auto; }
+.tplform .mlabel { margin-top: 10px; }
+.tplform > .mlabel:first-child { margin-top: 0; }
+.tplform .dinput { background: var(--bg); border-color: var(--edge); }
+.tplpair { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+.tplpair > div { min-width: 0; }
+.tplnote { margin-top: 5px; }

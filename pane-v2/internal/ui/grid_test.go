@@ -218,6 +218,11 @@ func brailleCells(out string) int {
 func TestGridDragLandsAPendingConnection(t *testing.T) {
 	m, st := gridModel(t, 41, 49)
 	m.gridBatch = true
+	// The fixture's settled link joins these same two cards through the one
+	// gutter cell this hop crosses, so with wires on the drag line would replace
+	// that wire's braille rather than add any, and the count below could not
+	// tell a drawn line from none. The baseline is the board without wires.
+	m.gridWires = false
 	gx, gy := gripAt(t, m, 0)
 	bx, by := cardAt(t, m, 1)
 
@@ -484,4 +489,54 @@ func TestGridFormFillSpreadsTheNoteToEmptyRowsOnly(t *testing.T) {
 		t.Fatalf("fill should stay put: open %v, row %d", m.gridForm.Open, m.gridForm.Row)
 	}
 	dump(t, m, 41, 49, "after alt+enter fill")
+}
+
+// A settled link between two visible cards is drawn, in grey braille, and the
+// frame still measures exactly what it should at the pane's real width.
+func TestGridDrawsSettledWires(t *testing.T) {
+	m, st := gridModel(t, 41, 49)
+	st.Links = []relay.Link{{ID: "l1", From: st.Sessions[0].ID, To: st.Sessions[1].ID, Kind: "brief"}}
+	m = feed(t, m, relay.SnapshotMsg(st))
+	out := m.Render()
+	assertFrame(t, out, 41, 49)
+	assertPaletteOnly(t, out)
+	// Every card already wears a braille grip, so presence proves nothing: the
+	// wire is the braille this board does not have once its links are gone.
+	withWires := brailleCells(out)
+	st.Links = nil
+	m = feed(t, m, relay.SnapshotMsg(st))
+	if without := brailleCells(m.Render()); withWires <= without {
+		t.Fatalf("%d braille cells with a link, %d without: no wire was drawn", withWires, without)
+	}
+}
+
+// w turns them off; the cards are untouched either way.
+func TestWToggleTurnsWiresOff(t *testing.T) {
+	m, st := gridModel(t, 41, 49)
+	st.Links = []relay.Link{{ID: "l1", From: st.Sessions[0].ID, To: st.Sessions[1].ID, Kind: "brief"}}
+	m = feed(t, m, relay.SnapshotMsg(st))
+	with := ansi.Strip(m.Render())
+	m = pressGrid(t, m, "w")
+	without := ansi.Strip(m.Render())
+	if with == without {
+		t.Fatal("w changed nothing")
+	}
+	if !strings.Contains(without, st.Sessions[0].Name) {
+		t.Error("turning wires off must not disturb the cards")
+	}
+	assertFrame(t, m.Render(), 41, 49)
+}
+
+// W narrows to the cursor card's own links.
+func TestShiftWNarrowsToTheCursorCard(t *testing.T) {
+	m, st := gridModel(t, 41, 49)
+	st.Links = []relay.Link{{ID: "l1", From: st.Sessions[1].ID, To: st.Sessions[2].ID, Kind: "brief"}}
+	m = feed(t, m, relay.SnapshotMsg(st))
+	all := ansi.Strip(m.Render())
+	m = pressGrid(t, m, "W")
+	only := ansi.Strip(m.Render())
+	if all == only {
+		t.Fatal("W changed nothing with the cursor away from both ends")
+	}
+	assertFrame(t, m.Render(), 41, 49)
 }

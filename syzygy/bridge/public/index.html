@@ -8,7 +8,17 @@
 <link rel="stylesheet" href="/projects.css">
 <link rel="stylesheet" href="/dispatch.css">
 <link rel="stylesheet" href="/canvas.css">
+<link rel="stylesheet" href="/sandbox.css">
+<link rel="stylesheet" href="/session-space.css">
 <link rel="stylesheet" href="/voice.css">
+<link rel="stylesheet" href="/peers.css">
+<link rel="stylesheet" href="/peering.css">
+<link rel="stylesheet" href="/cmdbar.css">
+<link rel="stylesheet" href="/pasteboard.css">
+<link rel="stylesheet" href="/skills.css">
+<link rel="stylesheet" href="/templates.css">
+<link rel="stylesheet" href="/chain.css">
+<link rel="stylesheet" href="/spend.css">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 </head>
 <body>
@@ -27,9 +37,10 @@
            .near — a third body, the right-hand one of the row (`line`).
          The viewBox is 44 wide but everything rests inside its left 22 units,
          centred on (12, 11). That right-hand half is empty except in `line`,
-         which swings the arrangement side-on into it -- and .brand .mark
-         carries a negative right margin that opens up to let it. -->
-    <div class="brand" id="brand">
+         which swings the arrangement side-on into it -- and .markhost .mark
+         carries a negative right margin that opens up to let it. The command
+         bar's glyph is the same mark on a second .markhost. -->
+    <div class="brand markhost" id="brand">
       <svg class="mark" viewBox="0 0 44 22" aria-hidden="true" focusable="false">
         <circle class="far"  cx="12" cy="11" r="8.8"  fill="currentColor"/>
         <circle class="mid"  cx="12" cy="11" r="5.45" fill="var(--brandbg)"/>
@@ -46,6 +57,9 @@
       <button class="tab" data-view="dispatch">Dispatch</button>
       <button class="tab" data-view="canvas">Canvas <span class="tabn" id="c-canvas-tab"
         data-tip="Auto-mode sessions live&#10;How many sessions started from the canvas are still running. --permission-mode auto fails quietly, so this number is not allowed to.">0</span></button>
+      <button class="tab" data-view="sandbox">Sandbox</button>
+      <button class="tab" data-view="space">Space</button>
+      <button class="tab" data-view="peering">Peering <span class="tabn" id="c-peer-jobs-unread">0</span></button>
     </nav>
     <div class="spacer"></div>
     <!-- Settings. The theme picker lives inside rather than in the topbar: five
@@ -62,6 +76,10 @@
         <div class="picks" id="marks" role="group" aria-label="Logo mark"></div>
         <div class="poplabel" style="margin-top:11px">Corners</div>
         <div class="picks" id="corners" role="group" aria-label="Corner style"></div>
+        <div class="poplabel" style="margin-top:11px">Motion</div>
+        <div class="picks gcalm" id="calm" role="group" aria-label="Motion"></div>
+        <div class="poplabel" style="margin-top:11px">Fly-out</div>
+        <div class="picks" id="flyout" role="group" aria-label="Fly-out style"></div>
 
         <!-- Voice input. Self-contained: everything it needs lives inside this
              block, so a relay predating the feature (no `voice` key at all)
@@ -106,6 +124,44 @@
             either way, text appears as you speak and is finalized when you
             stop.
           </div>
+        </div>
+        <!-- Session presets. templates.js (MCT) fills the list from
+             S.agentTemplates; a relay that predates presets sends no key, so
+             the list stays empty and the note under the switch says why. A
+             preset is edited in #tplmodal and applied from the chip strip a
+             form mounts over its prompt. -->
+        <div class="poplabel" style="margin-top:11px">Session presets</div>
+        <div class="voicebox tplbox" id="tplbox">
+          <div class="tpllist" id="tpl-list"></div>
+          <div class="voicehint gone" id="tpl-empty">No presets yet.</div>
+          <div class="voicerow">
+            <button type="button" class="btn" id="tpl-new">New preset</button>
+          </div>
+          <label class="voicerow">
+            <input type="checkbox" id="tpl-personas">
+            <span>Also install presets as Claude agents (every session on this computer loads them)</span>
+          </label>
+          <div class="voicehint gone" id="tpl-personanote"></div>
+        </div>
+        <!-- Limit resume. The same switch as the arm button in the Telemetry
+             tab's after-reset panel, not a second setting: app.js's
+             renderResume() sets both from the relay's `resume` field, and a
+             change here runs that button's own plain click. A relay with no
+             `resume` field predates the feature, and the note says so rather
+             than showing a switch that reads as off. -->
+        <div class="poplabel" style="margin-top:11px">Limit resume</div>
+        <div class="voicebox" id="resumebox">
+          <label class="voicerow">
+            <input type="checkbox" id="resume-enable">
+            <span>Resume after a usage limit</span>
+          </label>
+          <div class="voicehint">
+            Off by default. When on, a session stopped by a usage limit is
+            prompted to carry on once the limit resets. Claude Code's own
+            auto-continue is a separate setting, untouched here.
+          </div>
+          <div class="voicehint" id="resume-old" hidden>this relay predates limit resume — restart it to use it</div>
+          <div class="arerr" id="resume-setting-err" hidden></div>
         </div>
         <div class="poplabel" style="margin-top:11px">Spinner</div>
         <!-- Pins settings.spinner in the global config file, which wins over
@@ -197,6 +253,17 @@
           <span class="mval num" id="v-guard">0</span>
           <span class="msub" id="s-guard">nothing blocked</span>
         </div>
+        <!-- The snapshot frame's size, hidden until the relay shed part of it,
+             ran over its byte budget or dropped a pane that could not drain.
+             budget-chip.js (MCBG) fills it from the frame's `shed` rows and
+             GET /api/health; the pop below it is built there too. -->
+        <div class="mrow budgetchip gone" id="t-frame"
+             data-tip="Snapshot frame&#10;Click lists what the relay shed from it · shift-click labels every panel with its bytes, esc leaves">
+          <span class="mlabel">Frame</span>
+          <span class="mval num" id="v-frame">—</span>
+          <span class="msub" id="s-frame"></span>
+        </div>
+        <div class="budgetpop gone" id="frame-pop"></div>
       </section>
 
       <section class="panel orbpanel">
@@ -248,13 +315,24 @@ Hides this transcript. Your conversation with Syzygy is kept -- ask again to bri
         </div>
       </section>
 
-      <!-- The rail's three stacked sections. The feed is the only one that
-           flexes. Steering is OPEN by default: it is a set of
-           buttons you press, and a fold in front of them cost a click
-           before every single use. The inbox stays collapsed AND hidden.
-           Every head is a button, so the whole row is the target. -->
-      <section class="panel feed" id="sec-feed">
-        <button class="phead fold" type="button" data-fold="feed" aria-expanded="true">
+      <!-- The rail's three stacked sections, and THIS MARKUP IS THE DEFAULT
+           FOLD STATE: app.js's applyFolds reads
+           `panel.classList.contains('collapsed')` whenever localStorage has no
+           fold stored for a section, so changing a default here needs no JS.
+           A browser that has already folded this section by hand keeps its own
+           preference, which is right -- a stored `false` is somebody who
+           deliberately opened it.
+
+           The feed is COLLAPSED by default: it is the loudest
+           thing in the rail and the one you want on demand, not standing.
+           Its open share of the column is `.rail > .panel.feed`'s flex in
+           app.css; collapsed it drops to `flex: 0 0 auto` by the rule beside
+           it. Steering is OPEN by default: it is a set of buttons you press,
+           and a fold in front of them cost a click before every single use.
+           The inbox stays collapsed AND hidden. Every head is a button, so the
+           whole row is the target. -->
+      <section class="panel feed collapsed" id="sec-feed" data-section="events">
+        <button class="phead fold" type="button" data-fold="feed" aria-expanded="false">
           <span class="tick"></span>Tool feed<span class="count" id="c-feed">0</span>
           <span class="caret">▾</span>
         </button>
@@ -282,11 +360,27 @@ Hides this transcript. Your conversation with Syzygy is kept -- ask again to bri
         </button>
         <div class="steer" id="steer"></div>
         <div class="steernote">A button arms &mdash; then pick a session. Hold <kbd>A</kbd> to send to all.
-          <kbd>+</kbd> registers your own; <kbd>shift</kbd>click one to edit it.</div>
+          <kbd>+</kbd> registers your own; right-click one to edit it &middot;
+          <kbd>shift</kbd>click sends to all &middot; <kbd>option</kbd>click picks.</div>
+      </section>
+
+      <!-- Prompts stashed with the band's marker (`,,` by default). This is
+           the GLOBAL board; a session's own entries live in its drawer. In the
+           rail rather than in Telemetry because everything on Telemetry is
+           retrospective and a stash is text you intend to SEND. -->
+      <section class="panel pbpanel" id="sec-pasteboard">
+        <button class="phead fold" type="button" data-fold="pasteboard" aria-expanded="true">
+          <span class="tick"></span>Pasteboard<span class="count" id="c-pasteboard">0</span>
+          <span class="caret">&#9662;</span>
+        </button>
+        <div class="pbody" id="pasteboard"></div>
+        <div class="empty" id="pb-empty">Nothing stashed. Type <kbd>,,,</kbd> in front of a prompt.</div>
+        <div class="pbnote">Click reloads into the focused session and <b>replaces</b> its composer &middot;
+          <kbd>shift</kbd>click the same &middot; <kbd>alt</kbd>click deletes &middot; drag reorders</div>
       </section>
     </aside>
 
-    <section class="panel board">
+    <section class="panel board" data-section="sessions">
       <div class="phead"><span class="tick"></span>Session switchboard<span class="count" id="c-board">0</span></div>
       <div class="boardstage">
         <svg id="wires"></svg>
@@ -348,6 +442,82 @@ Hides this transcript. Your conversation with Syzygy is kept -- ask again to bri
           <div class="caption"><span>7-day</span><span id="cap-usage-7d">—</span></div>
           <canvas id="ch-usage-7d" height="60"></canvas>
         </div>
+        <!-- Queue work for after a reset. Collapsed to one button until opened;
+             app.js's renderCreateForm() fills the three kind panes, and the
+             form's own keydown handler is the modal layer the hint names. -->
+        <div class="arwrap" id="ar-wrap">
+          <button class="btn" id="ar-open" type="button">+ queue work</button>
+          <div class="arform" id="ar-form" tabindex="-1" role="group" aria-label="Queue work" hidden>
+            <div class="arrow">
+              <div class="arseg" id="ar-kind" role="group" aria-label="Kind">
+                <button type="button" id="ar-kind-prompt" data-kind="prompt" aria-pressed="true"><u>p</u>rompt</button>
+                <button type="button" id="ar-kind-implement" data-kind="implement" aria-pressed="false"><u>i</u>mplement</button>
+                <button type="button" id="ar-kind-plan" data-kind="plan" aria-pressed="false">p<u>l</u>an</button>
+                <button type="button" id="ar-kind-spawn" data-kind="spawn" aria-pressed="false"><u>s</u>pawn</button>
+              </div>
+              <div class="arseg" id="ar-window" role="group" aria-label="Window">
+                <button type="button" id="ar-win-fiveHour" data-window="fiveHour" aria-pressed="true">5-hour</button>
+                <button type="button" id="ar-win-sevenDay" data-window="sevenDay" aria-pressed="false">7-day</button>
+              </div>
+            </div>
+            <div class="arpane" id="ar-pane-prompt">
+              <select id="ar-prompt-target" aria-label="Session to prompt"></select>
+              <div class="arnone" id="ar-prompt-none" hidden>no live session to prompt</div>
+              <textarea id="ar-prompt-text" rows="2" placeholder="the prompt to send when the window resets"></textarea>
+            </div>
+            <div class="arpane" id="ar-pane-implement" hidden>
+              <div class="archecks" id="ar-implement-list"></div>
+              <div class="arnone" id="ar-implement-none" hidden>no request has a green-lit plan</div>
+            </div>
+            <div class="arpane" id="ar-pane-plan" hidden>
+              <select id="ar-plan-target" aria-label="Plan to start"></select>
+              <div class="arnone" id="ar-plan-none" hidden>no plan is eligible — a plan needs a <code>Spec:</code> line, no ticked or reported steps, no owner, and a copy in the project's main checkout.</div>
+              <div class="arnone" id="ar-plan-old" hidden>this relay predates night hours — restart it to queue a plan</div>
+              <label class="arfield" id="ar-plan-budget-label" data-tip="Budget, in dollars&#10;an estimate from the band's own price table, not a billing figure — it stops a runaway, it does not guarantee a dollar amount.">budget $
+                <input type="number" id="ar-plan-budget" min="0" max="500" step="any" placeholder="night default">
+              </label>
+            </div>
+            <div class="arpane" id="ar-pane-spawn" hidden>
+              <input id="ar-spawn-cwd" placeholder="absolute directory for the new session">
+              <textarea id="ar-spawn-prompt" rows="2" placeholder="the brief the new session starts with"></textarea>
+              <input id="ar-spawn-name" placeholder="session name (optional)">
+            </div>
+            <div class="arrow">
+              <button class="btn go" id="ar-arm" type="button">arm</button>
+              <button class="btn" id="ar-close" type="button">close</button>
+            </div>
+            <div class="hint" id="ar-hint">click arms · <kbd>⇧</kbd> fires now · <kbd>⌥</kbd> arms and keeps this open · <kbd>p</kbd> <kbd>i</kbd> <kbd>l</kbd> <kbd>s</kbd> kind · <kbd>w</kbd> window · <kbd>r</kbd> resume arm · <kbd>enter</kbd> arm · <kbd>esc</kbd> close</div>
+          </div>
+        </div>
+        <!-- Night hours. app.js's renderNight() fills it from the relay's
+             `night` field; every change is a POST /api/night. -->
+        <div class="arnight" id="ar-night" hidden>
+          <div class="caption"><span>Night hours</span></div>
+          <div class="arnone" id="ar-night-old" hidden>this relay predates night hours — restart it to use them</div>
+          <div class="arnightrow" id="ar-night-body" hidden>
+            <label class="arfield"><input type="checkbox" id="ar-night-enabled"> enabled</label>
+            <label class="arfield">from <input type="time" id="ar-night-start"></label>
+            <label class="arfield">to <input type="time" id="ar-night-end"></label>
+            <label class="arfield" data-tip="Budget per night run, in dollars&#10;an estimate from the band's own price table, not a billing figure — it stops a runaway, it does not guarantee a dollar amount.">budget $ <input type="number" id="ar-night-budget" min="0" max="500" step="any"></label>
+            <label class="arfield" data-tip="Longest a night run may go&#10;The relay stops a night session that runs past this many hours.">max hours <input type="number" id="ar-night-hours" min="0" max="24" step="any"></label>
+          </div>
+          <div class="arstatus" id="ar-night-status"></div>
+          <div class="arerr" id="ar-night-err" hidden></div>
+        </div>
+        <!-- Limit resume. app.js's renderResume() fills it from the relay's
+             `resume` field; the toggle and each row POST to /api/resume. -->
+        <div class="arnight arresume" id="ar-resume" hidden>
+          <div class="caption"><span>Resume after the limit</span><span id="c-ar-disrupted">0</span></div>
+          <div class="arnone" id="ar-resume-old" hidden>this relay predates limit resume — restart it to use it</div>
+          <div class="arnightrow" id="ar-resume-body" hidden>
+            <button class="btn" id="ar-resume-arm" type="button" aria-pressed="false">arm</button>
+            <span class="arwins" id="ar-resume-wins"></span>
+          </div>
+          <div class="arstatus" id="ar-resume-status"></div>
+          <div class="arlist" id="ar-disrupted"></div>
+          <div class="arerr" id="ar-resume-err" hidden></div>
+          <div class="hint" id="ar-resume-hint">click arms · <kbd>⇧</kbd> arms the 7-day window too · <kbd>⌥</kbd> arms without resuming this window · on a row, <kbd>⌥</kbd> excludes and <kbd>⇧</kbd> resumes it now</div>
+        </div>
         <!-- The after-reset queue: one card per entry, a remove
              button on each. app.js's renderUsageQueue() owns this list;
              writes go through POST /api/after-reset(/delete) — see relay.mjs. -->
@@ -355,13 +525,79 @@ Hides this transcript. Your conversation with Syzygy is kept -- ask again to bri
         <div id="usage-queue"><div class="empty">Nothing queued.</div></div>
       </div>
     </section>
+    <!-- Syzygy's own model calls. spend.js (MCSP) renders the table from the
+         relay's `spend` digest; a row's call list is one GET. -->
+    <section class="panel spendpanel" id="spend-panel" tabindex="-1">
+      <div class="phead"><span class="tick"></span>Syzygy's own usage<span class="count" id="c-spend">0</span></div>
+      <div class="pbody">
+        <div id="spend-table"><div class="empty">Nothing recorded yet.</div></div>
+        <div class="spendcaveat" id="spend-caveat"></div>
+        <div class="hint" id="spend-hint">click selects · <kbd>⇧</kbd> opens its calls · <kbd>⌥</kbd> copies · <kbd>j</kbd> <kbd>k</kbd> <kbd>enter</kbd> <kbd>y</kbd> <kbd>esc</kbd></div>
+      </div>
+    </section>
+    <!-- What other sessions have learned that changes somebody else's work.
+         Written by the report_finding tool and by the orchestrator; read here,
+         by bundleContext, and by the architecture sweep's export. -->
+    <section class="panel findpanel" id="findings-panel" data-section="findings">
+      <div class="phead"><span class="tick"></span>Findings<span class="count" id="c-findings">0</span></div>
+      <div class="findbar">
+        <select id="f-project"><option value="">any project</option></select>
+        <select id="f-kind"><option value="">any kind</option></select>
+        <span class="spacer"></span>
+        <button class="btn" id="f-sweep">architecture sweep</button>
+      </div>
+      <div class="findgate gone" id="f-gate"></div>
+      <button class="shedline gone" id="f-shed" type="button"></button>
+      <div class="pbody" id="findlist"><div class="empty">Nothing reported yet.</div></div>
+    </section>
+    <button type="button" class="panel peersummary" id="peer-summary"></button>
   </section>
 
   <section class="view" id="view-projects">
-    <section class="panel projects">
-      <div class="phead"><span class="tick"></span>Projects<span class="count" id="c-projects">0</span></div>
-      <div class="projlist" id="projlist"></div>
-      <div class="hint">Task lists are read from disk and shown read-only · <kbd>3</kbd> opens this view</div>
+    <section class="panel projects" data-section="projects">
+      <div class="phead">
+        <span class="tick"></span>Projects<span class="count" id="c-projects">0</span>
+        <nav class="pjcrumb" id="pj-crumb"></nav>
+        <span class="pjlens" id="pj-lens" data-tip="Lens
+s sessions · t todos · e efforts · g git. Reorders the overview and brings
+that panel first inside a project."></span>
+        <input class="pjfilter gone" id="pj-filter" type="text" data-voice="off" autocomplete="off"
+               spellcheck="false" placeholder="filter projects" aria-label="Filter projects by name">
+        <span class="pjmode" id="pj-mode" data-tip="Mode
+NORMAL: h l move along depth, j k within a column, gg G to its ends, space
+selects, / filters, command-enter plans the project.
+FILTER narrows the projects by name: enter keeps it, esc clears it.
+ASK types into the stripe: esc leaves the field.">NORMAL</span>
+      </div>
+      <div class="pjstage" id="pj-stage">
+        <canvas class="pjlines" id="pj-lines"></canvas>
+        <div class="pjrail gone" id="pj-rail"></div>
+        <div class="pjmain">
+          <div class="pjhead gone" id="pj-head">
+            <span class="pjhname" id="pj-h-name"></span>
+            <span class="pjhroot" id="pj-h-root"></span>
+            <button class="pjbtn" id="pj-ask-about" type="button"
+                    data-tip="Ask about this project: the stripe's next ask is scoped to it.">ask about this project</button>
+            <button class="pjbtn" id="pj-open-canvas" type="button"
+                    data-tip="Open in Canvas: rings this project's live sessions for two seconds.">open in canvas</button>
+          </div>
+          <div class="pjcards gone" id="pj-cards"></div>
+          <div class="projlist" id="projlist"></div>
+          <div class="pjpanels gone" id="pj-panels"></div>
+        </div>
+      </div>
+      <div class="pjstripe">
+        <div class="pjorb" id="pj-orb"></div>
+        <form class="pjask" id="pj-ask-form">
+          <span class="pjscope gone" id="pj-scope"></span>
+          <textarea id="pj-ask" class="pjfield" rows="2" data-voice="full"
+                    placeholder="Ask about your projects…"></textarea>
+          <button class="btn" id="pj-send" type="submit">ask</button>
+        </form>
+      </div>
+      <div class="hint">Task lists are read from disk and shown read-only ·
+        <kbd>3</kbd> opens this view · <kbd>h</kbd> <kbd>l</kbd> move along depth,
+        <kbd>j</kbd> <kbd>k</kbd> within a column · <kbd>/</kbd> filters · <kbd>esc</kbd> steps back a level</div>
     </section>
   </section>
 
@@ -371,14 +607,32 @@ Hides this transcript. Your conversation with Syzygy is kept -- ask again to bri
       endpoints are gated only by a token that is served inside this page, so anything
       that can open this page can dispatch. It listens on 127.0.0.1 only.
     </div>
-    <section class="panel dsection">
+    <section class="panel dsection" data-pane="glance">
       <div class="phead"><span class="tick"></span>Projects at a glance</div>
       <div class="pbody" id="d-glance"></div>
     </section>
-    <section class="panel dsection">
+    <!-- Candidate patterns, written up by the relay's own pass and by sessions
+         that caught themselves repeating something. Nothing here is ever
+         deleted: a proposal is rated, and prepping one files a request whose
+         brief is the write-up. -->
+    <section class="panel dsection sqpanel" id="skills-panel" data-pane="skills" data-section="skillsQueue" tabindex="-1">
+      <div class="phead">
+        <span class="tick"></span>Proposed skills<span class="count" id="c-skills">0</span>
+        <span class="spacer"></span>
+        <select id="sq-kind"><option value="">any kind</option></select>
+        <select id="sq-mark"><option value="">any rating</option></select>
+        <button class="btn" id="sq-review">review</button>
+        <button class="btn" id="sq-pass">look for patterns</button>
+      </div>
+      <div class="sqgate gone" id="sq-gate"></div>
+      <div class="sqhint gone" id="sq-hint"></div>
+      <button class="shedline gone" id="sq-shed" type="button"></button>
+      <div class="pbody" id="sq-list"><div class="empty">Nothing proposed yet.</div></div>
+    </section>
+    <section class="panel dsection" data-pane="request">
       <div class="phead"><span class="tick"></span>New request</div>
       <div class="pbody dform">
-        <input id="d-req-title" class="dinput" placeholder="title — becomes the branch and session name">
+        <input id="d-req-title" class="dinput" placeholder="title — leave blank and one is proposed from what you write below">
         <div class="dbadges" id="d-badges"></div>
         <input id="d-project" class="dinput" placeholder="project root — an absolute path, e.g. /Users/you/code/thing"
                data-tip="Project root&#10;An absolute directory. It becomes the worktree's parent and a spawned session's working directory, so a bare repo name will not do. Click a badge above to fill it in."></input>
@@ -388,25 +642,41 @@ Hides this transcript. Your conversation with Syzygy is kept -- ask again to bri
           <select id="d-effort" class="dinput doption"></select>
         </div>
         <div class="dnote gone" id="d-optnote"></div>
+        <div class="tplstrip" id="d-tplstrip" tabindex="-1"></div>
         <textarea id="d-ask" class="dinput dta" rows="3" placeholder="what you actually want, in your own words"></textarea>
         <button class="btn go" id="d-add">queue it</button>
       </div>
     </section>
-    <section class="panel dsection" id="d-threadpanel" hidden>
-      <div class="phead"><span class="tick"></span>Scoping<span class="count" id="c-thread">—</span></div>
+    <section class="panel dsection" id="d-fanoutsection" data-pane="fanout">
+      <div class="phead"><span class="tick"></span>Fan out a rambling ask<span class="count" id="c-fanout">—</span></div>
+      <div class="pbody dform">
+        <textarea id="d-fuzzy" class="dinput dta dfuzzy" rows="6" placeholder="describe everything at once, across projects — it comes back as one draft request per piece, split by paragraph"></textarea>
+        <div class="drowbtns">
+          <button class="btn go" id="d-fanout">split into requests</button>
+          <span class="dnote gone" id="d-fanoutnote"></span>
+        </div>
+      </div>
+      <div class="pbody dfanpanel gone" id="d-fanpanel" tabindex="0"></div>
+    </section>
+    <section class="panel dsection" id="d-threadpanel" data-pane="thread" hidden>
+      <div class="phead"><span class="tick"></span>Scoping<span class="count" id="c-thread">—</span><span class="count" id="c-scopes"></span></div>
       <div class="pbody dthread" id="d-thread"></div>
       <div class="pbody dform">
         <textarea id="d-say" class="dinput dta" rows="2" placeholder="answer, or push back — one question at a time"></textarea>
         <div class="drowbtns">
           <button class="btn go" id="d-send">send</button>
           <button class="btn" id="d-bank"
-                  data-tip="Write the brief&#10;Turns this conversation into the structured brief a dispatched session is handed.">write the brief</button>
-          <button class="btn" id="d-takeover">take over in tmux</button>
+                  data-tip="Write the brief&#10;Turns this conversation into the structured brief a dispatched session is handed. ⌥-click queues it without opening the editor.">write the brief</button>
+          <button class="btn" id="d-takeover"
+                  data-tip="Join in tmux&#10;Attaches a terminal to the same running conversation, in a new tmux window. ⇧-click copies the command instead.">join in tmux</button>
+          <button class="btn" id="d-endscope"
+                  data-tip="End conversation&#10;Stops the scoping session, and any terminal joined to it. ⌘-click skips the confirmation.">end conversation</button>
+          <button class="btn gone" id="d-restart">start a new conversation from these turns</button>
           <code class="dcmd" id="d-resumecmd"></code>
         </div>
       </div>
     </section>
-    <section class="panel dsection">
+    <section class="panel dsection" data-pane="queue">
       <div class="phead">
         <span class="tick"></span>Queue<span class="count" id="c-dispatch">0</span>
         <span class="spacer"></span>
@@ -414,7 +684,7 @@ Hides this transcript. Your conversation with Syzygy is kept -- ask again to bri
       </div>
       <div class="pbody" id="d-queue"></div>
     </section>
-    <section class="panel dsection">
+    <section class="panel dsection" data-pane="dispatched">
       <div class="phead">
         <span class="tick"></span>Dispatched<span class="count" id="c-cards">0</span>
         <span class="spacer"></span>
@@ -447,14 +717,34 @@ Hides this transcript. Your conversation with Syzygy is kept -- ask again to bri
         <canvas class="cwires" id="cwires"></canvas>
         <div class="cnodes" id="cnodes"></div>
         <div class="empty cempty" id="cempty">No sessions have reported in. Start one with the plugin loaded, or right-click here to spawn one.</div>
+        <!-- The plus gutter: the right-hand strip of the stage's VISIBLE band,
+             shown only while a WIRE drag is in flight. Dropping a wire here
+             opens the spawn form with the wire recorded on it; nothing starts
+             until the form is submitted. Static markup, NOT a reconciled tree,
+             so canvas.js toggles its classes directly. -->
+        <div class="cplus" id="cplus" hidden aria-hidden="true">
+          <div class="cplusmark">+</div>
+          <div class="cpleg">
+            <div class="cplegrow drop"><b>drop</b><br>new session<br>wired &amp; briefed</div>
+            <div class="cplegrow inh"><kbd>&#8679;</kbd> same model<br>&amp; effort</div>
+            <div class="cplegrow qui"><kbd>&#8997;</kbd> wire only<br>send nothing</div>
+          </div>
+        </div>
         <!-- The spawn form. Positioned where the click landed; NOTHING is
              started until it is submitted. -->
         <form class="cspawn" id="cspawn" hidden autocomplete="off">
           <div class="cslabel">Start a session here</div>
+          <div class="cslink gone" id="cs-link">wired from <b id="cs-linkname"></b></div>
           <input class="dinput" id="cs-cwd" list="cs-recents" placeholder="directory — absolute path or ~/…, completes as you type" required>
           <datalist id="cs-recents"></datalist>
           <input class="dinput" id="cs-name" placeholder="name (defaults to the directory's name)">
+          <div class="tplstrip" id="cs-tplstrip" tabindex="-1"></div>
           <textarea class="dinput dta" id="cs-prompt" rows="3" placeholder="kickoff prompt" required></textarea>
+          <div class="csnote gone" id="cs-noterow">
+            <label class="cslabel" for="cs-note">message to send on link</label>
+            <textarea class="dinput dta" id="cs-note" rows="2"
+              placeholder="what the new session should be told"></textarea>
+          </div>
           <div class="csrow">
             <select class="dinput" id="cs-model">
               <option value="opus">opus</option><option value="sonnet">sonnet</option>
@@ -472,8 +762,127 @@ Hides this transcript. Your conversation with Syzygy is kept -- ask again to bri
           <div class="cshint"><kbd>&#8984;</kbd>/<kbd>ctrl</kbd> + <kbd>enter</kbd> starts &middot; <kbd>esc</kbd> cancels</div>
         </form>
       </div>
-      <div class="hint">Drag a node to move it · drag its <b>⠿ wire</b> grip onto another node to open a channel · <kbd>right-click</kbd> or <kbd>⌥</kbd>+click empty canvas to start a session · <kbd>⌘</kbd>/<kbd>ctrl</kbd>+<kbd>enter</kbd> starts it · <kbd>5</kbd> opens this view · <kbd>esc</kbd> closes the form</div>
+      <div class="hint">Drag a node to move it · drag its <b>⠿ wire</b> grip onto another node to open a channel · <kbd>right-click</kbd> or <kbd>⌥</kbd>+click empty canvas to start a session · <kbd>⌘</kbd>/<kbd>ctrl</kbd>+<kbd>enter</kbd> starts it · drag a wire to the <b>+</b> column at the right edge to spawn one already wired (<kbd>&#8679;</kbd> same model &middot; <kbd>&#8997;</kbd> wire only) · <kbd>5</kbd> opens this view · <kbd>esc</kbd> closes the form</div>
     </section>
+  </section>
+
+  <!-- The sandbox. Components are tried here on live board data before any of
+       them earns a place on a real view: each cell holds one component as real
+       DOM inside a three.js scene, with a line layer behind it. Everything it
+       draws reads the deck's own theme and corner tokens, so a component that
+       looks right here looks right where it lands. -->
+  <section class="view" id="view-sandbox">
+    <section class="panel gpanel">
+      <div class="phead">
+        <span class="tick"></span>Sandbox<span class="count" id="c-sandbox">0</span>
+        <span class="spacer"></span>
+        <span class="gcalm" id="g-calm" role="group" aria-label="Motion"></span>
+      </div>
+      <div class="mnote glegend">
+        <kbd>click</kbd> expands &middot; <kbd>&#8679;</kbd><kbd>click</kbd> settings &middot;
+        <kbd>&#8997;</kbd><kbd>click</kbd> marks it &middot; <kbd>right-click</kbd> clears the mark &middot;
+        <kbd>esc</kbd> steps back
+      </div>
+      <div class="gwrap" id="g-wrap">
+        <canvas class="glines" id="g-lines"></canvas>
+        <div class="gcells" id="g-cells"></div>
+      </div>
+    </section>
+  </section>
+
+  <!-- Session space. The board's sessions as the stage's own cards over a
+       line canvas, eight buckets along the foot, and the tmux panes that are
+       not on the board down the right-hand side. -->
+  <section class="view" id="view-space">
+    <div class="kwrap" id="k-wrap">
+      <canvas id="k-lines"></canvas>
+      <div class="kstage" id="k-stage"></div>
+    </div>
+    <aside class="kside" id="k-side">
+      <div class="phead"><span class="tick"></span>tmux<span class="count" id="c-ktmux">0</span></div>
+      <div class="kside-body" id="k-tmux"></div>
+    </aside>
+    <div class="kbuckets" id="k-buckets"></div>
+    <div class="kmode" id="k-mode"></div>
+    <!-- The bucket editor. Static and inside the section, so nothing is built
+         per open; only the fields its kind uses are shown. -->
+    <div class="keditor" id="k-editor" hidden role="dialog" aria-labelledby="k-edtitle">
+      <div class="kedhead">
+        <strong id="k-edtitle">Bucket</strong>
+        <span class="kedspacer"></span>
+        <button class="btn" id="k-edclose" type="button">close</button>
+      </div>
+      <div class="kedrow">
+        <div class="kedgrow">
+          <label class="mlabel" for="k-edname">Name</label>
+          <input class="kedinput" id="k-edname" type="text" maxlength="60" spellcheck="false" autocomplete="off">
+        </div>
+        <div>
+          <label class="mlabel" for="k-edcolor">Colour</label>
+          <input class="kedcolor" id="k-edcolor" type="color" value="#6f86a8">
+        </div>
+      </div>
+      <div class="kedfield" id="k-edkindrow">
+        <label class="mlabel" for="k-edkind">Kind</label>
+        <select class="kedinput" id="k-edkind">
+          <option value="prompt">prompt — send text</option>
+          <option value="files">files — name paths</option>
+          <option value="tmux-group">tmux — join panes in one window</option>
+          <option value="together">together — remember who belongs</option>
+        </select>
+      </div>
+      <div class="kedfield" id="k-edtmuxrow">
+        <label class="mlabel" for="k-edtmux">tmux window name</label>
+        <input class="kedinput" id="k-edtmux" type="text" maxlength="60" spellcheck="false" autocomplete="off"
+               placeholder="szg-group">
+      </div>
+      <div class="kedfield" id="k-edtextrow">
+        <label class="mlabel" for="k-edtext">Prompt</label>
+        <textarea class="kedinput" id="k-edtext" rows="4" placeholder="What every session it is applied to is sent."></textarea>
+      </div>
+      <div class="kedfield" id="k-edpathsrow">
+        <label class="mlabel" for="k-edpaths">Paths</label>
+        <textarea class="kedinput" id="k-edpaths" rows="4" spellcheck="false" placeholder="one per line"></textarea>
+      </div>
+      <div class="kederr" id="k-ederr" hidden></div>
+      <div class="kedfoot">
+        <button class="btn no" id="k-eddelete" type="button">delete</button>
+        <span class="kedspacer"></span>
+        <button class="btn go" id="k-edsave" type="button">save</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Peering: the link's controls along the top (peers.js renders #peer-panel
+       by id, wherever it sits), and a log of everything that crosses the link
+       beside the record of whichever exchange is open. peering.js (MCPR). -->
+  <section class="view" id="view-peering">
+    <div class="prhead">
+      <section class="panel peerpanel" id="peer-panel" tabindex="-1">
+        <div class="phead"><span class="tick"></span>Peering<span class="count" id="c-peers">0</span></div>
+        <div class="pbody" id="peer-body">
+          <div class="peer-region" id="peer-link"></div>
+          <div class="peer-region" id="peer-list"></div>
+          <div class="peer-region" id="peer-asks"></div>
+          <div class="peer-region" id="peer-jobs"></div>
+        </div>
+      </section>
+      <section class="panel" id="pr-safeguard">
+        <div class="phead"><span class="tick"></span>Safeguard</div>
+        <div class="pbody" id="pr-safeguard-body"></div>
+      </section>
+    </div>
+    <div class="prbody">
+      <section class="panel" id="pr-log" tabindex="-1">
+        <div class="phead"><span class="tick"></span>Wire<span class="count" id="c-prwire">0</span></div>
+        <div class="prtools" id="pr-tools"></div>
+        <div class="pbody" id="pr-list"></div>
+      </section>
+      <section class="panel" id="pr-detail" hidden>
+        <div class="phead"><span class="tick"></span>Exchange</div>
+        <div class="pbody" id="pr-detail-body"></div>
+      </section>
+    </div>
   </section>
 </div>
 
@@ -545,6 +954,59 @@ Hides this transcript. Your conversation with Syzygy is kept -- ask again to bri
   </div>
 </div>
 
+<!-- The preset editor. A sibling of #app like the dialogs around it, so
+     voice.js, which scans from document.body, still finds its fields. Only the
+     prompt is required; a model or effort left on — keeps whatever the form it
+     is applied to already holds. See openEditor() in templates.js. -->
+<div class="modal" id="tplmodal" hidden>
+  <div class="mpanel" role="dialog" aria-modal="true" aria-labelledby="tpl-title">
+    <div class="mhead">
+      <span class="tick"></span>
+      <strong id="tpl-title">New preset</strong>
+      <span style="flex:1"></span>
+      <button class="btn" id="tpl-cancel" type="button">cancel</button>
+    </div>
+    <div class="mbody tplform">
+      <label class="mlabel" for="tpl-name">Name</label>
+      <input class="dinput" id="tpl-name" type="text" maxlength="60" spellcheck="false" autocomplete="off"
+             placeholder="e.g. reviewer">
+      <label class="mlabel" for="tpl-prompt">Kickoff prompt</label>
+      <textarea id="tpl-prompt" rows="5"
+        placeholder="What a session started from this preset is told first."></textarea>
+      <div class="tplpair">
+        <div>
+          <label class="mlabel" for="tpl-model">Model</label>
+          <select class="dinput" id="tpl-model"><option value="">—</option></select>
+        </div>
+        <div>
+          <label class="mlabel" for="tpl-effort">Effort</label>
+          <select class="dinput" id="tpl-effort"><option value="">—</option></select>
+        </div>
+      </div>
+      <div class="tplpair">
+        <div>
+          <label class="mlabel" for="tpl-skills">Skills</label>
+          <textarea id="tpl-skills" rows="3" spellcheck="false" placeholder="one per line"></textarea>
+        </div>
+        <div>
+          <label class="mlabel" for="tpl-tools">Allowed tools</label>
+          <textarea id="tpl-tools" rows="3" spellcheck="false" placeholder="one per line, e.g. Read"></textarea>
+        </div>
+      </div>
+      <label class="mlabel" for="tpl-agentdef">Persona</label>
+      <textarea id="tpl-agentdef" rows="4"
+        placeholder="Optional. Who the session is, installed as a Claude agent while personas are on in the gear."></textarea>
+      <div class="voicehint tplnote gone" id="tpl-agentnote"></div>
+      <div class="mfoot">
+        <span class="mnote">A model or effort left on — keeps what the form already holds.<br>
+          <kbd>esc</kbd> cancels &middot; <kbd>&#8984;</kbd>/<kbd>ctrl</kbd> + <kbd>enter</kbd> saves</span>
+        <button class="btn no gone" id="tpl-delete" type="button">delete</button>
+        <button class="btn go" id="tpl-save" type="button">save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- One dialog, two jobs: registering or editing a steering button, and asking
      for the goal a go-autonomous run needs before it arms. See openSteerForm()
      in app.js -- the two modes differ only in which fields are shown. -->
@@ -574,6 +1036,84 @@ Hides this transcript. Your conversation with Syzygy is kept -- ask again to bri
   </div>
 </div>
 
+<!-- The fleet picker: option-click a steering button to choose who gets it.
+     Sending from here does NOT arm -- a set has already been chosen, and a
+     second targeting step would be a trap. See openFleetForm() in app.js. -->
+<div class="modal" id="fleetform" hidden>
+  <div class="mpanel" role="dialog" aria-modal="true" aria-labelledby="ff-title">
+    <div class="mhead">
+      <span class="tick"></span>
+      <strong id="ff-title">Send to…</strong>
+      <span style="flex:1"></span>
+      <button class="btn" id="ff-cancel">cancel</button>
+    </div>
+    <div class="mbody">
+      <div class="fleetlist" id="ff-list"></div>
+      <div class="mfoot">
+        <span class="mnote" id="ff-note"><kbd>esc</kbd> cancels &middot; <kbd>&#8984;</kbd>/<kbd>ctrl</kbd> + <kbd>enter</kbd> sends</span>
+        <button class="btn" id="ff-all">all</button>
+        <button class="btn" id="ff-none">none</button>
+        <button class="btn go" id="ff-send">send</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- The command bar. Static markup, never built or torn down: voice.js
+     discovers every textarea/input under document.body and injects a mic
+     button as the field's NEXT SIBLING, so a field inside an MCX-reconciled
+     subtree would have that button wiped out from under it, which is why
+     #orb-ask is static too. Only #cmd-threads and #cmd-transcript are reconciled,
+     and neither contains a field. A <textarea> already reads as `full` to
+     MCVM.fieldKind; data-voice="full" is written anyway, as documentation. -->
+<div class="modal cmdbar" id="cmdbar" hidden>
+  <div class="cmdpanel" role="dialog" aria-modal="true" aria-label="Ask Syzygy">
+    <div class="cmdrow">
+      <!-- The topbar's logo mark, recoloured for a dark surface in cmdbar.css.
+           Same geometry, same hover motion, same Logo setting. -->
+      <span class="cmdglyph markhost" aria-hidden="true">
+        <svg class="mark" viewBox="0 0 44 22" focusable="false">
+          <circle class="far"  cx="12" cy="11" r="8.8"  fill="currentColor"/>
+          <circle class="mid"  cx="12" cy="11" r="5.45" fill="var(--brandbg)"/>
+          <circle class="ring" cx="12" cy="11" r="10.25"
+                  fill="none" stroke="currentColor" stroke-width="0.96"/>
+          <circle class="near" cx="12" cy="11" r="2.4"  fill="currentColor"/>
+        </svg>
+      </span>
+      <span class="cmdscope gone" id="cmd-scope" role="button" tabindex="0"
+            data-tip="The next ask is scoped to this project&#10;Click, or press escape, to clear it."></span>
+      <textarea id="cmd-ask" rows="1" data-voice="full" spellcheck="false"
+                placeholder="Ask Syzygy anything about the board…"></textarea>
+      <button class="cmdpin" id="cmd-pin" type="button" aria-pressed="false"
+              data-tip="Pin this conversation&#10;A pinned conversation is never evicted and sorts first in the list below.">&#9733;</button>
+    </div>
+    <div class="cmdthreads gone" id="cmd-threads"></div>
+    <input id="cmd-rename" class="cmdchip cmdrename" type="text" data-voice="off"
+           spellcheck="false" aria-label="Rename this conversation" hidden>
+    <div class="cmdtranscript gone" id="cmd-transcript"></div>
+    <div class="cmdfoot">
+      <span class="mnote">
+        <kbd>enter</kbd> sends &middot; <kbd>&#8679;</kbd><kbd>enter</kbd> newline &middot;
+        <kbd>&#8984;</kbd><kbd>enter</kbd> new conversation &middot;
+        <kbd>&#8997;</kbd><kbd>&#8679;</kbd><kbd>p</kbd> pin &middot; <kbd>&#8984;</kbd><kbd>k</kbd> clear &middot;
+        <kbd>&#8593;</kbd><kbd>&#8595;</kbd> earlier asks &middot; <kbd>esc</kbd> closes
+        &middot; <kbd>&#8997;</kbd> quick access
+      </span>
+    </div>
+  </div>
+</div>
+
+<!-- The quick-access deck. A SIBLING of #cmdbar, not a child: the Projects
+     stripe hosts it while #cmdbar is hidden, and a display:none ancestor would
+     take it down too. Always position:fixed, placed from its host field's own
+     box. Only .qacards is reconciled, and it holds no field, so voice.js's mic
+     injection never reaches inside it. -->
+<div class="qadeck" id="cmd-deck" hidden>
+  <div class="qabands" id="qa-bands"></div>
+  <div class="qanote mnote" id="qa-note">This relay predates favourites — restart it to star sessions.</div>
+  <div class="qahint mnote" id="qa-hint"></div>
+</div>
+
 <!-- The mode line. It says what the CURRENT modifiers plus the current
      pointer position will actually do, and it is the only place that says it,
      so it has to be right rather than decorative. See renderModeline() in
@@ -590,17 +1130,41 @@ Hides this transcript. Your conversation with Syzygy is kept -- ask again to bri
 
 <script>window.SZG_TOKEN = "__SZG_TOKEN__";</script>
 <script type="importmap">
-{ "imports": { "three": "/vendor/three.slim.min.js" } }
+{ "imports": { "three": "/vendor/three.slim.min.js", "motion": "/vendor/motion.min.js" } }
 </script>
 <script src="/reconcile.js"></script>
+<script src="/stream.js"></script>
+<script src="/budget-chip.js"></script>
+<script src="/findings.js"></script>
+<script src="/drawer.js"></script>
+<script src="/chain.js"></script>
+<script src="/cmd-markdown.js"></script>
+<script src="/cmdbar.js"></script>
+<script src="/quick-access.js"></script>
+<script src="/pasteboard.js"></script>
+<script src="/template-apply.js"></script>
+<script src="/templates.js"></script>
 <script src="/voice-math.js"></script>
 <script src="/voice.js"></script>
 <script src="/canvas-layout.js"></script>
 <script src="/replay.js"></script>
+<script src="/projects-motion-math.js"></script>
+<script src="/projects-model.js"></script>
 <script src="/projects.js"></script>
+<script src="/projects-stage.js"></script>
 <script src="/dispatch-badges.js"></script>
 <script src="/dispatch.js"></script>
+<script src="/skills.js"></script>
+<script src="/peers.js"></script>
+<script src="/peering-model.js"></script>
+<script src="/peering.js"></script>
+<script src="/spend.js"></script>
 <script src="/canvas.js"></script>
+<script src="/orbit-model.js"></script>
+<script src="/sandbox-math.js"></script>
+<script src="/sandbox.js"></script>
+<script src="/session-space-math.js"></script>
+<script src="/session-space.js"></script>
 <script src="/app.js"></script>
 <script type="module" src="/swarm.js"></script>
 </body>

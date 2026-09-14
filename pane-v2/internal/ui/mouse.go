@@ -158,11 +158,10 @@ func (m Model) hkRegions(f Frame, regs []region) []region {
 // onMouse routes a mouse message. It mirrors onKey's order: the help overlay
 // first, then the mode, then the global gestures.
 //
-// NOTE for a later reader: the armed-confirmation strip (spec 3.6) is
-// deliberately not in the region table and must not be added to it when it
-// lands. A blind click confirming a kill or an abort is exactly the failure
-// the armed strip exists to prevent, so a destructive confirmation stays
-// keyboard-only by design.
+// NOTE for a later reader: the armed strip (arm.go) is deliberately not in the
+// region table and must never be added to it. A blind click confirming a kill
+// or an abort is exactly the failure the armed strip exists to prevent, so a
+// destructive confirmation stays keyboard-only by design.
 func (m Model) onMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.gridForm.Open || m.hk.editor.Open {
 		// The form swallows the pointer for the reason the help overlay does:
@@ -210,8 +209,8 @@ func (m Model) onMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 // still recorded: a press always starts a new one, or none.
 func (m Model) onClick(x, y int) (tea.Model, tea.Cmd) {
 	m.dragFrom = ""
-	if m.showHelp {
-		// The overlay swallows the keyboard; it swallows clicks for the same
+	if m.showHelp || m.showBank {
+		// Either overlay swallows the keyboard; it swallows clicks for the same
 		// reason -- what is under them is not what is on screen.
 		return m, nil
 	}
@@ -257,7 +256,7 @@ func (m Model) onClick(x, y int) (tea.Model, tea.Cmd) {
 func (m Model) onRelease(x, y int) (tea.Model, tea.Cmd) {
 	from, drag := m.dragFrom, m.gridDrag
 	m.dragFrom, m.gridDrag = "", gridDrag{}
-	if from == "" || m.showHelp {
+	if from == "" || m.showHelp || m.showBank {
 		return m, nil
 	}
 	r, ok := hitAt(m.regions(), x, y)
@@ -295,7 +294,7 @@ func (m Model) onWheel(b tea.MouseButton) (tea.Model, tea.Cmd) {
 		// The pane has no horizontal axis: rows truncate rather than scroll.
 		return m, nil
 	}
-	if !m.showHelp {
+	if !m.showHelp && !m.showBank {
 		switch m.mode {
 		case ModeFeed:
 			// Landing within a notch of the newest event re-pins follow, which
@@ -329,10 +328,14 @@ func (m Model) setMode(mode Mode) (tea.Model, tea.Cmd) {
 	// abandons it rather than leaving its hint up over a mode that cannot
 	// finish it. Pending connections are not a half-made link: they stay.
 	m.linkFrom, m.dragFrom, m.gridDrag = "", "", gridDrag{}
-	if was == ModeHotkeys && mode != ModeHotkeys {
-		// An arm and a half-typed slot belong to the mode they were started
-		// in, exactly as a half-made link does.
-		m.hk.armed, m.hk.editor = false, hkEditor{}
+	if was != mode {
+		// An arm and a half-typed slot belong to the mode they were started in,
+		// exactly as a half-made link does.
+		m.disarm()
+		m.leader = false
+		if was == ModeHotkeys {
+			m.hk.editor = hkEditor{}
+		}
 	}
 	if mode == ModeHotkeys && was != ModeHotkeys {
 		// Re-read on every entry rather than once: both files are hand-edited
@@ -353,7 +356,10 @@ func (m Model) onHkClick(i int) (tea.Model, tea.Cmd) {
 	at := m.nowFn()
 	again := id == m.clickID && !m.clickAt.IsZero() && at.Sub(m.clickAt) < doubleClick
 	m.clickID, m.clickAt = id, at
-	m.hk.row, m.hk.armed = i, false
+	// A click is not the confirming key, so it cancels an arm the way any
+	// other key would.
+	m.hk.row = i
+	m.disarm()
 	if again {
 		return m.openHkEditor()
 	}
@@ -364,5 +370,11 @@ func (m Model) onHkClick(i int) (tea.Model, tea.Cmd) {
 func (m Model) focusHome() (tea.Model, tea.Cmd) {
 	m.focus = m.self
 	m.scroll = 0
+	// Refocusing swaps PASTE's session board out from under the cursor, so an
+	// x arm over an entry on the old board is cancelled rather than left
+	// showing a confirm for a row that is no longer on screen. The focus tag
+	// reaches here by a click as well as by the 0 key, so this cannot lean on
+	// the key path's own cancel.
+	m.disarm()
 	return m, nil
 }

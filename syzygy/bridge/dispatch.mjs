@@ -63,6 +63,9 @@ export const renderBrief = (r) => {
   md += section('Research: documentation', research.urls)
   md += section('Research: read these files first', research.files)
   md += section('Open questions', b.openQuestions)
+  if (r.relatesTo?.kind && r.relatesTo?.ref) {
+    md += section('Relates to', [`\`${r.relatesTo.kind}\` — ${r.relatesTo.ref}`])
+  }
   return md
 }
 
@@ -109,6 +112,10 @@ const realRun = (bin, argv, opts = {}) =>
 
 const today = () => new Date().toISOString().slice(0, 10)
 
+/** The exact wording relay.mjs's own 503 routes use for a missing binary, so
+ *  a refusal here reads as the same fact rather than a new one. */
+const NO_CLAUDE_BIN = "no claude binary with --bg was found — see the relay's stderr"
+
 /** Finding: the plan/spec gate must check the EXACT path
  *  `initialPrompt` told the session to write, never "the newest markdown in
  *  the directory". A dispatched worktree branches from the project's current
@@ -123,7 +130,8 @@ const expectedPaths = (slug, date) => ({
 })
 
 export const createDispatcher = ({ store, broadcast, run = realRun, now = Date.now, claudeBin = 'claude',
-  relayInfo = () => ({ relayPort: null, relayToken: null }) }) => {
+  relayInfo = () => ({ relayPort: null, relayToken: null }),
+  templateAgent = () => null, templateTools = () => [] }) => {
   const push = () => broadcast('dispatch', { requests: store.all() })
 
   const fail = (id, phase, message) => {
@@ -132,6 +140,14 @@ export const createDispatcher = ({ store, broadcast, run = realRun, now = Date.n
   }
 
   const dispatchOne = async (r) => {
+    // No usable binary was resolved at boot: refuse before creating a
+    // worktree that could never be spawned into, rather than fall back to
+    // whatever `claude` happens to sit on PATH.
+    if (!claudeBin) {
+      process.stderr.write(`[dispatch] refusing to dispatch ${r.id}: ${NO_CLAUDE_BIN}\n`)
+      fail(r.id, 'spawn', NO_CLAUDE_BIN)
+      return null
+    }
     // Before anything shells out. `git worktree add` with a cwd that does not
     // exist fails with an error that names git, and `spawn ... ENOENT` names
     // the binary -- neither says the project field is wrong, which is what a
@@ -189,19 +205,38 @@ export const createDispatcher = ({ store, broadcast, run = realRun, now = Date.n
     let settings = null
     try { settings = spawnEnvSettings(relayInfo() ?? {}) } catch { settings = null }
 
+    // The request's template, if it names one: a persona already confirmed in
+    // the CLI's roster, and extra tools. Thunks called with the request, so the
+    // template is the one stored NOW rather than when the dispatcher was built.
+    // A thunk that throws means "no template" -- a bad preset must not cost
+    // the dispatch, the same rule relayInfo lives under.
+    let agent = null
+    try { agent = templateAgent(r) || null } catch { agent = null }
+    let tools = []
+    try {
+      const t = templateTools(r)
+      tools = Array.isArray(t) ? t.filter((x) => typeof x === 'string' && x) : []
+    } catch { tools = [] }
+
     // `--allowedTools` is variadic: it consumes every following non-option
     // token, so spreading ALLOWED_TOOLS here would swallow the prompt as a
     // 13th "allowed tool" and every dispatched session would run with no
     // prompt at all (verified live against 2.1.269). The
     // CLI documents the flag as accepting a comma- or space-separated LIST,
     // so pass it as one argument.
+    //
+    // A template's tools are a UNION with ALLOWED_TOOLS, never a replacement:
+    // a dispatched session still needs its git verbs whatever the preset says.
+    // `--agent` goes before `--allowedTools`, so nothing but the prompt ever
+    // follows the variadic flag.
     const argv = [
       '--bg',
       '-n', r.slug,
       ...(settings ? ['--settings', settings] : []),
       '--model', r.dispatch?.model ?? 'opus',
       '--effort', r.dispatch?.effort ?? 'high',
-      '--allowedTools', ALLOWED_TOOLS.join(' '),
+      ...(agent ? ['--agent', String(agent)] : []),
+      '--allowedTools', [...new Set([...ALLOWED_TOOLS, ...tools])].join(' '),
       initialPrompt({ slug: r.slug, date }),
     ]
     // `env: childEnv()` is not hygiene, it is containment. `claude --bg` does
@@ -260,6 +295,13 @@ export const createDispatcher = ({ store, broadcast, run = realRun, now = Date.n
     async poll() {
       const open = store.all().filter((r) => r.state === 'dispatched' || r.state === 'implementing')
       if (!open.length) return
+      // Refuse the listing call itself, not only the spawn: a relay with no
+      // usable binary would otherwise poll `claude agents` against whatever
+      // `claude` happens to sit on PATH, every pass, unattended.
+      if (!claudeBin) {
+        process.stderr.write(`[dispatch] refusing to poll: ${NO_CLAUDE_BIN}\n`)
+        return
+      }
       const out = await run(claudeBin, ['agents', '--json', '--all'], {})
       let agents = [], callOk = out.code === 0
       if (callOk) { try { agents = JSON.parse(out.stdout) } catch { callOk = false } }

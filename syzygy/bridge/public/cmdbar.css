@@ -1,0 +1,388 @@
+/* The command bar. Spotlight and the Arc URL bar sit in the upper third, not
+   the vertical centre, so `.modal`'s centring is overridden rather than
+   reused: the bar is centred across the screen and sits high on it.
+
+   CORNER TOKENS ONLY. No literal border-radius appears in this file: every
+   surface reads --r-surface/--r-control/--r-input, so the settings toggle
+   moves all of them together.
+
+   The popup shows and hides at once: it has no entrance. Two things move. The
+   mark beside the field moves on hover, and that motion belongs to the logo's
+   shared rules in app.css rather than to this file; the quick-access deck
+   arrives and leaves, and its rules are at the end of this file. */
+
+.cmdbar { align-items: flex-start; padding-top: 14vh; }
+/* Written explicitly even though `.modal[hidden]` already covers it: an author
+   `display` on the same element beats the browser's own [hidden] regardless of
+   specificity, and the bug that causes is a panel that will not hide with
+   nothing in the console (app.css's .voicerow[hidden] carries the same rule). */
+.cmdbar[hidden] { display: none; }
+
+/* --- the bar's own motion ----------------------------------------------------
+   Every duration comes in as a custom property written by the script from its
+   one table, so the stylesheet and the script cannot use different numbers. A
+   duration that has not been written makes its `animation` shorthand invalid,
+   which means no animation -- the same end state the calm dial's `still` gives,
+   so this fails safe rather than half-drawn.
+
+   The panel grows by CLIPPING, never by scaling. It is laid out at its final
+   size from the first frame and a clip opens out from the eclipse mark's own
+   rectangle, whose four offsets arrive as --cmd-t/-r/-b/-l: no text scales,
+   nothing reflows, and the mark the bar grows out of is the mark it leaves
+   behind. A uniform scale from a 26px mark to a 680px panel is a factor of
+   0.04, which arrives as a smear.
+
+   Two keyframe sets, one per corner style, because one element cannot hold two
+   clip-paths and the sharp style's chamfer IS a clip-path. Soft interpolates
+   inset() and ends past the border box, so the panel's drop shadow is revealed
+   rather than appearing on the last frame; sharp interpolates the same
+   six-point polygon the resting rule applies -- equal point count, so it
+   interpolates -- and ends exactly on it, where that polygon clips the outer
+   shadow away in any case. Fill is `backwards` on the open, so the end state is
+   the stylesheet's own and there is nothing to clear, and `forwards` on the
+   close, whose end state must hold until the script sets `hidden`. */
+.cmdbar { --cmd-t: 0px; --cmd-r: 0px; --cmd-b: 0px; --cmd-l: 0px; }
+.cmdbar.cmdclosing { pointer-events: none; }
+
+.cmdbar.cmdopening { animation: cmd-dim var(--cmd-open) linear backwards; }
+.cmdbar.cmdclosing { animation: cmd-undim var(--cmd-close) linear forwards; }
+@keyframes cmd-dim   { from { background-color: rgba(4, 6, 12, 0); } }
+@keyframes cmd-undim { to   { background-color: rgba(4, 6, 12, 0); } }
+
+.cmdbar.cmdopening .cmdpanel {
+  animation: cmd-grow var(--cmd-open) cubic-bezier(.2, .7, .3, 1) backwards;
+}
+.cmdbar.cmdclosing .cmdpanel {
+  animation: cmd-shrink var(--cmd-close) cubic-bezier(.45, 0, .25, 1) forwards;
+}
+@keyframes cmd-grow {
+  from { clip-path: inset(var(--cmd-t) var(--cmd-r) var(--cmd-b) var(--cmd-l) round var(--r-surface)); }
+  to   { clip-path: inset(-80px round var(--r-surface)); }
+}
+@keyframes cmd-shrink {
+  from { clip-path: inset(-80px round var(--r-surface)); opacity: 1; }
+  to   { clip-path: inset(var(--cmd-t) var(--cmd-r) var(--cmd-b) var(--cmd-l) round var(--r-surface)); opacity: 0; }
+}
+:root[data-corners="sharp"] .cmdbar.cmdopening .cmdpanel { animation-name: cmd-grow-sharp; }
+:root[data-corners="sharp"] .cmdbar.cmdclosing .cmdpanel { animation-name: cmd-shrink-sharp; }
+@keyframes cmd-grow-sharp {
+  from {
+    clip-path: polygon(
+      var(--cmd-l) var(--cmd-t),
+      calc(100% - var(--cmd-r) - 12px) var(--cmd-t),
+      calc(100% - var(--cmd-r)) calc(var(--cmd-t) + 12px),
+      calc(100% - var(--cmd-r)) calc(100% - var(--cmd-b)),
+      calc(var(--cmd-l) + 12px) calc(100% - var(--cmd-b)),
+      var(--cmd-l) calc(100% - var(--cmd-b) - 12px));
+  }
+  to {
+    clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+  }
+}
+@keyframes cmd-shrink-sharp {
+  from {
+    clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+    opacity: 1;
+  }
+  to {
+    clip-path: polygon(
+      var(--cmd-l) var(--cmd-t),
+      calc(100% - var(--cmd-r) - 12px) var(--cmd-t),
+      calc(100% - var(--cmd-r)) calc(var(--cmd-t) + 12px),
+      calc(100% - var(--cmd-r)) calc(100% - var(--cmd-b)),
+      calc(var(--cmd-l) + 12px) calc(100% - var(--cmd-b)),
+      var(--cmd-l) calc(100% - var(--cmd-b) - 12px));
+    opacity: 0;
+  }
+}
+
+/* The caret arrives last. Focus lands the moment the bar opens -- a keystroke
+   typed during the grow must not be lost -- so what arrives late is the caret
+   itself, held transparent by a stepped keyframe that jumps to the field's own
+   colour at the end of its duration. */
+.cmdbar.cmdopening #cmd-ask {
+  animation: cmd-caret var(--cmd-caret) steps(1, end) backwards;
+}
+@keyframes cmd-caret { from { caret-color: transparent; } }
+
+.cmdpanel {
+  width: min(680px, 92vw);
+  max-height: 72vh; display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--edge-hi);
+  border-radius: var(--r-surface);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .62);
+}
+:root[data-corners="sharp"] .cmdpanel {
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+}
+
+.cmdrow { display: flex; align-items: flex-start; gap: 10px; padding: 12px 13px; }
+/* The logo mark with its polarity flipped. In the topbar it sits on a solid
+   accent block, so its bodies are dark and the covering disc is the accent.
+   Here it sits on the panel, so the bodies take the accent and the covering
+   disc is carved in the panel colour: an accent crescent on dark, with the
+   ring (or, under the Line mark, the outlined near body) in the accent too. */
+.cmdglyph {
+  --brandbg: var(--surface);
+  color: var(--accent);
+  flex: 0 0 auto; display: block;
+}
+/* Drawn at 25px, a little larger than the topbar's 21px. The field's first
+   line box is 29.75px (4px padding either side of a 21.75px line), so a 2px
+   drop centres the mark on it and the row does not grow. Every length the
+   shared rules state in px scales by 25/21: the box, and the negative margin
+   that claws back its empty right half (open and closed). The bodies' offsets
+   are viewBox units and scale by themselves. The strokes do not: they are
+   thinned by 21/25 so the ring stays a hairline of the same device width
+   rather than thickening into another body. */
+.cmdglyph { margin-top: 2px; }
+.cmdglyph .mark { width: 50px; height: 25px; margin-right: -23.81px; }
+:root[data-mark="line"] .cmdglyph:hover .mark { margin-right: -3.57px; }
+.cmdglyph .mark .ring { stroke-width: .81; }
+:root[data-mark="line"] .cmdglyph .mark .near { stroke-width: .71; }
+/* Larger than anything else in the pane: size is the whole difference between
+   a form field and a command bar. */
+#cmd-ask {
+  flex: 1; resize: none; overflow-y: auto;
+  padding: 4px 2px; font: inherit; font-size: 15px; line-height: 1.45;
+  background: transparent; border: 0; color: var(--white);
+  border-radius: var(--r-input);
+  /* The field's own edge, and the only thing either of its two motions moves.
+     A <textarea> renders no ::after, so the line is the field's background:
+     zero width on a transparent ground, which is invisible until something
+     sweeps or flashes it. background-attachment defaults to `scroll`, which
+     pins it to the border box, so a field scrolled by a long draft keeps its
+     line at the bottom edge rather than carrying it up with the text. */
+  background-image: linear-gradient(var(--accent), var(--accent));
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 0 1px;
+}
+#cmd-ask:focus { outline: none; }
+#cmd-ask::placeholder { color: var(--grey); }
+
+.cmdpin {
+  flex: 0 0 auto; background: var(--panel); border: 1px solid var(--edge-hi);
+  color: var(--grey); padding: 2px 7px; font-size: 11px; cursor: pointer;
+  border-radius: var(--r-control);
+}
+.cmdpin[aria-pressed="true"] { color: var(--cyan-hot); border-color: var(--cyan-deep); }
+
+.cmdthreads {
+  display: flex; gap: 6px; overflow-x: auto; padding: 0 13px 9px;
+  border-bottom: 1px solid var(--edge);
+}
+.cmdchip {
+  flex: 0 0 auto; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: var(--panel); border: 1px solid var(--edge); color: var(--dim);
+  padding: 2px 8px; font-size: 10.5px; cursor: pointer;
+  border-radius: var(--r-control);
+}
+.cmdchip.on { color: var(--white); border-color: var(--cyan-deep); }
+.cmdchip.arm { border-color: var(--amber); }
+.cmdchip-x { margin-left: 6px; color: var(--grey); }
+.cmdchip.arm .cmdchip-x { color: var(--amber); }
+/* A pinned conversation sorts to the head of the row, so its chip moves and the
+   others make room. The script measures every chip before the row is
+   reconciled, offsets each one that moved back to where it was, and lets this
+   settle it to zero -- so the row makes room rather than jumping, and `translate`
+   rather than a margin means none of it touches layout. */
+.cmdchip.cmdflip { transition: translate var(--cmd-pin) cubic-bezier(.45, 0, .25, 1); }
+@media (prefers-reduced-motion: reduce) {
+  .cmdchip.cmdflip { transition: none !important; }
+}
+/* Laid over the chip being renamed, placed from that chip's own box. */
+.cmdrename { position: fixed; z-index: 1; margin: 0; cursor: text; color: var(--white); }
+.cmdrename[hidden] { display: none; }
+.cmdnote { padding: 0 13px 9px; font-size: 9.5px; color: var(--grey); }
+
+/* One `animation` property on the field means one class at a time: the script
+   takes the other off before it puts either on, so an error arriving mid-sweep
+   ends the sweep rather than fighting it. */
+#cmd-ask.cmdsweep { animation: cmd-sweep var(--cmd-sweep) cubic-bezier(.2, .7, .3, 1); }
+@keyframes cmd-sweep {
+  from { background-size: 0 1px; }
+  to   { background-size: 100% 1px; }
+}
+/* One flash, two beats: a stepped keyframe holds full width for the first half
+   and nothing for the second, so the line blinks rather than sweeping. */
+#cmd-ask.cmderr {
+  background-image: linear-gradient(var(--amber), var(--amber));
+  animation: cmd-err var(--cmd-errspan) steps(1, end);
+}
+@keyframes cmd-err {
+  0%  { background-size: 100% 1px; }
+  50% { background-size: 0 1px; }
+}
+
+/* A reply's paragraphs. The gap between two of them is one line of the
+   paragraph's own type, which is what a blank line was before the split. The
+   first paragraph of a turn rises as it arrives; every later one fades where it
+   already is, because moving text somebody is reading is the one thing this
+   whole design refuses. Fill is `backwards`, never `both`: a held end frame
+   would pin an opacity over a paragraph that later streams more text. */
+.orchp + .orchp { margin-top: 1.4em; }
+.orchp.orchpfirst { animation: cmd-para-first var(--cmd-first) cubic-bezier(.2, .7, .3, 1) backwards; }
+.orchp.orchpin    { animation: cmd-para var(--cmd-para) linear backwards; }
+@keyframes cmd-para-first { from { opacity: 0; translate: 0 var(--cmd-firstrise); } }
+@keyframes cmd-para       { from { opacity: 0; } }
+
+/* cmd-markdown.js's own tags, all below #cmd-ask's 15px -- the only larger
+   scale in this file. One size down for h1, and down again for h2/h3. */
+.orcha h1, .orcha h2, .orcha h3 { color: var(--white); font-weight: 700; line-height: 1.3; margin: .5em 0 .25em; }
+.orcha h1 { font-size: 14px; }
+.orcha h2 { font-size: 13px; }
+.orcha h3 { font-size: 12.25px; }
+.orcha p { margin: 0; }
+.orcha strong { color: var(--white); font-weight: 700; }
+.orcha em { font-style: italic; }
+.orcha code { font-family: var(--mono); font-size: .92em; padding: 0 3px; background: var(--panel); border-radius: var(--r-control); }
+.orcha pre {
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.5; padding: 8px 10px; margin: .4em 0;
+  overflow-x: auto; background: var(--panel); border: 1px solid var(--edge); border-radius: var(--r-control);
+  white-space: pre;
+}
+.orcha pre code { padding: 0; background: none; }
+.orcha ul, .orcha ol { margin: .3em 0; padding-left: 1.4em; }
+.orcha li { margin: .15em 0; }
+.orcha blockquote { margin: .4em 0; padding: 2px 0 2px 10px; border-left: 2px solid var(--edge-hi); color: var(--dim); }
+.orcha a { color: var(--cyan-hot); text-decoration: underline; }
+
+/* The shimmer replaces the old three-dot wait: while a sent turn has no
+   visible content yet, the QUESTION line reads as still working instead of
+   the reply box showing an empty placeholder. Two tints of the text
+   colour, never a colour change -- background-clip:text between --dim and
+   --text. Under the calm dial or reduced motion, a flat dim instead. */
+.orchq.cmdthinking {
+  background-image: linear-gradient(90deg, var(--dim) 0%, var(--text) 50%, var(--dim) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: cmd-think var(--cmd-think) linear infinite;
+}
+@keyframes cmd-think { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.orchq.cmdthinkdim { opacity: .6; }
+
+.cmdtranscript { flex: 1; overflow-y: auto; padding: 10px 13px; }
+/* The reply area gives way to the deck and takes its place back over the same
+   duration, which is what makes the swap a cross-fade rather than a cut. The
+   script un-hides it before fading in and hides it after fading out, because a
+   `.gone` node cannot animate at all. */
+.cmdtranscript { transition: opacity var(--cmd-swap) linear; }
+.cmdtranscript.cmdfading { opacity: 0; }
+.cmdfoot { padding: 8px 13px 10px; border-top: 1px solid var(--edge); }
+.cmdfoot .mnote { font-size: 9.5px; line-height: 1.7; color: var(--grey); }
+.cmdfoot kbd {
+  background: var(--panel); border: 1px solid var(--edge-hi); padding: 0 4px; color: var(--dim);
+  border-radius: var(--r-control);
+}
+
+/* --- the quick-access deck -------------------------------------------------- */
+/* Always position:fixed and placed from its host field's own box, because the
+   popup and the Projects stripe host the same node. No literal radius: every
+   surface here reads a corner token. Durations and distances come in as custom
+   properties from the module, so the CSS path and the Motion path can never
+   use different numbers.
+
+   Depth is static: every card sits a little further back and turned than the
+   one before it, and the selected card comes forward, whether or not anything
+   moves. Motion only adds to that -- transitions and the arrival, under the
+   `qamotion` and `qaarrive` classes the script sets when motion is wanted --
+   so reduced motion removes the movement and keeps the depth. */
+.qadeck {
+  position: fixed; z-index: 61;
+  max-height: 46vh; overflow-y: auto;
+  padding: 10px 12px 8px;
+  background: var(--surface); border: 1px solid var(--edge-hi);
+  border-radius: var(--r-surface);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .62);
+  perspective: 900px;
+}
+.qadeck[hidden] { display: none; }
+
+.qaband { margin-bottom: 8px; }
+.qablabel { font-size: 9px; letter-spacing: .09em; text-transform: uppercase; color: var(--grey); margin-bottom: 4px; }
+.qacards { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.qacard {
+  flex: 0 1 auto; max-width: 210px; display: flex; align-items: baseline; gap: 6px;
+  padding: 5px 9px; cursor: pointer;
+  background: var(--panel); border: 1px solid var(--edge); color: var(--dim);
+  border-radius: var(--r-control);
+  border-left: 2px solid var(--qa-color, var(--edge));
+  transform-style: preserve-3d;
+}
+.qadigit { flex: 0 0 auto; font-size: 10px; color: var(--grey); font-variant-numeric: tabular-nums; }
+.qatitle { color: var(--white); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qameta { font-size: 9.5px; color: var(--grey); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Dim and inert are told by colour, never by opacity: opacity belongs to the
+   deck's motion. Both come before .qasel so a selected dim card still shows
+   the selection. */
+/* The left stripe keeps the session's colour, so a favourite that is not
+   running is still recognisable; selection and a commit flash override it. */
+.qacard.qadim, .qacard.qainert { border-color: var(--edge); border-left-color: var(--qa-color, var(--edge)); }
+.qacard.qadim .qatitle, .qacard.qainert .qatitle { color: var(--grey); }
+.qacard.qainert { cursor: default; }
+.qacard.qasel { border-color: var(--cyan-deep); color: var(--white); }
+.qacard.qacommit { border-color: var(--accent); }
+
+.qanote { padding-top: 6px; font-size: 9.5px; color: var(--grey); }
+.qahint { padding-top: 6px; border-top: 1px solid var(--edge); font-size: 9.5px; color: var(--grey); }
+
+/* Static depth, outside any motion class. The deck is the perspective host,
+   and every level between it and the cards preserves the 3D context. */
+.qabands, .qaband, .qacards { transform-style: preserve-3d; }
+.qacard { transform: translateZ(calc(var(--qa-i, 0) * -2px)) rotateY(calc(var(--qa-i, 0) * -1.5deg)); }
+.qacard.qasel { transform: translateZ(var(--qa-forward)); }
+
+/* Transitions, only when motion is wanted. `translate` is listed beside
+   `transform` deliberately: transform is the card's static depth and is never
+   animated, so everything that MOVES a card moves it on the independent
+   property, which CSS applies outside transform and therefore composes with
+   the depth rather than replacing it. */
+.qadeck.qamotion { transition: opacity var(--qa-swap), transform var(--qa-swap); }
+.qadeck.qamotion .qacard {
+  transition: transform var(--qa-select), translate var(--qa-commit),
+              border-color var(--qa-commit), opacity var(--qa-commit);
+}
+.qadeck.qamotion .qahint { transition: opacity var(--qa-hint); }
+
+/* Leaving: a fade and a short drift down, then the script sets `hidden`. The
+   reply area fades back in over the same duration, which is the cross-fade. */
+.qadeck.qaleaving { opacity: 0; transform: translateY(6px); }
+
+/* The arrival when the Motion bundle is not there, on the same numbers: each
+   card rises from below on its own delay and fades in, and the band container
+   does not move at all. Fill mode is `backwards`, never `both` -- a held end
+   frame would pin a translate over the selected card's forward transform. */
+.qadeck.qaarrive .qacard {
+  animation: qa-cardrise var(--qa-arrive) cubic-bezier(.2, .7, .3, 1) var(--qa-delay, 0ms) backwards;
+}
+@keyframes qa-cardrise { from { opacity: 0; translate: 0 var(--qa-cardrise); } }
+
+/* A press: the card taken lifts and lights, and the deck's others dim out of
+   the way. Opacity is the right tool -- dim and inert are told by colour here,
+   and opacity belongs to the deck's motion. A press with nothing behind it for
+   the modifiers held does neither: it blinks its own edge once, so a refusal
+   reads as a refusal rather than as a dropped keystroke. */
+.qadeck.qapress .qacard { opacity: .45; }
+.qadeck.qapress .qacard.qacommit { opacity: 1; }
+.qacard.qacommit { border-color: var(--accent); translate: 0 calc(-1 * var(--qa-lift)); }
+.qacard.qarefuse { border-color: var(--edge); opacity: .55; }
+
+/* Two taps of option latch a mode you stay in, and only the hint line said so.
+   One pulse, on entry: a latched mode that keeps moving is the over-movement
+   this whole design is written against. */
+.qadeck.qalatched { border-color: var(--accent); }
+
+/* Belt as well as braces: the script already withholds the motion classes
+   under reduced motion. Depth stays; only movement goes. */
+@media (prefers-reduced-motion: reduce) {
+  .qadeck, .qadeck .qabands, .qadeck .qacard, .qadeck .qahint { animation: none !important; transition: none !important; }
+  .cmdbar, .cmdbar .cmdpanel, .cmdbar #cmd-ask, .orchp, .orchq { animation: none !important; }
+}
+
+.cmdscope {
+  align-self: center; flex: 0 0 auto; cursor: pointer; white-space: nowrap;
+  font-size: 11px; padding: 1px 8px; color: var(--cyan-hot);
+  border: 1px solid var(--cyan-deep); border-radius: var(--r-pill);
+}

@@ -21,7 +21,7 @@
 //   branch/diff     git, via $.process.run.
 //   guardrails      tool calls that came back denied, seen on the '*' hook.
 
-import type { EngineInterface, Elements, Register, RenderInput } from 'claude-code'
+import type { EngineInterface, Elements, Register, RenderInput, TurnCompleteInput } from 'claude-code'
 import { SPINNERS, TINT } from './spinner-frames.js'
 import type { Cell, Row, SpinnerDef } from './spinner-frames.js'
 
@@ -104,6 +104,13 @@ const STUCK_EDITS = 5
 /** …or this many consecutive failing tool calls. */
 const STUCK_ERRORS = 3
 
+/** A chain record's prompt and answer are each cut to this many characters:
+ *  enough to say what a turn was about, never the whole text. */
+const CHAIN_HEAD_MAX = 400
+/** Prompts remembered while they wait for the turn that works on them. One that
+ *  starts no turn ages out of this rather than piling up. */
+const CHAIN_PENDING_MAX = 8
+
 /** One narration line per turn, on the small fast model, off the render path.
  *  Set false for a build that makes no model calls at all. */
 const NARRATE = true
@@ -138,7 +145,7 @@ const SPIN_MS = 100
  *  that costs the least room, not the one that shows the most. */
 const DEFAULT_SPINNER = 'tide'
 
-/** The context meter, five steps. It replaced an 8-26 column block bar: the
+/** The context meter, six steps. It replaced an 8-26 column block bar: the
  *  `94k / 1.0M` and the `%` beside it already carry the precision, so the bar
  *  was spending a quarter of the line to repeat them.
  *
@@ -152,12 +159,41 @@ const DEFAULT_SPINNER = 'tide'
  *  the wrong way.
  *
  *  Two sets because one column is one cell and `circle` is therefore small --
- *  genuinely small, not just modest. `moon` is the same five steps drawn at
+ *  genuinely small, not just modest. `moon` is the same six steps drawn at
  *  emoji size, twice the cell width and several times the ink. Anything that
  *  measures a row must ask `displayWidth`, never `.length`: a moon is one code
- *  point and two columns. */
-const PIE_CIRCLE = ['●', '◕', '◑', '◔', '○']
-const PIE_MOON = ['🌕', '🌖', '🌗', '🌘', '🌑']
+ *  point and two columns, and the warning glyph is two columns on ONE.
+ *
+ *  The steps are a THRESHOLD TABLE, not a rounded fraction. Rounding put the
+ *  dark moon past 87%, which is long after the answers have started to drift.
+ *  The table carries the colour beside the glyph so the two cannot part. */
+export type PieStep = {
+  /** The lowest fraction USED that shows this step. */
+  from: number
+  moon: string
+  circle: string
+  pressure: 'green' | 'yellow' | 'red'
+}
+
+/** ASCENDING by `from` -- `pieStep` scans it in order and keeps the last match,
+ *  so a row out of place silently answers the wrong glyph. */
+export const PIE_STEPS: readonly PieStep[] = [
+  { from: 0, moon: '🌕', circle: '●', pressure: 'green' },
+  { from: 0.20, moon: '🌖', circle: '◕', pressure: 'green' },
+  { from: 0.35, moon: '🌗', circle: '◑', pressure: 'green' },
+  // Half a window is where the answers start to drift, and the user runs past
+  // it almost every time, so the crescent arrives here and HOLDS to two thirds
+  // rather than stepping again: a glyph that stops moving is the warning.
+  { from: 0.50, moon: '🌘', circle: '◔', pressure: 'yellow' },
+  { from: 0.66, moon: '🌑', circle: '○', pressure: 'red' },
+  // Not a phase. The gauge has nothing left to say, so it stops being a gauge.
+  { from: 0.75, moon: '❗', circle: '!', pressure: 'red' },
+]
+
+/** Every glyph the band draws that occupies TWO cells, derived from the table
+ *  so a step added later is measured right without anyone remembering a second
+ *  list. `displayWidth` is the only measure the one-row fit ladder has. */
+const WIDE_GLYPHS = new Set(PIE_STEPS.map((s) => s.moon))
 
 /** VARIATION SELECTOR-16, appended to every moon to demand emoji presentation.
  *
@@ -193,9 +229,11 @@ const HOTKEY_NARRATE = '4'
 const HOTKEY_SLOTS = ['2', '3', '5', '6', '7', '8', '9', '0']
 /** Display order for the whole row, built-ins included. */
 const HOTKEY_ORDER = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0']
+/** How long a pasteboard notice holds the band's notice row. */
+const NOTICE_MS = 20_000
 
-/** Read from `~/.claude/<file>` and then `<cwd>/.claude/<file>`, the project
- *  copy overriding the global one slot by slot. */
+/** Read from `~/.claude/<file>` and then `<worktree root>/.claude/<file>`, the
+ *  project copy overriding the global one slot by slot. */
 const HOTKEYS_FILE = 'syzygy-hud-hotkeys.json'
 
 type Hotkey = { key: string; title: string; short: string; prompt: string }
@@ -209,13 +247,22 @@ type Hotkey = { key: string; title: string; short: string; prompt: string }
  *  `spinner` is optional on purpose: its ABSENCE is meaningful (see
  *  `resolveSpinnerId`) and distinct from every real id, so it cannot be typed
  *  as `string` with a sentinel default the way `pieStyle` is. */
-type BandSettings = { spinnerPicker: boolean; pieStyle: 'moon' | 'circle'; spinner?: string }
+type BandSettings = {
+  spinnerPicker: boolean
+  pieStyle: 'moon' | 'circle'
+  spinner?: string
+  /** The leading token that turns a submitted prompt into a pasteboard entry
+   *  instead. NOT optional: the empty string is a real, meaningful value (the
+   *  feature off), which is exactly what `spinner`'s absence means for the
+   *  spinner and is why that one IS optional. */
+  pasteboardMarker: string
+}
 
 /** The spinner picker is OFF by default: it is a thing you set once and then
  *  look at forever, and it was costing a permanent row of the band. `spinner`
  *  has no default here -- omitting the key is how the file says "I have no
  *  opinion", which `resolveSpinnerId` reads as "defer to $.store". */
-const DEFAULT_SETTINGS: BandSettings = { spinnerPicker: false, pieStyle: 'moon' }
+const DEFAULT_SETTINGS: BandSettings = { spinnerPicker: false, pieStyle: 'moon', pasteboardMarker: ',,' }
 
 /** What ships when no config file exists. Two of the eight slots are filled;
  *  the rest stay empty until somebody writes them.
@@ -490,26 +537,38 @@ export const derivedWindow = (ctx: number, usedPct: number, ageMs: number): numb
   return snapWindow(ctx / (usedPct / 100))
 }
 
-/** The context meter: one of five glyphs, in the requested set.
- *
- *  Takes the fraction USED and returns the glyph for what remains -- index 0 is
- *  full, index 4 is empty. */
-export const pie = (pct: number, style: BandSettings['pieStyle'] = 'moon'): string => {
-  const set = style === 'circle' ? PIE_CIRCLE : PIE_MOON
-  const at = Math.round(Math.min(1, Math.max(0, pct)) * (set.length - 1))
-  const glyph = set[at] ?? set[0]!
-  return style === 'circle' ? glyph : glyph + VS16
+/** The step the fraction USED falls in. Clamped at both ends, and the table is
+ *  scanned rather than indexed: the steps are not evenly spaced, which is the
+ *  whole point of replacing the rounding that put the dark moon past 87%. */
+export const pieStep = (pct: number): PieStep => {
+  const p = Math.min(1, Math.max(0, pct))
+  let step = PIE_STEPS[0]!
+  for (const s of PIE_STEPS) if (p >= s.from) step = s
+  return step
 }
 
+/** The context meter: the glyph for this step, in the requested set. */
+export const pie = (pct: number, style: BandSettings['pieStyle'] = 'moon'): string => {
+  const step = pieStep(pct)
+  return style === 'circle' ? step.circle : step.moon + VS16
+}
+
+/** The band's colour for this step -- the pie, the percentage and the band's own
+ *  border. Read from the SAME table as the glyph, so the border can never go
+ *  red a step before or after the moon goes dark. */
+export const pressureOf = (pct: number): PieStep['pressure'] => pieStep(pct).pressure
+
 /** Columns a string occupies, which is NOT its length: the moon glyphs are one
- *  code point and two cells each. Only they are treated as wide -- the band's
- *  other non-ASCII (⎇ ↑ ↓ ⚑ ◈ ◇ ▸ ⚠) is all single-width, and a blanket
- *  "is it above U+2600" test would wrongly double half the row. */
+ *  code point and two cells each, and the warning glyph is ONE UTF-16 unit and
+ *  two cells -- wrong in the other direction. Only the table's own glyphs are
+ *  treated as wide: the band's other non-ASCII (⎇ ↑ ↓ ⚑ ◈ ◇ ▸ ⚠) is all
+ *  single-width, and a blanket "is it above U+2600" test would wrongly double
+ *  half the row. */
 export const displayWidth = (text: string): number => {
   let w = 0
   for (const ch of text) {
     if (ch === VS16) continue // a presentation request, not a glyph
-    w += PIE_MOON.includes(ch) ? 2 : 1
+    w += WIDE_GLYPHS.has(ch) ? 2 : 1
   }
   return w
 }
@@ -637,6 +696,20 @@ export const lastAnswerOf = (answer: string): string => {
   return LAST_ANSWER_ELIDED + text.slice(-LAST_ANSWER_MAX)
 }
 
+/** The running turn's prompt head, from turn.start's own text, and its origin,
+ *  matched by text against what prompt.submit saw. The match drops every entry
+ *  queued before it: those prompts were delivered into a turn or stashed, and
+ *  started nothing. No match leaves the queue alone and says 'unknown'. */
+export const chainPromptOf = (
+  text: string,
+  pending: readonly { head: string; origin: string }[],
+): { prompt: { head: string; origin: string }; pending: { head: string; origin: string }[] } => {
+  const head = String(text ?? '').slice(0, CHAIN_HEAD_MAX)
+  const at = head ? pending.findIndex((p) => p.head === head) : -1
+  if (at < 0) return { prompt: { head, origin: 'unknown' }, pending: [...pending] }
+  return { prompt: { head, origin: pending[at]!.origin }, pending: pending.slice(at + 1) }
+}
+
 /** Does this tool call count as "working on a plan"? Returns the plan's
  *  basename -- the identity `claim_work` and `foldEfforts` already use -- or
  *  null when the call is unrelated. Pure, and exported so `test/harness.mjs`
@@ -664,6 +737,13 @@ export const planFromToolCall = (tool: string, args: Record<string, unknown>): s
   }
   return null
 }
+
+/** At least one evidence entry ends in a line number. findings.mjs's
+ *  hasLineEvidence is the source of truth; this copy exists because the hooks
+ *  module cannot import a bridge module (that one pulls in node:fs, which the
+ *  hooks runtime does not have). test/harness.mjs asserts the two agree. */
+export const hasLineEvidence = (evidence: unknown): boolean =>
+  Array.isArray(evidence) && evidence.some((e) => typeof e === 'string' && /:\d+(:\d+)?$/.test(e.trim()))
 
 /** What the built-in pane button says. Pure, so its three states can be
  *  asserted directly -- read off a live band it would depend on whether the
@@ -696,6 +776,11 @@ export const parseSettings = (text: string): Partial<BandSettings> | null => {
   // "well-typed" and "well-formed". A parse-time check would also need
   // SPINNERS in scope, which this function otherwise has no reason to import.
   if (typeof e.spinner === 'string' && e.spinner) out.spinner = e.spinner
+  // Unlike `spinner`, the EMPTY string is kept: it is how the file says "no
+  // marker, leave my prompts alone", which is a different statement from
+  // omitting the key (inherit). Validity is checked at USE time, in
+  // normalizeMarker, the same split this function already draws.
+  if (typeof e.pasteboardMarker === 'string') out.pasteboardMarker = e.pasteboardMarker
   return out
 }
 
@@ -704,6 +789,121 @@ export const mergeSettings = (
   globals: Partial<BandSettings> | null,
   project: Partial<BandSettings> | null,
 ): BandSettings => ({ ...DEFAULT_SETTINGS, ...(globals ?? {}), ...(project ?? {}) })
+
+/** What a leading marker asked for, or `{ stash: false }` for an ordinary
+ *  prompt. */
+export type Stash =
+  | { stash: false }
+  | { stash: true; text: string; title: string | null; scope: 'session' | 'global' }
+
+/** Characters a marker may be made of: ASCII punctuation only. */
+const MARKER_CHARS = /^[!-/:-@[-`{-~]+$/
+/** Position 0 belongs to the engine for these four: a slash command, bash
+ *  mode, a memory line and a file mention. A marker starting with one would
+ *  either never fire or would shadow something the user cannot get back. */
+const MARKER_FORBIDDEN_FIRST = new Set(['/', '!', '#', '@'])
+
+/** The marker actually in force, or `''` for "no interception at all".
+ *
+ *  An UNUSABLE value disables rather than falling back to the default. The
+ *  default would start eating prompts the user never asked to have eaten, and
+ *  this mechanism's whole job is destroying what you just typed -- so the
+ *  failure direction has to be "do nothing". */
+export const normalizeMarker = (raw: unknown): string => {
+  if (raw === undefined || raw === null) return DEFAULT_SETTINGS.pasteboardMarker
+  if (typeof raw !== 'string') return ''
+  if (raw === '') return ''
+  if (raw.length > 4) return ''
+  if (!MARKER_CHARS.test(raw)) return ''
+  if (MARKER_FORBIDDEN_FIRST.has(raw[0]!)) return ''
+  return raw
+}
+
+/** Three leading forms, and their two trailing twins:
+ *
+ *      ,,<text>            this session's board
+ *      ,,,<text>           the global board  -- one more of the same key
+ *      ,,@<title> <text>   an explicit title -- @ marks a NAME
+ *      <text>,,            this session's board, decided at the END of typing
+ *      <text>,,,           the global board, likewise
+ *
+ *  A leading marker must be at index 0, with no trimming first: a stash that
+ *  depended on invisible leading characters would be impossible to reason
+ *  about when it did not fire. A trailing marker is read after trailing
+ *  whitespace is dropped, because the hand that decides to stash at the end
+ *  of a long prompt has often already hit space. Leading wins over trailing;
+ *  there is no trailing title form. The triple is tested before the double at
+ *  either end, or every global stash would land on the session board with a
+ *  comma glued to its text. */
+export const parseStash = (text: string, marker: string): Stash => {
+  if (!marker) return { stash: false }
+  const triple = marker + marker[marker.length - 1]
+  let rest: string
+  let scope: 'session' | 'global'
+  if (text.startsWith(triple)) { rest = text.slice(triple.length); scope = 'global' }
+  else if (text.startsWith(marker)) { rest = text.slice(marker.length); scope = 'session' }
+  else {
+    const tail = text.replace(/\s+$/, '')
+    if (tail.endsWith(triple)) return { stash: true, text: tail.slice(0, -triple.length).replace(/\s+$/, ''), title: null, scope: 'global' }
+    if (tail.endsWith(marker)) return { stash: true, text: tail.slice(0, -marker.length).replace(/\s+$/, ''), title: null, scope: 'session' }
+    return { stash: false }
+  }
+
+  let title: string | null = null
+  if (rest.startsWith('@')) {
+    const space = rest.indexOf(' ')
+    const word = space === -1 ? rest.slice(1) : rest.slice(1, space)
+    if (word) {
+      title = word.slice(0, 60)
+      rest = space === -1 ? '' : rest.slice(space + 1)
+    }
+  }
+  return { stash: true, text: rest, title, scope }
+}
+
+/** What the engine shows the user where their prompt would have gone.
+ *
+ *  `prompt.submit`'s declaration: a hook's refusal is `{ drop: reason }` and
+ *  "the text is shown to the user as the reason". That makes this the one
+ *  confirmation guaranteed to be seen, so it is a pure function with its own
+ *  assertions rather than a string built inline in the hook. */
+export type StashOutcome = {
+  ok: boolean
+  error?: string
+  index?: number
+  count?: number
+  scope: 'session' | 'global'
+  text: string
+  attachments: number
+  restored: boolean
+  title?: string | null
+}
+
+const WHY: Record<string, string> = {
+  'board full': 'this board is full — delete something',
+  'pasteboard full': 'the pasteboard is full — delete something',
+  empty: 'nothing after the marker — nothing stashed',
+  unreachable: 'the relay is not answering',
+  'no session': 'this session has not registered yet',
+}
+
+export const stashReason = (r: StashOutcome): string => {
+  const where = r.scope === 'global' ? 'the global board' : "this session's board"
+  if (r.ok) {
+    const head = r.title ? `stashed as "${r.title}"` : 'stashed'
+    const at = `${(r.index ?? 0) + 1} of ${r.count ?? 1} on ${where}`
+    const lost = r.attachments > 0 ? ` · ${r.attachments} attachments were not kept` : ''
+    return `${head} · ${at}${lost}`
+  }
+  // The limit is the relay's to set, so the sentence carries the length it
+  // was handed and never a number that could go stale here.
+  const why = r.error === 'too long'
+    ? `that text is ${r.text.length.toLocaleString('en-US')} characters, over the stash limit`
+    : WHY[r.error ?? ''] ?? `could not stash (${r.error ?? 'unknown'})`
+  if (r.restored) return `pasteboard: ${why} — your text is back in the composer`
+  // The restore itself failed, so THIS STRING is the last copy of the text.
+  return `pasteboard: ${why} — and putting it back failed, so here it is: ${r.text.slice(0, 200)}`
+}
 
 /** Which spinner actually plays, three sources deep.
  *
@@ -1022,6 +1222,12 @@ const M: {
   /** Throttle for that poll: two tmux shell-outs a second would be absurd. */
   paneCheckedAt: number
   cwd: string
+  /** The worktree root for `cwd`, from `git rev-parse --show-toplevel`, or ''
+   *  when the session is not in a git worktree. Resolved once: `loadHotkeys`
+   *  runs at every turn boundary and this must not cost a subprocess there. */
+  projectRoot: string
+  /** The cwd `projectRoot` was resolved for, so the memo cannot go stale. */
+  projectRootFor: string
   repo: string | null
   agentName: string
   /** This session's pid, which is also the key of Claude Code's own session
@@ -1055,12 +1261,36 @@ const M: {
    *  never forgets. A stuck signal lapses off this, not off the count. */
   fileAt: Record<string, number>
   stuck: string | null
+  /** One line under the vitals saying what the last marker or fill did.
+   *  Cleared when the next `turn.start` bumps `M.turnSeq` past `seq`, or after
+   *  NOTICE_MS, whichever comes first -- a dropped submission starts no turn,
+   *  so the clock is the only thing that would ever clear it on an idle
+   *  session. */
+  notice: { text: string; at: number; seq: number } | null
+  /** The unusable marker value already reported to the feed, so a bad setting
+   *  is said once rather than on every prompt. */
+  markerWarned: string
   approvals: { id: string; label: string }[]
   /** Plan basenames already auto-claimed this session, so a second edit of the
    *  same plan does not POST again. Cleared at session.start (a fresh session
    *  has claimed nothing yet); NOT marked when the relay is down, so a later
    *  edit retries rather than silently giving up. */
   autoClaimed: Set<string>
+  /** Where recently submitted prompts came from, oldest first, keyed by their
+   *  head. turn.start carries the text but not the origin, so the two are
+   *  matched by text there -- never by position, because a prompt delivered
+   *  INTO a running turn starts no turn of its own and would shift every later
+   *  one. Capped; the oldest goes first. */
+  chainPending: { head: string; origin: string }[]
+  /** The head and origin of the prompt the RUNNING turn is working on, set at
+   *  turn.start and read at turn.complete, which carries neither. */
+  chainPrompt: { head: string; origin: string } | null
+  /** The files edited during the RUNNING turn. `s.files` counts for the whole
+   *  session and never forgets, which cannot say what this turn was about. */
+  turnFiles: Set<string>
+  /** Tool calls, and subagent turns, during the running turn. */
+  turnTools: number
+  subturns: number
 } = {
   state: null,
   modelLabel: '',
@@ -1097,6 +1327,8 @@ const M: {
   paneOpen: false,
   paneCheckedAt: 0,
   cwd: '',
+  projectRoot: '',
+  projectRootFor: '',
   repo: null,
   agentName: 'main',
   pid: '',
@@ -1110,8 +1342,15 @@ const M: {
   home: '',
   fileAt: {},
   stuck: null,
+  notice: null,
+  markerWarned: '',
   approvals: [],
   autoClaimed: new Set(),
+  chainPending: [],
+  chainPrompt: null,
+  turnFiles: new Set(),
+  turnTools: 0,
+  subturns: 0,
 }
 
 const note = (ev: Ev): void => {
@@ -1326,6 +1565,35 @@ const relayPost = async ($: Dollar, path: string, body: unknown): Promise<any> =
   }
 }
 
+/** The relay's answer to one stash, error named. */
+type StashPosted = { ok: boolean; error?: string; index?: number; count?: number }
+
+/** POST one stash and read the relay's answer, error body included.
+ *
+ *  Not `relayPost`: that returns `null` for every non-ok status, which
+ *  collapses "the board is full" and "the relay is gone" into the same
+ *  nothing -- and those two want different sentences and different next
+ *  actions from the person whose prompt was just swallowed. */
+const stashText = async (
+  $: Dollar,
+  body: { sessionId: string | null; sessionName: string; text: string; title?: string; scope: string },
+): Promise<StashPosted> => {
+  if (M.headless || !M.relayUp) return { ok: false, error: 'unreachable' }
+  const res = await $.http
+    .fetch(relayUrl('/api/pasteboard/create'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: M.token, ...body }),
+    })
+    .catch(() => null)
+  M.lastStatus = res?.status ?? 0
+  if (!res) return { ok: false, error: 'unreachable' }
+  let parsed: any = null
+  try { parsed = JSON.parse(res.text) } catch { parsed = null }
+  if (!res.ok) return { ok: false, error: String(parsed?.error ?? 'unreachable') }
+  return { ok: true, index: Number(parsed?.index ?? 0), count: Number(parsed?.count ?? 1) }
+}
+
 /**
  * A session's own addressable name — what a PEER must pass as SendMessage's
  * `to`. Without this every session reported the literal "main", so dragging A
@@ -1438,6 +1706,7 @@ const registerSession = async ($: Dollar): Promise<void> => {
       model: shortModel(M.modelLabel || s.modelId || 'unknown'),
       pid: M.pid,
       startedAt: s.startedAt,
+      transcript: s.transcript ?? '',
     },
   })
 }
@@ -1459,10 +1728,16 @@ const pushStats = async ($: Dollar): Promise<void> => {
     needs: M.needs,
     lastAnswer: M.lastAnswer,
     lastAnswerAt: M.lastAnswerAt,
+    // Also on the heartbeat, not only in the register body: boot registers
+    // before the first refresh has looked for the file, so the path is not
+    // known yet at that point and a session's chain could never be rebuilt
+    // from its own transcript.
+    transcript: s.transcript ?? '',
     spin: { mode: M.spinMode, word: M.spinWord, id: M.spinnerId },
     stats: {
       ctx: s.ctx,
       ctxLimit: M.contextLimit,
+      outTok: s.outTok,
       spend: usd,
       tools: s.tools,
       guardrails: s.guardrails,
@@ -1493,6 +1768,30 @@ const pushStats = async ($: Dollar): Promise<void> => {
   }
 }
 
+/** One record per finished turn: what it was asked, what it answered, what it
+ *  touched. Heads only -- the relay never needs the transcript's text and must
+ *  never be handed it. A subagent's turn is folded into its parent's count
+ *  rather than posted: a subagent is not a topic of its own. */
+const postChainTurn = async ($: Dollar, e: TurnCompleteInput): Promise<void> => {
+  if (e.agentId) { M.subturns += 1; return }
+  const s = M.state
+  if (!s) return
+  const prompt = M.chainPrompt
+  M.chainPrompt = null
+  // relayPost answers null when headless or offline, so a lost record is a gap in the chain, never a stalled turn.
+  await relayPost($, '/api/chain/turn', {
+    sessionId: s.sessionId,
+    turn: {
+      id: e.turnId, at: Date.now(), durationMs: e.durationMs, reason: e.reason,
+      origin: prompt?.origin ?? 'unknown',
+      promptHead: prompt?.head ?? '',
+      // The excerpt is the END of the answer, because that is where a turn says what it did.
+      answerHead: String(e.answer ?? '').trim().slice(-CHAIN_HEAD_MAX),
+      files: [...M.turnFiles], tools: M.turnTools, subturns: M.subturns,
+    },
+  }).catch(() => {})
+}
+
 /** The heartbeat. Recovery has to live ABOVE pushStats' early return, on the
  *  ticker, or it is unreachable for exactly as long as it is needed: a relay
  *  that blinks and comes back a second later would never be noticed. Observed
@@ -1513,8 +1812,13 @@ const heartbeat = async ($: Dollar): Promise<void> => {
   await pushStats($)
 }
 
-/** Steering: the pane queues verbs, this drains and runs them. */
-const runCommand = async ($: Dollar, cmd: any): Promise<void> => {
+/** Steering: the pane queues verbs, this drains and runs them.
+ *
+ *  Exported so `test/harness.mjs` can drive one verb directly against the mock
+ *  `$`. It is still declared at the top level and still only ever spells
+ *  `$.noun.verb(...)`, so the platform's two hard constraints hold -- exporting
+ *  is not binding. */
+export const runCommand = async ($: Dollar, cmd: any): Promise<void> => {
   const p = cmd?.payload ?? {}
   try {
     if (cmd.verb === 'prompt' && typeof p.text === 'string') {
@@ -1539,6 +1843,29 @@ const runCommand = async ($: Dollar, cmd: any): Promise<void> => {
       note({ kind: 'agent', label: 'kill sent', detail: p.agentId, internal: true })
     } else if (cmd.verb === 'send-message') {
       await sendBrief($, p)
+    } else if (cmd.verb === 'fill' && typeof p.text === 'string' && p.text) {
+      // Reload a pasteboard entry. `$.prompt.fill` writes the person's draft
+      // "replacing what it held" -- so this DESTROYS whatever was typed here,
+      // which is why every surface that offers it says so, and why a refusal
+      // is reported rather than swallowed.
+      const res = await $.prompt.fill({ text: p.text }).catch(() => ({ isFilled: false }))
+      const ok = !!(res as { isFilled?: boolean })?.isFilled
+      note({
+        kind: 'note',
+        label: ok ? 'pasteboard → composer' : 'pasteboard fill refused',
+        detail: ok ? p.text.slice(0, 90) : 'a dialog holds the keys, or this session has no composer',
+        status: ok ? undefined : 'error',
+        internal: true,
+      })
+      M.notice = {
+        text: ok
+          ? 'reloaded from the pasteboard — the composer was replaced'
+          : 'pasteboard: could not fill — a dialog holds the keys',
+        at: $.clock.now(),
+        seq: M.turnSeq,
+      }
+      // No invalidate here: pollCommands already invalidates once when its
+      // batch was non-empty, and this runs inside that loop.
     }
   } catch (err) {
     note({ kind: 'note', label: 'command failed', detail: String(err).slice(0, 100), status: 'error', internal: true })
@@ -1653,6 +1980,39 @@ const homeDir = async ($: Dollar): Promise<string> => {
   return M.home
 }
 
+/** The worktree root this session's project config belongs to, or '' when the
+ *  session is not in a git worktree.
+ *
+ *  `git rev-parse --show-toplevel`, run with the session cwd -- the SAME
+ *  command pane-v2's HOTKEYS mode runs, so the two cannot disagree about which
+ *  file a slot lives in. The two shortcuts that look right are both wrong:
+ *  `registerSession` POSTs `root: M.cwd`, which is the cwd wearing that name,
+ *  and `$.session.repo()` answers the MAIN working tree's root -- which would
+ *  send every linked worktree's band to the main checkout's file.
+ *
+ *  Memoised on the cwd it was resolved for, the way `homeDir` is: `loadHotkeys`
+ *  calls this at every turn boundary, in a function whose subprocess count has
+ *  already been trimmed once. */
+const projectRoot = async ($: Dollar): Promise<string> => {
+  if (!M.cwd) return ''
+  if (M.projectRootFor === M.cwd) return M.projectRoot
+  const res = await $.process
+    .run(['git', 'rev-parse', '--show-toplevel'], { cwd: M.cwd, timeoutMs: 5000 })
+    .catch(() => null)
+  // Recorded even when git refuses, so a cwd outside a repository is asked once
+  // and not once a turn. A non-zero exit is the answer "no worktree here".
+  M.projectRootFor = M.cwd
+  M.projectRoot = res && res.exitCode === 0 ? res.stdout.trim() : ''
+  return M.projectRoot
+}
+
+/** Where the project's hotkey overrides live, given that root. Pure, and
+ *  exported, so both branches are asserted without a subprocess: at the root
+ *  when there is one, and the cwd-relative read when there is not -- which is
+ *  what `$.process.run` resolves against anyway. */
+export const projectHotkeysPath = (root: string): string =>
+  root ? `${root}/.claude/${HOTKEYS_FILE}` : `.claude/${HOTKEYS_FILE}`
+
 /** The context window the status line implies for THIS session, or null.
  *
  *  Claude Code pipes the statusLine command `.context_window.used_percentage`,
@@ -1705,9 +2065,8 @@ const readStatusline = async ($: Dollar, sessionId: string, ctx: number): Promis
  *  A global file that will not parse falls back to the shipped defaults; one
  *  that parses to nothing is taken at its word.
  *
- *  BOTH files are read by subprocess, including the project one, which lives
- *  inside the working directory `$.fs` is sandboxed to and therefore needs no
- *  subprocess at all. It used to use `$.fs.readFile`, and that is precisely the
+ *  BOTH files are read by subprocess. It used to use `$.fs.readFile`, and that
+ *  is precisely the
  *  problem: the plugin API renamed `$.fs.readFile` to `$.fs.read` between two
  *  builds, so the call became a synchronous TypeError thrown before its
  *  own `.catch` could attach. The caller's `.catch(() => {})` then swallowed
@@ -1724,10 +2083,11 @@ const loadHotkeys = async ($: Dollar): Promise<void> => {
       .catch(() => null)
     if (res && res.exitCode === 0) globalText = res.stdout
   }
-  // Relative: $.process.run starts the child in the session's working
-  // directory, which is the worktree whose override this is.
+  // At the worktree ROOT, which is where pane-v2's HOTKEYS mode writes it. A
+  // session started in a subdirectory used to read a different file from the
+  // one the pane edited, and nothing said so.
   const proj = await $.process
-    .run(['cat', `.claude/${HOTKEYS_FILE}`], { timeoutMs: 4000 })
+    .run(['cat', projectHotkeysPath(await projectRoot($))], { timeoutMs: 4000 })
     .catch(() => null)
   const project = proj && proj.exitCode === 0 ? proj.stdout : ''
 
@@ -1816,6 +2176,18 @@ const refresh = async ($: Dollar): Promise<void> => {
   }
 }
 
+/** What one band completion cost, as far as it can be seen: the plugin API
+ *  answers text only, so tokens are estimated at four characters each and
+ *  no cost is claimed. */
+export const bandSpendBody = (site: string, model: string, prompt: string, reply: string) => ({
+  kind: 'band', site, model,
+  usage: { input: Math.ceil(prompt.length / 4), output: Math.ceil(reply.length / 4) },
+  estimated: true,
+})
+const recordBandSpend = ($: Dollar, site: string, model: string, prompt: string, reply: string): void => {
+  void relayPost($, '/api/spend', bandSpendBody(site, model, prompt, reply))
+}
+
 /** One plain-English sentence about what just happened, on the small fast
  *  model, written to state and never generated on the render path. */
 const narrate = async ($: Dollar): Promise<void> => {
@@ -1826,17 +2198,19 @@ const narrate = async ($: Dollar): Promise<void> => {
   M.narrationAt = now
   const recent = M.pending.slice(-8).map((e) => `${e.label}${e.detail ? `: ${e.detail}` : ''}`).join('\n')
   if (!recent) return
+  const prompt =
+    'These are the last actions a coding agent took. In ONE short sentence (max 12 words), ' +
+    'say what it is doing and why. No preamble.\n\n' + recent
   const text = await $.model
     .complete({
       model: 'haiku',
       maxTokens: 60,
-      prompt:
-        'These are the last actions a coding agent took. In ONE short sentence (max 12 words), ' +
-        'say what it is doing and why. No preamble.\n\n' + recent,
+      prompt,
     })
     .catch(() => '')
   if (text) {
     s.narration = text.trim().replace(/^["']|["']$/g, '').slice(0, 120)
+    recordBandSpend($, 'narrate', 'haiku', prompt, text)
     $.ui.invalidate('ui.render')
   }
 }
@@ -1939,6 +2313,59 @@ const TOOLS = [
         status: { type: 'string', enum: ['ok', 'error', 'deny'] },
       },
       required: ['label'],
+    },
+  },
+  {
+    name: 'report_finding',
+    description:
+      'Record ONE fact you learned that would change another session\'s work — not what you did, ' +
+      'what surprised you. Facts only: somebody with the whole picture does the judging. ' +
+      'Requires at least one `path:line` so a peer can check it. Call it once per finding.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        surprise: { type: 'string', description: 'One line. The fact itself, never a recommendation.' },
+        kind: {
+          type: 'string',
+          enum: ['constraint', 'drift', 'hazard', 'dead-code', 'duplicate', 'question'],
+          description:
+            'constraint: a flag/API/platform behaviour that binds other work. drift: code and its ' +
+            'doc/spec/plan disagree. hazard: a path that silently answers wrong. dead-code: reachable ' +
+            'by nothing. duplicate: two implementations of one thing. question: a shape question raised.',
+        },
+        touched: { type: 'array', items: { type: 'string' }, description: 'Files or subsystems it came out of.' },
+        evidence: { type: 'array', items: { type: 'string' }, description: 'At least one "path:line".' },
+      },
+      required: ['surprise', 'kind', 'evidence'],
+    },
+  },
+  {
+    name: 'propose_pattern',
+    description:
+      'Propose ONE repeated pattern worth turning into a reusable skill — not an observation, ' +
+      'and not something you are about to build. It queues as a candidate a person rates and a ' +
+      'later session may be dispatched to build. Requires the methodology as ordered steps ' +
+      'somebody else could follow, and at least one "path:line" or session reference. ' +
+      'Proposing nothing is the normal outcome of a session; call this at most once.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'One line naming the pattern.' },
+        idea: { type: 'string', description: 'What the pattern is, in a sentence or two.' },
+        methodology: {
+          type: 'string',
+          description: 'The ordered steps somebody else could follow. A candidate with no methodology is a flag, not a proposal.',
+        },
+        kind: {
+          type: 'string',
+          enum: ['skill', 'shape', 'kickoff', 'claude-md'],
+          description:
+            'skill: a reusable skill to build. shape: a better shape for something that already exists. ' +
+            'kickoff: a prompt worth keeping. claude-md: a project instruction worth writing down.',
+        },
+        evidence: { type: 'array', items: { type: 'string' }, description: 'At least one "path:line" or session reference.' },
+      },
+      required: ['title', 'idea', 'methodology', 'evidence'],
     },
   },
   {
@@ -2048,14 +2475,21 @@ const serveTool = async ($: Dollar, name: string, args: Record<string, unknown>)
   }
 
   if (name === 'think_harder') {
+    const model = String(args.model ?? 'claude-opus-5')
+    const question = String(args.question ?? '')
+    let failed = false
     const answer = await $.model
       .complete({
-        model: String(args.model ?? 'claude-opus-5'),
+        model,
         maxTokens: 1200,
-        prompt: String(args.question ?? ''),
+        prompt: question,
       })
-      .catch((err: unknown) => `think_harder failed: ${String(err)}`)
-    note({ kind: 'note', label: 'think_harder', detail: String(args.question ?? '').slice(0, 90) })
+      .catch((err: unknown) => {
+        failed = true
+        return `think_harder failed: ${String(err)}`
+      })
+    note({ kind: 'note', label: 'think_harder', detail: question.slice(0, 90) })
+    if (!failed) recordBandSpend($, 'think_harder', model, question, answer)
     return answer
   }
 
@@ -2084,6 +2518,64 @@ const serveTool = async ($: Dollar, name: string, args: Record<string, unknown>)
       }
     }
     return `No answer yet. The question is still open in the pane as ${posted.questionId}; carry on with your best judgement and check back later.`
+  }
+
+  if (name === 'report_finding') {
+    // .map(String).filter(Boolean) for the same reason claim_work does it: a
+    // model can send { evidence: [123] }, which is an array and would survive
+    // findings.mjs's sanitising as a number-shaped string nobody can open.
+    const surprise = typeof args.surprise === 'string' ? args.surprise.trim() : ''
+    if (!surprise) return 'Nothing recorded: `surprise` is the finding itself — one line saying what you learned.'
+    const evidence = Array.isArray(args.evidence) ? args.evidence.map(String).filter(Boolean) : []
+    // Refused HERE and not in the store. The store stays permissive on
+    // purpose: an older writer, a hand edit and the orchestrator all reach
+    // POST /api/findings. The tool is where specificity is free, because the
+    // model is right here and can fix it.
+    if (!hasLineEvidence(evidence)) {
+      return 'Nothing recorded: at least one `evidence` entry needs a line number, like ' +
+        '"syzygy/bridge/relay.mjs:738". A finding nobody can open is one nobody can check.'
+    }
+    const kind = typeof args.kind === 'string' ? args.kind : ''
+    const touched = Array.isArray(args.touched) ? args.touched.map(String).filter(Boolean) : []
+    // `session` and `project` are the PLUGIN's to fill, never the model's —
+    // claim_work's rule. A model that could set `session` could attribute a
+    // finding to somebody else. `id` and `t` are the relay's, and are not sent.
+    const sent = await relayPost($, '/api/findings', {
+      session: s ? displayName(s) : '', project: M.repo ?? '',
+      kind, touched, surprise, evidence,
+    })
+    return sent ? 'Finding recorded.' : 'The relay did not accept the finding; is it running?'
+  }
+
+  if (name === 'propose_pattern') {
+    // .map(String).filter(Boolean) for the reason claim_work and
+    // report_finding both do it: a model can send { evidence: [123] }, which
+    // is an array and would survive the store's sanitising as a
+    // number-shaped string nobody can open.
+    const title = typeof args.title === 'string' ? args.title.trim() : ''
+    const idea = typeof args.idea === 'string' ? args.idea.trim() : ''
+    const methodology = typeof args.methodology === 'string' ? args.methodology.trim() : ''
+    if (!title || !idea || !methodology) {
+      return 'Nothing queued: a proposal needs a `title`, an `idea` and a `methodology` — the ordered ' +
+        'steps somebody else could follow. Without the methodology it is a flag, not a candidate.'
+    }
+    const evidence = Array.isArray(args.evidence) ? args.evidence.map(String).filter(Boolean) : []
+    // Refused HERE and not in the store, which stays permissive because a
+    // hand edit and an older writer both reach it. The model is right here.
+    if (!evidence.length) {
+      return 'Nothing queued: `evidence` needs at least one entry — a "path:line" like ' +
+        '"syzygy/bridge/relay.mjs:738", or the session and turn it came out of. A candidate nobody can check is one nobody will build.'
+    }
+    const kind = typeof args.kind === 'string' ? args.kind : ''
+    // `session` and `project` are the PLUGIN's to fill, never the model's: a
+    // model that could set `session` could attribute a proposal to somebody else.
+    const who = s ? displayName(s) : ''
+    const sent = await relayPost($, '/api/skills/propose', {
+      source: 'session', session: who, project: M.repo ?? '',
+      sessions: [who], kind, title, idea, methodology, evidence,
+    })
+    return sent ? 'Queued as a proposed skill. Nothing is built from it until a person rates it and preps it.'
+      : 'The relay did not accept the proposal; is it running?'
   }
 
   if (name === 'claim_work') {
@@ -2163,6 +2655,12 @@ const boot = async ($: Dollar): Promise<void> => {
       : blank(id, now)
   M.cwd = await $.session.cwd().catch(() => '')
   M.autoClaimed = new Set()
+  // A fresh session has no turn in flight, and a reload must not inherit one.
+  M.chainPending = []
+  M.chainPrompt = null
+  M.turnFiles = new Set()
+  M.turnTools = 0
+  M.subturns = 0
 
   // Before every subprocess below, because the whole point is to pay none of
   // them. `readRelayEnv` short-circuits on SZG_HEADLESS and reads nothing else.
@@ -2258,6 +2756,101 @@ export const register: Register = (on) => {
     return next(e)
   })
 
+  // The pasteboard's whole trigger. A hooks module cannot read the composer --
+  // $.prompt has submit/fill/suggest and no getter -- so the text is first
+  // visible HERE, after Enter. A leading marker means "stash this instead",
+  // and the submission is cancelled with `{ drop: reason }`, which the engine
+  // shows the user as the reason (PromptSubmitResult).
+  //
+  // This is deliberately NOT in the '*' hook, which runs for every event and
+  // is the hot path.
+  on('prompt.submit', async ($, e, next) => {
+    // Where a prompt came from, for the topic chain. turn.start hands over the
+    // text but not the origin, so it is noted here and matched by text there.
+    //
+    // It OBSERVES rather than decides, and comes before the origin gate so
+    // every origin is noted: nothing is rewritten or refused by it. A stashed
+    // prompt starts no turn, so its entry never matches and simply ages out of
+    // the queue. It is a line in this hook rather than a hook of its own
+    // because a second prompt.submit registration without a matcher throws.
+    M.chainPending = [
+      ...M.chainPending,
+      { head: String(e.text ?? '').slice(0, CHAIN_HEAD_MAX), origin: e.origin?.kind ?? 'unknown' },
+    ].slice(-CHAIN_PENDING_MAX)
+
+    // The user's own Enter at the terminal, and nothing else. A peer's
+    // message, a scheduled trigger and -- the one that actually bites -- this
+    // plugin's OWN $.prompt.submit from runCommand's `prompt` verb all arrive
+    // here too, and a steering command whose text began with the marker would
+    // otherwise be eaten by the plugin that sent it.
+    if (e.origin?.kind !== 'composer') return next(e)
+    const marker = normalizeMarker(M.settings.pasteboardMarker)
+    // A configured marker that normalizes to nothing has switched stashing off.
+    // Say so once per value, or the user keeps typing `,,` and wondering why
+    // their prompts are sent.
+    const configured = M.settings.pasteboardMarker
+    if (typeof configured === 'string' && configured !== '' && marker === '' && M.markerWarned !== configured) {
+      M.markerWarned = configured
+      note({
+        kind: 'note',
+        label: 'pasteboard marker ignored',
+        detail: `unusable value ${JSON.stringify(configured)} — stashing is off`,
+        status: 'error',
+        internal: true,
+      })
+    }
+    const parsed = parseStash(e.text, marker)
+    if (!parsed.stash) return next(e)
+
+    const attachments = e.attachments?.length ?? 0
+    const body = parsed.text
+    if (!body.trim()) {
+      M.notice = { text: 'nothing after the marker', at: $.clock.now(), seq: M.turnSeq }
+      $.ui.invalidate('ui.render')
+      return { drop: stashReason({ ok: false, error: 'empty', scope: parsed.scope, text: '', attachments, restored: false }) }
+    }
+
+    // A session stash needs this session's id. Without one the relay would
+    // file it on the global board, which is not what the marker asked for, so
+    // it is refused like any other failure rather than quietly widened.
+    const s = M.state
+    const r: StashPosted =
+      parsed.scope === 'session' && !s
+        ? { ok: false, error: 'no session' }
+        : await stashText($, {
+            sessionId: parsed.scope === 'global' ? null : (s?.sessionId ?? null),
+            sessionName: s ? displayName(s) : M.sessionName,
+            text: body,
+            title: parsed.title ?? undefined,
+            scope: parsed.scope,
+          })
+
+    let restored = false
+    if (!r.ok) {
+      // The drop already cleared the composer, so without this the text exists
+      // nowhere at all. Put back what was TYPED, marker and all, so a retry is
+      // one keystroke.
+      const back = await $.prompt.fill({ text: e.text }).catch(() => ({ isFilled: false }))
+      restored = !!back?.isFilled
+    }
+
+    const reason = stashReason({
+      ...r, scope: parsed.scope, text: body, attachments, restored, title: parsed.title,
+    })
+    note({
+      kind: 'note',
+      label: r.ok ? 'stashed to the pasteboard' : 'stash refused',
+      detail: (parsed.title ? parsed.title + ' — ' : '') + body.slice(0, 90),
+      status: r.ok ? undefined : 'error',
+      internal: true,
+    })
+    M.notice = { text: reason, at: $.clock.now(), seq: M.turnSeq }
+    // Legal here: this is not the render hook, and a dropped submission starts
+    // no turn, so nothing else would ever repaint the band.
+    $.ui.invalidate('ui.render')
+    return { drop: reason }
+  })
+
   // Every event passes here. It must stay cheap and must never throw: the only
   // event it waits on is tool.call, where the result says how the call ended.
   on('*', ($, e, next) => {
@@ -2271,7 +2864,10 @@ export const register: Register = (on) => {
       // Tools this plugin registered are served here; a call no hook answers fails.
       const mine = /^mcp__syzygy__(.+)$/.exec(name)
       if (mine) {
-        return serveTool($, mine[1]!, args).then((text) => ({ result: { text } }) as never)
+        // A plain string: 2.1.270 checks a hook's result against the tool's output
+        // shape (string | array | undefined) and rejects `{ text }`, while the
+        // tool's side effect has already run.
+        return serveTool($, mine[1]!, args).then((text) => ({ result: text }) as never)
       }
 
       return next(e).then((result) => {
@@ -2280,6 +2876,7 @@ export const register: Register = (on) => {
         const denied = result && typeof result === 'object' && 'deny' in result && (result as any).deny
         const errored = result && typeof result === 'object' && (result as any).isError
         s.tools += 1
+        M.turnTools += 1
         if (denied) { s.guardrails += 1; s.errors = 0 }
         else if (errored) s.errors += 1
         else s.errors = 0
@@ -2299,6 +2896,10 @@ export const register: Register = (on) => {
         const path = typeof args.file_path === 'string' ? args.file_path : ''
         if (path && /^(Edit|Write|NotebookEdit)$/.test(name)) {
           s.files[path] = (s.files[path] ?? 0) + 1
+          // The files of THIS turn, beside the session's running count: a chain
+          // block is about what a turn touched, not what the session has ever
+          // touched.
+          M.turnFiles.add(path)
           // The count alone cannot say whether the churn is happening NOW; it
           // only ever grows. detectStuck lapses the signal off this timestamp.
           M.fileAt[path] = $.clock.now()
@@ -2345,6 +2946,10 @@ export const register: Register = (on) => {
       M.spin = 0
       M.turnSeq += 1
       M.lastClock = ''
+      M.turnFiles = new Set()
+      M.turnTools = 0
+      M.subturns = 0
+      ;({ prompt: M.chainPrompt, pending: M.chainPending } = chainPromptOf(e.text, M.chainPending))
       note({ kind: 'turn', label: 'turn started' })
       $.ui.invalidate('ui.render')
     } else if (event === 'turn.complete' && next.is('turn.complete', e)) {
@@ -2373,6 +2978,7 @@ export const register: Register = (on) => {
       void refresh($)
       void narrate($)
       void chime($, 'done')
+      void postChainTurn($, e)
     } else if (event === 'turn.step') {
       void refresh($)
     }
@@ -2479,7 +3085,7 @@ export const register: Register = (on) => {
     const boxed = props.maxRows >= 4 && inner >= 44
 
     const pct = M.contextLimit > 0 ? Math.min(1, s.ctx / M.contextLimit) : 0
-    const pressure = pct >= 0.85 ? 'red' : pct >= 0.65 ? 'yellow' : 'green'
+    const pressure = pressureOf(pct)
 
     const { usd, exact } = spendOf(s)
     const precise = M.turnStartedAt !== null
@@ -2579,6 +3185,22 @@ export const register: Register = (on) => {
         <t.Box flexDirection="row" gap={1}>
           <t.Text color="yellow" bold>{'⚠ stuck?'}</t.Text>
           <t.Text dimColor wrap="truncate-end">{M.stuck}</t.Text>
+        </t.Box>
+      ) : null
+
+    // What the last marker or fill did. Modelled on the stuck row above: an
+    // indicator with no buttons of its own, one glyph and one truncated line,
+    // gated on `roomy` for the same reason -- a band taller than maxRows is
+    // clipped and every hotkey in it is disarmed. `≡` is one column and is not
+    // an emoji, so displayWidth already measures it; `▸` and `⚠` are taken by
+    // the two rows above. A notice from an earlier turn is stale news.
+    const noticeLive =
+      M.notice !== null && M.notice.seq === M.turnSeq && $.clock.now() - M.notice.at < NOTICE_MS
+    const noticeRow =
+      noticeLive && roomy ? (
+        <t.Box flexDirection="row" gap={1}>
+          <t.Text color="cyan" bold>{'≡'}</t.Text>
+          <t.Text dimColor wrap="truncate-end">{M.notice!.text}</t.Text>
         </t.Box>
       ) : null
 
@@ -2685,6 +3307,7 @@ export const register: Register = (on) => {
     if (line2) rows.push(line2)
     if (narrationRow) rows.push(narrationRow)
     if (stuckRow) rows.push(stuckRow)
+    if (noticeRow) rows.push(noticeRow)
     if (actionRow) rows.push(actionRow)
     if (spinnerRow) rows.push(spinnerRow)
     for (const r of previewRows) rows.push(r)

@@ -53,6 +53,18 @@ type EventsMsg []Event
 // the next reconnect.
 type ProjectsMsg []Project
 
+// PasteboardMsg is the whole pasteboard, replaced. It exists for the same
+// reason ProjectsMsg does: the relay writes a `snapshot` exactly once per SSE
+// connection and broadcasts `pasteboard` on every change, so without this a
+// stash made after the pane connected would not appear until a reconnect.
+type PasteboardMsg []Paste
+
+// CanvasMsg is the whole canvas payload, replaced. Same reason ProjectsMsg
+// exists: the snapshot lands once per connection and the relay broadcasts
+// `canvas` on every change, so without this a node moved after the pane
+// connected would not arrive until a reconnect.
+type CanvasMsg Canvas
+
 // QuestionsMsg is the whole question list, replaced.
 type QuestionsMsg []Question
 
@@ -65,12 +77,24 @@ type LinksMsg []Link
 // ViewersMsg is the viewer count.
 type ViewersMsg int
 
-func (ConnMsg) relayMsg()      {}
-func (SnapshotMsg) relayMsg()  {}
-func (SessionsMsg) relayMsg()  {}
-func (EventsMsg) relayMsg()    {}
-func (ProjectsMsg) relayMsg()  {}
-func (QuestionsMsg) relayMsg() {}
-func (ApprovalsMsg) relayMsg() {}
-func (LinksMsg) relayMsg()     {}
-func (ViewersMsg) relayMsg()   {}
+// ChainMsg is one session's compact chain, replaced. It exists for the same
+// reason PasteboardMsg does: the relay writes a `snapshot` exactly once per SSE
+// connection and broadcasts `chain` on every change, so without this a block
+// opened after the pane connected would not appear until a reconnect.
+type ChainMsg struct {
+	SessionID string `json:"sessionId"`
+	Chain     Chain  `json:"chain"`
+}
+
+func (ConnMsg) relayMsg()       {}
+func (SnapshotMsg) relayMsg()   {}
+func (SessionsMsg) relayMsg()   {}
+func (EventsMsg) relayMsg()     {}
+func (ProjectsMsg) relayMsg()   {}
+func (PasteboardMsg) relayMsg() {}
+func (QuestionsMsg) relayMsg()  {}
+func (ApprovalsMsg) relayMsg()  {}
+func (LinksMsg) relayMsg()      {}
+func (ViewersMsg) relayMsg()    {}
+func (CanvasMsg) relayMsg()     {}
+func (ChainMsg) relayMsg()      {}

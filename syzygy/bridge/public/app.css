@@ -100,23 +100,33 @@
 :root[data-theme="green"]  { --hue: 152; }
 
 /* ------------------------------------------------------------- corners --
-   Three corner styles, chosen by [data-corners] on <html> and persisted per
+   TWO corner styles, chosen by [data-corners] on <html> and persisted per
    browser (app.js's CORNERS_KEY, mirroring THEME_KEY). Four tokens; three
    vary by style, --r-pill never does -- something that is already a pill
-   today (.schip, .dbadge) stays one in every style, the same way a dot stays
+   today (.schip, .dbadge) stays one in both styles, the same way a dot stays
    round: dots keep their literal 50% rather than taking a token at all.
+
+   THE RULE, and it outlives this block: EVERY NEW SURFACE READS
+   --r-surface / --r-control / --r-input rather than hard-coding a radius.
+   A hard-coded radius does not follow the setting, and the two styles then
+   disagree on one panel in a way nobody notices until they switch.
 
    DEFAULT IS SOFT: the values live on bare :root, so a page carrying no
    attribute yet -- the state on first paint, before app.js's early
    applyCorners() call lands -- already renders soft rather than the old
-   sharp/chamfered look. [data-corners="sharp"] and ="space" override.
+   sharp/chamfered look. [data-corners="sharp"] overrides.
 
    A polygon clip-path cannot round, and a clip-path is what has been
    clipping both `.panel`'s and `.card`'s own outer box-shadow/outline this
    whole time -- see `.card.colored::after` and `.card.needs` below -- so the
-   chamfer itself is switched OFF under soft and space, not merely resized to
-   0, and every rule that carries it restores it only under
-   [data-corners="sharp"]. */
+   chamfer itself is switched OFF under soft, not merely resized to 0, and
+   every rule that carries it restores it only under [data-corners="sharp"].
+
+   A third style, "space" (14px surfaces, pill controls and inputs), shipped
+   and was later dropped. A stored 'space'
+   preference migrates to soft on read, free, through applyCorners's own
+   `name in CORNERS ? name : 'soft'` fallback -- there is no migration code
+   and there must not be one. */
 :root {
   --r-surface: 6px;   /* panels, cards, modals, popovers, notices */
   --r-control: 4px;   /* buttons, tabs, chips, small labelled boxes */
@@ -127,11 +137,6 @@
   --r-surface: 0;
   --r-control: 0;
   --r-input:   0;
-}
-:root[data-corners="space"] {
-  --r-surface: 14px;
-  --r-control: var(--r-pill);
-  --r-input:   var(--r-pill);
 }
 
 * { box-sizing: border-box; }
@@ -146,8 +151,8 @@ body {
 }
 .num { font-variant-numeric: tabular-nums; }
 
-/* The chamfered corner was the deck's signature shape under sharp; soft and
-   space round instead, since a clip-path cannot. Unused in markup today, but
+/* The chamfered corner was the deck's signature shape under sharp; soft
+   rounds instead, since a clip-path cannot. Unused in markup today, but
    kept in step like every other chamfer rule below. */
 .chamfer { border-radius: var(--r-surface); }
 :root[data-corners="sharp"] .chamfer {
@@ -222,8 +227,8 @@ html, body { overflow-x: hidden; }
      its normal slot in the topbar's flex flow for layout purposes, and
      only the painted box moves left into what used to be empty padding. */
   position: relative; left: -16px;
-  /* No border-radius, on any corner, under any corner style (sharp, soft or
-     space alike) -- a deliberate, permanent exception to the --r-surface
+  /* No border-radius, on any corner, under any corner style (sharp or
+     soft alike) -- a deliberate, permanent exception to the --r-surface
      token every other panel/card takes: a navbar section reads as a
      section, never as a floating rounded card. */
   border-radius: 0;
@@ -241,8 +246,11 @@ html, body { overflow-x: hidden; }
    is scaled without re-deriving that number.
    The box is 42px wide but everything rests in its left half, so the right
    half is clawed back with a negative margin -- `line` is the only variant
-   that needs it, and it opens the margin as it swings the row out. */
-.brand .mark {
+   that needs it, and it opens the margin as it swings the row out.
+   `.markhost` is any element carrying the mark: the topbar brand and the
+   command bar's glyph. Colour comes from the host (`color` for the bodies,
+   `--brandbg` for the covering disc); everything from here down is shared. */
+.markhost .mark {
   width: 42px; height: 21px; flex: 0 0 auto; display: block;
   margin-right: -20px;
   transition: margin-right 760ms cubic-bezier(.45, 0, .25, 1);
@@ -254,28 +262,28 @@ html, body { overflow-x: hidden; }
    transform-box is explicit: the translate is in viewBox user units, not px,
    and it is also what makes transform-origin resolve to the viewBox centre --
    which is exactly the circles' centre, so .ring contracts concentrically. */
-.brand .mark .far,
-.brand .mark .mid,
-.brand .mark .near,
-.brand .mark .ring { transform-box: view-box; transform-origin: center; }
-.brand .mark .far,
-.brand .mark .mid {
+.markhost .mark .far,
+.markhost .mark .mid,
+.markhost .mark .near,
+.markhost .mark .ring { transform-box: view-box; transform-origin: center; }
+.markhost .mark .far,
+.markhost .mark .mid {
   transition: transform 620ms cubic-bezier(.3, .12, .2, 1);
 }
-.brand .mark .mid { transform: translate(2.35px, -2.2px); }
+.markhost .mark .mid { transform: translate(2.35px, -2.2px); }
 
 /* Exactly one third element exists at a time. `display: none` rather than
    opacity, so the unused one cannot be caught mid-transition by a theme change
    or a reduced-motion switch. */
-.brand .mark .ring, .brand .mark .near { display: none; }
-:root[data-mark="eclipse"] .brand .mark .ring,
-:root[data-mark="line"] .brand .mark .near { display: block; }
+.markhost .mark .ring, .markhost .mark .near { display: none; }
+:root[data-mark="eclipse"] .markhost .mark .ring,
+:root[data-mark="line"] .markhost .mark .near { display: block; }
 
-.brand .mark .ring {
+.markhost .mark .ring {
   opacity: 0; transform: scale(1.22);
   transition: opacity 260ms linear, transform 360ms cubic-bezier(.2, .7, .3, 1);
 }
-.brand .mark .near {
+.markhost .mark .near {
   opacity: 0;
   transition: opacity 240ms linear;
 }
@@ -296,40 +304,40 @@ html, body { overflow-x: hidden; }
    which is what makes it read as the body closest to you rather than as a hole
    in the disc. That is also why it needs an outline at all -- accent on accent
    is invisible. */
-:root[data-mark="line"] .brand .mark .near {
+:root[data-mark="line"] .markhost .mark .near {
   fill: var(--brandbg);
   stroke: currentColor;
   stroke-width: 0.85;
   opacity: 0;
   transition: opacity 200ms linear, transform 760ms cubic-bezier(.45, 0, .25, 1);
 }
-:root[data-mark="line"] .brand:hover .mark {
+:root[data-mark="line"] .markhost:hover .mark {
   /* Opened just enough for the row: the right-hand body ends at x 40 of 44. */
   margin-right: -3px;
 }
-:root[data-mark="line"] .brand:hover .mark .far,
-:root[data-mark="line"] .brand:hover .mark .mid,
-:root[data-mark="line"] .brand:hover .mark .near {
+:root[data-mark="line"] .markhost:hover .mark .far,
+:root[data-mark="line"] .markhost:hover .mark .mid,
+:root[data-mark="line"] .markhost:hover .mark .near {
   transition-timing-function: cubic-bezier(.45, 0, .25, 1);
   transition-duration: 760ms;
 }
 /* .far holds the left end; the other two swing out past it. The gaps are
    derived from the radii, not eyeballed: .far ends at 20.8, so .mid starts at
    21.45, and .mid ends at 32.35, so .near starts at 34.7. */
-:root[data-mark="line"] .brand:hover .mark .mid  { transform: translate(14.9px, 0); }
-:root[data-mark="line"] .brand:hover .mark .near { transform: translate(25.5px, 0); opacity: 1; }
+:root[data-mark="line"] .markhost:hover .mark .mid  { transform: translate(14.9px, 0); }
+:root[data-mark="line"] .markhost:hover .mark .near { transform: translate(25.5px, 0); opacity: 1; }
 
 /* The third element only arrives once the two bodies are lined up, so its
    delay is the slide's duration. Leaving reverses that order: it goes first,
    then the eclipse slides back apart. */
-.brand:hover .mark .mid { transform: translate(0, 0); }
-.brand:hover .mark .ring { opacity: 1; transform: scale(1); transition-delay: 480ms; }
-.brand:hover .mark .near { opacity: 1; transition-delay: 500ms; }
+.markhost:hover .mark .mid { transform: translate(0, 0); }
+.markhost:hover .mark .ring { opacity: 1; transform: scale(1); transition-delay: 480ms; }
+.markhost:hover .mark .near { opacity: 1; transition-delay: 500ms; }
 
 @media (prefers-reduced-motion: reduce) {
-  .brand .mark .mid,
-  .brand .mark .near,
-  .brand .mark .ring { transition: none; }
+  .markhost .mark .mid,
+  .markhost .mark .near,
+  .markhost .mark .ring { transition: none; }
 }
 .spacer { flex: 1; }
 
@@ -362,7 +370,7 @@ html, body { overflow-x: hidden; }
 .tab:hover { color: var(--cyan); background: var(--panel); }
 .tab.on {
   color: var(--cyan-hot); background: var(--panel); font-weight: 700;
-  /* soft and space (the default): the whole tab takes a 1px accent outline
+  /* soft (the default): the whole tab takes a 1px accent outline
      instead of the underline below: the thick coloured bar reads badly under
      these two styles. `border-color`, not an outer box-shadow, so nothing can
      clip it; `.tab`'s own resting rule already reserves a 1px transparent
@@ -532,7 +540,7 @@ main.view.on { display: grid; }
 /* Higher specificity than the rule above, and declared after it, so a rail
    panel -- borderless and backgroundless by design -- never regains the
    chamfer under sharp the way `.rail > .panel` already keeps it clip-path-
-   free under soft and space. */
+   free under soft. */
 :root[data-corners="sharp"] .rail > .panel { clip-path: none; }
 .phead {
   display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
@@ -592,6 +600,42 @@ main.view.on { display: grid; }
 .mrow.warn .mval { color: var(--amber); }
 .mrow.crit { border-left-color: var(--red-hot); }
 .mrow.crit .mval { color: var(--red-hot); }
+/* The frame chip: a metric row like the ones above it, hidden until the relay
+   shed part of the snapshot frame, ran over budget or dropped a pane. Its
+   amber edge is .mrow.warn's, lit only when droppedPanes rose. */
+.budgetchip { cursor: pointer; user-select: none; }
+.budgetchip:hover .mlabel { color: var(--accent); }
+.budgetchip.warn { border-left-color: var(--amber); }
+.budgetpop {
+  margin: 2px 14px 8px; padding: 7px 9px;
+  border: 1px solid var(--edge-hi); background: var(--panel);
+  border-radius: var(--r-control);
+  font-size: 10.5px; color: var(--text);
+}
+.budgetpop .bgpophead { color: var(--white); margin-bottom: 4px; }
+.budgetpop .bgpoprow { color: var(--dim); overflow-wrap: anywhere; }
+.budgetpop .bgpophint { color: var(--grey); margin-top: 4px; }
+/* "N more findings — open to load": what a shed section draws in place of an
+   empty state that would claim there is nothing. Solid edge once pinned. */
+.shedline {
+  flex: 0 0 auto; display: block; margin: 8px 12px 0; padding: 7px 10px;
+  text-align: left; font: inherit; font-size: 11px; color: var(--accent);
+  background: var(--panel); border: 1px dashed var(--accent-deep);
+  border-radius: var(--r-control); cursor: pointer;
+}
+.shedline:hover { color: var(--accent-hot); border-color: var(--accent); }
+.shedline.pinned { border-style: solid; }
+/* Budget mode: each panel carrying data-section wears its payload key's bytes,
+   laid over the panel so nothing beneath it moves, and a panel the frame shed
+   is dimmed everywhere but its own label. */
+.seclabel { display: none; }
+.budgetmode .seclabel {
+  display: block; position: absolute; top: 6px; right: 8px; z-index: 6;
+  padding: 1px 7px; font-size: 10px; letter-spacing: .04em; white-space: nowrap;
+  color: var(--amber); background: var(--bg); border: 1px solid var(--amber);
+  border-radius: var(--r-pill); pointer-events: none;
+}
+.budgetmode .panel.sheddim > :not(.seclabel) { opacity: .45; }
 /* The usage row's notify toggle. Dim and quiet until it is ON --
    this is an opt-in, not a control anyone needs to notice by default. */
 .notifytog {
@@ -607,6 +651,100 @@ main.view.on { display: grid; }
 .aritem { padding: 9px 10px; margin: 0 12px 8px; border: 1px solid var(--edge-hi); border-left: 3px solid var(--edge-hi); background: var(--panel); border-radius: var(--r-surface); }
 .aritem .from { display: flex; align-items: center; gap: 6px; font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: var(--grey); margin-bottom: 4px; }
 .aritem .q { font-size: 11.5px; color: var(--dim); margin-bottom: 7px; overflow-wrap: anywhere; }
+.aritem .from { flex-wrap: wrap; }
+.aritem.st-pending { border-left-color: var(--accent-deep); }
+.aritem.st-failed { border-left-color: var(--red-hot); }
+.aritem .chip.armed { color: var(--accent); border-color: var(--accent-deep); }
+.aritem .chip.fired { color: var(--green); border-color: var(--green); }
+/* A different hue from every state chip, so "the relay chose this" reads
+   before the row's own state does. */
+.aritem .chip.auto { color: var(--purple); border-color: var(--purple); }
+.aritem .arline {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+  font-size: 10.5px; color: var(--grey); margin-bottom: 6px; overflow-wrap: anywhere;
+}
+.aritem .arline .waiting { color: var(--amber); }
+.aritem .arerr { margin-bottom: 7px; }
+.arsess {
+  font: inherit; font-size: 10.5px; color: var(--accent); cursor: pointer;
+  background: transparent; border: 0; padding: 0;
+  text-decoration: underline; text-underline-offset: 2px;
+}
+.arsess:hover { color: var(--accent-hot); }
+/* Holding Option turns every row into a duplicate target; the label says so. */
+.ardup { display: none; margin-left: auto; color: var(--accent); }
+#usage-queue.dupmode .aritem { cursor: copy; }
+#usage-queue.dupmode .aritem:hover { border-color: var(--accent); }
+#usage-queue.dupmode .ardup { display: inline; }
+
+/* Queue work: the create form and the night block above the queue list. Both
+   are static markup refilled by app.js, and every flex container here that
+   gets hidden carries its own [hidden] rule -- an author `display` beats the
+   browser's own [hidden] default, the same trap .voicerow documents. */
+.arwrap { margin: 8px 12px; }
+.arform, .arnight {
+  display: flex; flex-direction: column; gap: 8px; padding: 9px 10px;
+  border: 1px solid var(--edge-hi); background: var(--panel);
+  border-radius: var(--r-surface);
+}
+.arform[hidden], .arnight[hidden], .arrow[hidden], .arpane[hidden], .archecks[hidden],
+.arnightrow[hidden], .arstatus[hidden], .arfield[hidden] { display: none; }
+.arform:focus { outline: none; }
+.arform:focus-within { border-color: var(--accent-deep); }
+.arnight { margin: 0 12px 8px; gap: 6px; border-color: var(--edge); }
+.arnight .caption { margin-bottom: 0; }
+.arrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.arseg { display: flex; flex-wrap: wrap; gap: 3px; }
+.arseg button {
+  font: inherit; font-size: 9px; letter-spacing: .12em; text-transform: uppercase;
+  padding: 4px 8px; cursor: pointer; color: var(--dim);
+  border: 1px solid var(--edge-hi); background: transparent;
+  border-radius: var(--r-control);
+}
+.arseg button:hover { color: var(--accent); border-color: var(--accent-deep); }
+.arseg button[aria-pressed="true"] { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+.arseg button u { text-underline-offset: 2px; }
+.arpane { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.arform select, .arform textarea, .arform input[type="number"],
+.arnight input[type="time"], .arnight input[type="number"] {
+  font-family: var(--mono); font-size: 11px; padding: 5px 8px;
+  max-width: 100%; min-width: 0;
+  background: var(--bg); border: 1px solid var(--edge-hi); color: var(--text); outline: none;
+  border-radius: var(--r-input);
+}
+.arform select:focus, .arform textarea:focus, .arform input[type="number"]:focus,
+.arnight input[type="time"]:focus, .arnight input[type="number"]:focus { border-color: var(--accent); }
+.arform textarea { width: 100%; min-height: 52px; resize: vertical; }
+.arform input[type="number"], .arnight input[type="number"] { width: 7em; }
+.arfield { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--dim); }
+.arfield input[type="checkbox"] { margin: 0; accent-color: var(--accent); }
+.archecks { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow-y: auto; }
+.archeck { display: flex; align-items: baseline; gap: 6px; font-size: 11px; color: var(--dim); overflow-wrap: anywhere; cursor: pointer; }
+.archeck input { margin: 0; flex: 0 0 auto; accent-color: var(--accent); }
+.arnone { font-size: 11px; color: var(--grey); line-height: 1.45; }
+.arnone code { color: var(--dim); }
+.arform .hint { padding: 7px 0 0; line-height: 1.8; }
+.arnightrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+.arstatus {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+  font-size: 10.5px; color: var(--dim); overflow-wrap: anywhere;
+}
+.arstatus.off { color: var(--grey); }
+.arstatus.held { color: var(--amber); }
+.arstatus.armed, .arstatus.active { color: var(--accent); }
+.arstatus .btn { padding: 3px 8px; font-size: 9.5px; }
+.arerr { font-size: 10.5px; color: var(--red-hot); overflow-wrap: anywhere; }
+
+/* Limit resume. The block borrows .arnight's frame; only its list, its reveal
+   and the pressed arm button are new. Corner tokens only, and no animation. */
+.arresume .arlist { display: flex; flex-direction: column; }
+.arresume .arlist .aritem { margin: 0 0 6px; cursor: pointer; }
+.arresume .arlist .empty { font-size: 11px; color: var(--grey); }
+#ar-disrupted.dupmode .aritem:hover { border-color: var(--accent); }
+#ar-disrupted.dupmode .ardup { display: inline; }
+#ar-resume-arm[aria-pressed="true"] { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+.arwins { font-size: 10.5px; color: var(--dim); }
+.arresume .hint { line-height: 1.8; }
 
 /* --------------------------------------------------------------- the folds */
 /* Each rail section's head is its disclosure control, so the whole row is the
@@ -817,6 +955,48 @@ main.view.on { display: grid; }
   font-size: 8.5px; letter-spacing: .1em; color: var(--grey);
 }
 .card .agentchip[data-live="1"] { color: var(--accent-hot); }
+/* Which peer's ask put this session to work. Bottom edge, between the
+   subagent count and .grip; a flat bordered label with no motion, because it
+   is a standing fact rather than news. */
+.card .peerchip {
+  position: absolute; left: 50%; bottom: 5px; transform: translateX(-50%);
+  max-width: 76px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 8.5px; letter-spacing: .06em; color: var(--accent);
+  border: 1px solid var(--accent-deep); border-radius: var(--r-control);
+  padding: 0 4px;
+}
+
+/* The same fact the .agentchip spells out, at a size you can see while
+   scanning the whole switchboard: a short bar down the card's right edge.
+
+   ON ::before AND NOT ON box-shadow, and that is the load-bearing part.
+   .card's own box-shadow is already .self's, .working's and .needs's left
+   inset; `.card[data-agents=...]` has the SAME specificity as `.card.working`
+   and would sit later in the file, so it would win and delete that edge. A
+   pseudo-element paints its own property and can never collide -- the same
+   escape `.card.colored::after` documents a few hundred lines below, for the
+   same reason. ::before because ::after is that ring's.
+
+   RIGHT edge because the left one is those three. A card can be working with
+   no subagents, idle with eight still running, or both, and the two edges say
+   so independently instead of fighting over one property.
+
+   Inset 12px top and bottom so it clears both corner styles: under soft the
+   card's border-radius does not clip children (no overflow:hidden), and under
+   sharp the 9px chamfer clip-path does -- 12px is clear of both, and reads as
+   a tick rather than a full edge.
+
+   `none` paints nothing but is still a written value: the attribute is ALWAYS
+   set, so "this session has no subagents" and "this pane is drawing a payload
+   with no `agents` field" stay distinguishable. */
+.card::before {
+  content: '';
+  position: absolute; right: 0; top: 12px; bottom: 12px; width: 2px;
+  pointer-events: none;
+  background: transparent;
+}
+.card[data-agents="running"]::before { background: var(--accent-hot); }
+.card[data-agents="idle"]::before    { background: var(--dim); }
 
 .hint { padding: 8px 12px; font-size: 10px; color: var(--grey); border-top: 1px solid var(--edge); letter-spacing: .04em; }
 .hint kbd { background: var(--panel); border: 1px solid var(--edge-hi); padding: 1px 5px; color: var(--dim); }
@@ -826,6 +1006,10 @@ main.view.on { display: grid; }
 #swarm { width: 100%; max-width: min(280px, 100%); max-height: 100%; aspect-ratio: 1; }
 #swarm { display: block; }
 #swarm[hidden] { display: none; }
+/* The orb in a stripe: the same canvas, a smaller box. `.pjorb` is
+   position: relative so #swarm-mode anchors to it rather than to whatever
+   positioned ancestor happens to be above. */
+.pjorb #swarm { max-width: 120px; max-height: 120px; }
 /* The presence-mode switcher. Same corner-control idiom as .btn and
    .chip elsewhere in this file — angular, uppercase, --dim/--edge-hi at
    rest, flips to filled --cyan on hover/interaction. Unobtrusive at rest
@@ -1042,6 +1226,9 @@ main.view.on { display: grid; }
    needs an explicit span or it would land under just the left column,
    leaving the right half of its row empty beside the replay log's column. */
 #usage-panel { grid-column: 1 / -1; }
+/* The findings panel is the same shape: another grid child that must span
+   both columns rather than land under just the left one. */
+#findings-panel { grid-column: 1 / -1; }
 @media (max-width: 1100px) {
   #view-telemetry.on { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; }
 }
@@ -1057,6 +1244,38 @@ main.view.on { display: grid; }
 .heatcell:hover { color: var(--bg); background: var(--cyan); border-color: var(--cyan); }
 .heatcell .n { margin-left: 5px; color: var(--grey); }
 .heatcell:hover .n { color: var(--bg); }
+
+/* ---------------------------------------------------------------- findings */
+.findbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 12px; border-bottom: 1px solid var(--edge); }
+.findbar select {
+  background: var(--surface); color: var(--text); border: 1px solid var(--edge-hi);
+  padding: 4px 7px; font: inherit; font-size: 11px; border-radius: var(--r-control);
+}
+.findbar select:focus { outline: none; border-color: var(--cyan); }
+.findgate { padding: 6px 12px; font-size: 11px; letter-spacing: .03em; color: var(--amber); border-bottom: 1px solid var(--edge); }
+.finditem {
+  padding: 9px 10px; margin: 0 12px 8px; border: 1px solid var(--edge-hi);
+  border-left: 3px solid var(--edge-hi); background: var(--panel);
+  border-radius: var(--r-surface);
+}
+.fhead { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+.fkind {
+  font-size: 8.5px; letter-spacing: .1em; text-transform: uppercase;
+  padding: 1px 5px; border: 1px solid var(--edge-hi); color: var(--cyan);
+  border-radius: var(--r-control);
+}
+.fkind.unclassified { color: var(--grey); }
+.fproj { font-size: 11px; color: var(--white); }
+.fsess, .fago { font-size: 10px; color: var(--grey); }
+.fsurprise { font-size: 12px; color: var(--text); line-height: 1.45; margin-bottom: 6px; }
+.fchips { display: flex; flex-wrap: wrap; gap: 4px; }
+.ftouched, .fevidence { display: contents; }
+.fchip {
+  font-size: 9px; padding: 1px 6px; border: 1px solid var(--edge-hi);
+  color: var(--dim); border-radius: var(--r-control);
+}
+.fchip.evidence { color: var(--cyan); }
+.fchip.warn { color: var(--bg); background: var(--amber); border-color: var(--amber); }
 
 /* ------------------------------------------------------------------- inbox */
 .ask, .appr { padding: 9px 10px; margin-bottom: 8px; border: 1px solid var(--edge-hi); background: var(--panel); border-radius: var(--r-surface); }
@@ -1256,6 +1475,34 @@ body.armed .card.marked::after {
 .mfoot .mnote kbd { background: var(--panel); border: 1px solid var(--edge-hi); padding: 0 4px; color: var(--dim); }
 .mfoot .btn { flex: 0 0 auto; }
 
+/* The fleet picker's session list. A row is a <label>, so clicking anywhere
+   in it toggles the checkbox -- no separate hit target to aim for. */
+.fleetlist {
+  max-height: 44vh; overflow-y: auto;
+  border: 1px solid var(--edge); background: var(--bg);
+  border-radius: var(--r-surface);
+}
+.fleetrow {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 10px; border-bottom: 1px solid var(--edge);
+  font-size: 12px; color: var(--text); cursor: pointer;
+}
+.fleetrow:last-child { border-bottom: none; }
+.fleetrow:hover { background: var(--panel); }
+.fleetrow input[type="checkbox"] { flex: 0 0 auto; }
+.fleetname { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fleetproj { flex: 0 0 auto; color: var(--grey); font-size: 10.5px; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Same four tokens the switchboard card's dot reads, so a row and its card
+   agree on colour without either holding a literal. */
+.fleetlist .statedot {
+  flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent-hot); opacity: .85;
+}
+.fleetlist .statedot[data-state="working"] { background: var(--amber); }
+.fleetlist .statedot[data-state="waiting"] { background: var(--amber-hot); }
+.fleetlist .statedot[data-state="error"]   { background: var(--red-hot); }
+.fleetlist .statedot[data-state="idle"]    { background: var(--accent-hot); opacity: .55; }
+
 .drawer {
   position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 92vw); z-index: 40;
   background: var(--surface); border-left: 1px solid var(--edge-hi);
@@ -1359,7 +1606,7 @@ body.armed .card.marked::after {
    Its own corners follow the same --r-surface/clip-path split as `.card`
    itself (below); under sharp it takes the identical clip-path polygon, or
    the chamfer reappears as four small square corners poking past it, and
-   under soft/space an inset box-shadow already follows border-radius on its
+   under soft an inset box-shadow already follows border-radius on its
    own, so no clip-path is needed there at all. `.colored` is the gate;
    `--card-color` is set on the node by fillCard (app.js). canvas.css
    restates this for `.cnode`, same as its `.gone` and `.needs`/`.stopped`
@@ -1383,3 +1630,7 @@ body.armed .card.marked::after {
   width: 28px; height: 22px; padding: 0; border: 1px solid var(--edge-hi);
   background: var(--panel); cursor: pointer;
 }
+
+/* The drawer's favourite star, beside the colour picker. */
+.cfavrow { margin-top: 6px; }
+.btn.cfav[aria-pressed="true"] { color: var(--amber); border-color: var(--amber); }

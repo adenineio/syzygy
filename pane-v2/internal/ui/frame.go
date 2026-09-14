@@ -163,8 +163,11 @@ func (r *Row) Rest() int {
 	return r.w - r.used
 }
 
-// Add appends styled text, truncating it to what is left.
+// Add appends styled text, truncating it to what is left. Control characters
+// are replaced first, so nothing a session reports can shear a row or emit a
+// colour the theme did not choose.
 func (r *Row) Add(st lipgloss.Style, s string) *Row {
+	s = fmtx.Plain(s)
 	if s == "" || r.Rest() == 0 {
 		return r
 	}

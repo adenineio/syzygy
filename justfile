@@ -70,10 +70,27 @@ build:
     ./node_modules/.bin/tsc -p tsconfig.build.json
     @cp syzygy/hooks/spinner-frames.js build/spinner-frames.js
 
-# Drive the compiled hooks against a mock $ and a real transcript.
-# Defaults to the newest session in ~/.claude/projects.
-# Drive the compiled hooks against a mock $ and a real transcript.
-test session="": build
+# Drive the compiled hooks against a mock $ and two synthetic transcript
+# fixtures, one under the alarm threshold and one over it, so every render
+# assertion runs against a known reading on each side of 75% every time --
+# never against whichever real transcript happens to be newest wherever this
+# runs. Hermetic: no real transcript is read, and nothing here depends on any
+# other session's history.
+# Drive the compiled hooks against two synthetic transcript fixtures. Hermetic.
+test: build
+    #!/usr/bin/env bash
+    set -eu
+    for f in test/fixtures/band/session.jsonl test/fixtures/band/session-alarm.jsonl; do
+      echo "=== $f ==="
+      node test/harness.mjs --transcript "$f"
+    done
+
+# The harness against a REAL transcript, for a by-hand check `just test`
+# cannot give you. Defaults to the newest session in ~/.claude/projects; pass
+# a session id to pick one. Not part of `just test-all`/`just verify` -- its
+# reading depends on whatever sessions happen to be sitting around locally.
+# Drive the compiled hooks against a real transcript, for a by-hand check.
+test-live session="": build
     #!/usr/bin/env bash
     set -eu
     id="{{session}}"
@@ -98,9 +115,31 @@ vendor-three:
       --outfile=syzygy/bridge/public/vendor/three.slim.min.js
     ls -la syzygy/bridge/public/vendor/three.slim.min.js
 
+# Motion's minified build carries no licence banner of its own, unlike three's,
+# so one is written in: preserving the notice is a licence obligation.
+# Rebuild the vendored Motion bundle from scripts/motion-entry.js.
+vendor-motion:
+    #!/usr/bin/env bash
+    set -eu
+    ./node_modules/.bin/esbuild scripts/motion-entry.js \
+      --bundle --format=esm --minify \
+      --banner:js='/*! Motion 13.2.0 | MIT | Copyright (c) 2024 Motion B.V. | https://motion.dev */' \
+      --outfile=syzygy/bridge/public/vendor/motion.min.js
+    ls -la syzygy/bridge/public/vendor/motion.min.js
+
 # Run the projects scanner's harness.
 test-tasks:
     node test/tasks-harness.mjs
+
+# The projects digest and document: the wire's projection, the two folds and
+# the change stamp.
+test-tasks-digest:
+    node test/tasks-digest-harness.mjs
+
+# The snapshot's byte budget: the shed's fixed order over a hand-built frame and
+# a forty-project board, and the budget a real relay reports and enforces.
+test-payload-budget:
+    node test/payload-budget-harness.mjs
 
 # The reference resolver: a plan's declared `Tasks:` and `Spec:` lines, and a
 # request's `relatesTo`, matched against the thing they name. Exact-match only:
@@ -108,6 +147,13 @@ test-tasks:
 # Declared references, resolved.
 test-refs:
     node test/refs-harness.mjs
+
+# The Projects tab's pure core: the level reducer, the overview and panel
+# derivations, the needs-a-human fold and the graph rows -- against a payload
+# captured from a real relay, never a hand-written shape.
+# The Projects tab's pure core.
+test-projects:
+    node test/projects-harness.mjs
 
 # The three checkbox states, the evidence gate behind `[x]`, and the drift
 # check that fails a plan whose ticks disagree with its ledger.
@@ -140,13 +186,45 @@ test-auth:
 test-reconcile:
     node test/reconcile-harness.mjs
 
+# The pane's SSE registry, against a fake EventSource: registration order,
+# several handlers on one event, the snapshot fan-out, an unparseable frame,
+# a throwing handler not stopping its neighbour, and the connection state
+# machine. There is no backoff to test -- the reconnect is the browser's.
+# The browser pane's event-stream registry.
+test-stream:
+    node test/stream-harness.mjs
+
 # The session canvas: cwd validation, the spawn argv (asserted as an ARRAY),
-# position inheritance by name with its refusal, the concurrency cap, the
-# reset layout's determinism, and the relay's four endpoints against a real
-# relay subprocess with a fake `claude`. No test starts a real session.
+# position inheritance by name with its refusal, the link a spawn parks and the
+# /api/register resolution that claims it, the reset layout's determinism, the
+# plus gutter's geometry, and the relay's endpoints against a real relay
+# subprocess with a fake `claude`. No test starts a real session.
 # The session canvas's harness.
 test-canvas:
     node test/canvas-harness.mjs
+
+# The peering wire's pure rules and its three durable stores, jobs included. Hermetic: a temp dir, no listener.
+test-peer:
+    node test/peer-harness.mjs
+
+# The peer listener in-process, two peering engines in-process, then two real
+# relays paired over TLS on loopback. Hermetic: OS-assigned ports, temp data
+# dirs, a fake claude. Never the relay on 4317.
+# The peer listener, two engines in-process, then two real TLS-paired relays, drops included.
+test-peer-link:
+    node test/peer-link-harness.mjs
+
+# The outbound redactor's rules, the exchange log and its stores, the tap that
+# joins them, the relay's routes, and two real relays proving what crosses is
+# redacted and nothing a peer sends runs. Hermetic: temp dirs, OS-assigned
+# ports, a fake claude. Never the relay on 4317.
+test-peer-wire:
+    node test/peer-wire-harness.mjs
+
+# The Peering tab's pure core: log rows from wire exchanges, asks and drop
+# jobs, the filters, pins and the drill-in record. No DOM, no relay.
+test-peering-model:
+    node test/peering-model-harness.mjs
 
 # Voice input's pure core (voice-math.js), the relay's voice module against
 # an injected `run` (small real node scripts stand in for uv/python/the
@@ -156,6 +234,15 @@ test-canvas:
 # The voice input harness.
 test-voice:
     node test/voice-harness.mjs
+
+# The spend ledger's pure helpers (record sanitising, the result-frame
+# reader, the digest's three windows), then the store against real temp
+# directories: ordering and the t stamp, a torn final line, rotation past
+# ROTATE_LINES, and the read route's paging. Hermetic: a temp directory,
+# never WORLD_DIR.
+# The spend ledger's harness.
+test-spend:
+    node test/spend-harness.mjs
 
 # The Projects tab identifies a plan by its BASENAME, which is the only stable
 # identity across a directory move. Across worktrees a shared basename IS the
@@ -224,10 +311,15 @@ test-all: build
     #!/usr/bin/env bash
     set -eu
     just test
+    just test-app
     echo "=== spinner frames ==="
     node test/spinner-frames-harness.mjs
     echo "=== dispatch store ==="
     node test/dispatch-harness.mjs
+    echo "=== projects model ==="
+    node test/projects-harness.mjs
+    echo "=== fanout harness ==="
+    node test/fanout-harness.mjs
     echo "=== steering store ==="
     node test/steering-harness.mjs
     for h in {{optional_plugins}} syzygy-editor; do
@@ -237,10 +329,16 @@ test-all: build
     echo "=== tasks-parse harness ==="
     node test/tasks-harness.mjs
     node test/refs-harness.mjs
+    echo "=== tasks-digest harness ==="
+    node test/tasks-digest-harness.mjs
+    echo "=== payload budget harness ==="
+    node test/payload-budget-harness.mjs
     echo "=== plan-progress harness ==="
     node test/plan-progress-harness.mjs
     echo "=== swarm harness ==="
     node test/swarm-harness.mjs
+    echo "=== stream harness ==="
+    node test/stream-harness.mjs
     echo "=== claims harness ==="
     node test/claims-harness.mjs
     echo "=== cards harness ==="
@@ -259,12 +357,56 @@ test-all: build
     node test/auth-harness.mjs
     echo "=== spinner.py harness ==="
     node test/spinner-script-harness.mjs
+    echo "=== check-bytes.py harness ==="
+    node test/check-bytes-harness.mjs
     echo "=== capture harness ==="
     node test/capture-harness.mjs
     echo "=== orchestrator harness ==="
     node test/orchestrator-harness.mjs
+    echo "=== peer harness ==="
+    node test/peer-harness.mjs
+    echo "=== peer link harness ==="
+    node test/peer-link-harness.mjs
+    echo "=== peer wire harness ==="
+    node test/peer-wire-harness.mjs
+    echo "=== peering model harness ==="
+    node test/peering-model-harness.mjs
     echo "=== findings harness ==="
     node test/findings-harness.mjs
+    echo "=== skills-queue harness ==="
+    node test/skills-queue-harness.mjs
+    echo "=== fleet harness ==="
+    node test/fleet-harness.mjs
+    echo "=== pasteboard harness ==="
+    node test/pasteboard-harness.mjs
+    echo "=== sandbox harness ==="
+    node test/sandbox-harness.mjs
+    echo "=== chain harness ==="
+    node test/chain-harness.mjs
+    echo "=== spend harness ==="
+    node test/spend-harness.mjs
+    echo "=== orbit harness ==="
+    node test/orbit-harness.mjs
+    echo "=== agent-templates harness ==="
+    node test/agent-templates-harness.mjs
+    echo "=== quick-access harness ==="
+    node test/quick-access-harness.mjs
+    echo "=== projects-motion harness ==="
+    node test/projects-motion-harness.mjs
+    echo "=== cmd-markdown harness ==="
+    node test/cmd-markdown-harness.mjs
+    echo "=== session-space harness ==="
+    node test/session-space-harness.mjs
+    echo "=== session-space math harness ==="
+    node test/session-space-math-harness.mjs
+    echo "=== pane-v2 (go) ==="
+    just tui2-test
+
+# Hermetic: the pure core under node, then the relay's fan-out routes against a
+# real relay subprocess with a fake `claude`. No real session is ever started.
+# The fan-out and live-scoping harness.
+test-fanout:
+    node test/fanout-harness.mjs
 
 # Drive the Dispatch tab's request store against a temp directory. Hermetic.
 test-dispatch:
@@ -288,6 +430,14 @@ test-statusline:
 test-spinner:
     node test/spinner-script-harness.mjs
 
+# Drives check-bytes.py against throwaway git repositories: the scan itself,
+# every allow-list and vendored-bundle skip, a .gitattributes binary rule
+# honored, and a path missing from the working tree reported rather than
+# silently passed. Hermetic: CHECK_BYTES_ROOT points every run at a temp repo,
+# never this tree's own files.
+test-check-bytes:
+    node test/check-bytes-harness.mjs
+
 # Preserves the existing command as the thing the wrapper execs into; refuses
 # rather than clobbering if one is already wrapped, or if there is no
 # statusLine.command to wrap in the first place.
@@ -309,8 +459,10 @@ test-capture:
 
 # bundleContext's priority-ordered sections and 80 KB budget (against a real
 # /api/state fixture), the older-relay omission rule, parseActions's fenced
-# JSON block, and askArgv. All pure -- no relay, no spawn.
-# The orchestrator agent's context bundle and action parser.
+# JSON block, askArgv, the persisted thread store (atomic writes, the three
+# caps, restart hydration), the six thread routes against a real relay child
+# on SZG_PORT=0, and cmdbar.js's pure helpers under node.
+# The orchestrator agent's bundle, action parser and conversation store.
 test-orchestrator:
     node test/orchestrator-harness.mjs
 
@@ -321,9 +473,87 @@ test-orchestrator:
 test-findings:
     node test/findings-harness.mjs
 
+# The fleet: broadcast target resolution and its refusals, the sweep's gate,
+# export, names and argv -- pure -- then the relay routes against a real relay
+# subprocess and a fake `claude`.
+# Broadcast targets and the architecture sweep.
+test-fleet:
+    node test/fleet-harness.mjs
+
+# The pasteboard store: the entry shape, front insertion, scoped ordering, the
+# three caps refusing rather than evicting, the atomic write, a corrupt file
+# moved aside -- then the relay's five routes against a real relay subprocess.
+# Hermetic: a temp directory, never WORLD_DIR.
+# Stashed prompts: the store and its routes.
+test-pasteboard:
+    node test/pasteboard-harness.mjs
+
+# Hermetic: the bucket store and the tmux plan under node, then the relay's
+# routes against a real relay subprocess with a fake tmux. No pane is touched.
+# The session-space store, its tmux plan and its routes.
+test-session-space:
+    node test/session-space-harness.mjs
+    node test/session-space-math-harness.mjs
+
+# Hermetic: a temp directory for the store, SZG_DATA_DIR for the relay half.
+# Drive the sandbox ledger, its routes and the gallery's pure core.
+test-sandbox:
+    node test/sandbox-harness.mjs
+
+# The topic chain: the term extraction and the boundary rule, the atomic store
+# and its caps, the refiner's refusals, the transcript replay and the frozen
+# export -- then the relay's routes against a real relay subprocess. Hermetic:
+# a temp directory, never WORLD_DIR.
+# The topic chain: the model, the store and its routes.
+test-chain:
+    node test/chain-harness.mjs
+
+# The orbit data model: the project fold (twelve worktrees to one body, a
+# session in a subdirectory, the unbound body), the stable slot table and its
+# hold, the token-rate window and its reset, the lens and focus resolution,
+# and source pins holding every mirrored constant to the file it came from.
+# Hermetic: no relay, no network.
+# The orbit data model's pure core.
+test-orbit:
+    node test/orbit-harness.mjs
+
+# The proposed-skills queue: the store's shape and caps, the mark cycle, the
+# merge that freezes a rated write-up, the pass's pure pieces, the Dispatch
+# brief, and the routes against a real relay subprocess. Hermetic: a temp
+# directory, never WORLD_DIR.
+# Proposed skills: the store, the pass's pure half, and its routes.
+test-skills-queue:
+    node test/skills-queue-harness.mjs
+
+# Hermetic: a temp directory for the store, a temp WORLD_DIR for the relay.
+# Session presets: the store, the argv, the roster parser and the routes.
+test-agent-templates:
+    node test/agent-templates-harness.mjs
+
+# Pure: the deck's bands, its fixed digits, the tap detector and the action
+# table under node, then the favourite route against a real relay on its own
+# port. A harness cannot press a key -- the modifier layer is checked by hand.
+# Quick access: the command bar's deck, and the favourite flag's route.
+test-quick-access:
+    node test/quick-access-harness.mjs
+
+# The Projects tab's motion: its pure timeline and geometry, plus the static
+# guards that keep the stylesheet and the settings markup agreeing with them.
+# Run the projects-motion harness.
+test-projects-motion:
+    node test/projects-motion-harness.mjs
+
+# Pure: escape-first, the block splitter (paragraphs, headings, lists,
+# blockquotes, fenced code) and the inline pipeline (bold, italic, code,
+# http(s)-only links) under node, plus a frozen tag-allowlist scan and an
+# XSS fixture battery. No DOM, no relay.
+# The command bar's markdown renderer.
+test-cmd-markdown:
+    node test/cmd-markdown-harness.mjs
+
 
 # Typecheck, validate and run every harness.
-verify: check check-pane validate test-all plan-check plan-names
+verify: check check-pane check-bytes validate test-all plan-check plan-names
 
 
 # The pane's browser scripts are loaded by the browser and never by a harness,
@@ -335,6 +565,17 @@ check-pane:
     set -eu
     for f in syzygy/bridge/public/*.js; do node --check "$f"; done
     echo "check-pane: every pane script parses"
+
+# A control-character escape typed into a tool call sometimes lands the REAL
+# byte in a tracked file instead of the text it was meant to spell out, and a
+# raw control byte makes that file read as binary to grep and diff. Scans
+# every tracked file's bytes; a small allow-list skips what git already knows
+# is not hand-edited text (images, fonts, wasm, .jsonl logs, a minified
+# vendored bundle). Reports every hit as path:line:column and refuses to pass
+# while one remains.
+# Fail if any tracked text file carries a raw control byte.
+check-bytes:
+    python3 scripts/check-bytes.py
 
 # The shipped copy of ~/.claude/syzygy-hud-hotkeys.json is written on install;
 # scripts/spinner.py --ensure is the one place that default is spelled out, and
@@ -445,6 +686,12 @@ relay-status:
     tok=$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.claude/syzygy-relay.json')))['token'])" 2>/dev/null || echo dev-token)
     curl -s -m 2 "http://127.0.0.1:4317/api/state?token=$tok" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); [print(' ', s['id'][:8], s.get('name'), s.get('model'), '·', (s.get('stats') or {}).get('ctx',0), 'ctx')  for s in d['sessions']]" 2>/dev/null || true
 
+# The live relay's peering state: listener, peers, health, recent asks. Reads only.
+peer-status:
+    #!/usr/bin/env bash
+    tok=$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.claude/syzygy-relay.json')))['token'])" 2>/dev/null || echo dev-token)
+    curl -s -m 2 "http://127.0.0.1:4317/api/state?token=$tok" 2>/dev/null | python3 -c "import sys,json; p=json.load(sys.stdin).get('peers'); print('relay predates peering') if p is None else (print('peering', 'on' if p['enabled'] else 'off', p.get('bind'), p.get('port'), 'listening' if p.get('listening') else 'not listening'), [print(' ', x['name'], x['health']['state'], len(x['sessions']), 'sessions', 'confirmed' if x['confirmedAt'] else 'UNCONFIRMED') for x in p['list']], [print('  ', a['dir'], a['peer'], a['state'], a['text'][:60]) for a in p['asks'][:5]])" 2>/dev/null || echo "relay not running"
+
 # Stop the relay. It restarts on the next session.start.
 relay-stop:
     @pkill -f "bridge/relay.mjs" && echo "relay stopped" || echo "no relay running"
@@ -546,3 +793,78 @@ edit path:
 # Close this window's editor pane (an editor that exits closes it by itself).
 edit-close:
     ./syzygy-editor/bin/syzygy-edit --close
+
+# The macOS shell around the pane. Electron and the packager install into
+# syzygy-app/node_modules only -- the root package.json has no workspaces, so a
+# root `npm install` never descends into it. First run downloads Electron.
+# Run the Syzygy macOS shell from source.
+app port="":
+    #!/usr/bin/env bash
+    set -eu
+    cd "{{justfile_directory()}}/syzygy-app"
+    test -d node_modules || npm install
+    # npm 11 blocks dependency install scripts by default, so Electron's own
+    # postinstall may never have unpacked its binary.
+    test -f node_modules/electron/path.txt || node node_modules/electron/install.js
+    # From source the Dock icon is Electron's unless main.js has the theme icons to show.
+    test -f dist/icon/themes/green.png || python3 make-icon.py --png-only
+    # macOS names a running app -- in the Dock and in the menu bar -- from its
+    # bundle's Info.plist, so Electron's own bundle is always called Electron.
+    # Run a renamed, re-signed copy instead, remade only when Electron changes.
+    ver=$(node -p "require('./node_modules/electron/package.json').version")
+    dev=dist/dev/Syzygy.app
+    if [ "$(cat dist/dev/electron-version 2>/dev/null || true)" != "$ver" ]; then
+      rm -rf "$dev"
+      mkdir -p dist/dev
+      ditto node_modules/electron/dist/Electron.app "$dev"
+      plist="$dev/Contents/Info.plist"
+      /usr/libexec/PlistBuddy -c 'Set :CFBundleName Syzygy' "$plist"
+      /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName Syzygy' "$plist" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c 'Add :CFBundleDisplayName string Syzygy' "$plist"
+      /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier dev.syzygy.app.dev' "$plist"
+      codesign --force --deep --sign - "$dev"
+      printf '%s' "$ver" > dist/dev/electron-version
+    fi
+    if [ -n "{{port}}" ]; then "$dev/Contents/MacOS/Electron" . --port {{port}}
+    else "$dev/Contents/MacOS/Electron" . ; fi
+
+# Build Syzygy.app into syzygy-app/dist, unsigned but ad-hoc signed so macOS
+# will launch it. Regenerates the icon from the pane's own mark first.
+# Package the Syzygy macOS shell into syzygy-app/dist.
+app-build:
+    #!/usr/bin/env bash
+    set -eu
+    cd "{{justfile_directory()}}/syzygy-app"
+    test -d node_modules || npm install
+    test -f node_modules/electron/path.txt || node node_modules/electron/install.js
+    python3 make-icon.py
+    node pack.mjs
+
+# Build Syzygy.app for the current user and put it in ~/Applications, where
+# Launchpad and Spotlight find it. Never /Applications, which needs admin. An
+# existing ~/Applications/Syzygy.app that is not this app is left alone.
+# Build the Syzygy macOS shell and install it into ~/Applications.
+app-install: app-build
+    #!/usr/bin/env bash
+    set -eu
+    src=$(ls -d "{{justfile_directory()}}"/syzygy-app/dist/Syzygy-darwin-*/Syzygy.app | head -1)
+    dest="$HOME/Applications/Syzygy.app"
+    mkdir -p "$HOME/Applications"
+    if [ -e "$dest" ]; then
+      id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$dest/Contents/Info.plist" 2>/dev/null || true)
+      if [ "$id" != "dev.syzygy.app" ]; then
+        echo "refusing: $dest exists and is not this app (bundle id '$id')" >&2
+        exit 1
+      fi
+    fi
+    tmp="$HOME/Applications/.Syzygy.app.installing"
+    rm -rf "$tmp"
+    ditto "$src" "$tmp"
+    rm -rf "$dest"
+    mv "$tmp" "$dest"
+    echo "installed $dest"
+
+# The shell's pure cores, its wiring's syntax, and the icon script.
+# The macOS shell's harness.
+test-app:
+    node test/syzygy-app-harness.mjs

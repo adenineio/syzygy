@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -100,6 +101,61 @@ var postClient = &http.Client{Timeout: 5 * time.Second}
 
 // ErrNoToken is returned when a write is attempted with no credential loaded.
 var ErrNoToken = errors.New("read-only: no token in ~/.claude/syzygy-relay.json")
+
+// getBodyCap bounds what one read may pull into the pane. A body past it is
+// refused rather than truncated, since a cut JSON body would only fail to
+// parse further along with a less useful error.
+const getBodyCap = 4 << 20
+
+// Get is the pane's first read beyond the stream, and it exists for one
+// reason: the snapshot carries a chain's block titles and states, never its
+// summaries or its turn heads, because those would ride every payload for
+// every session. A mode that wants the detail asks for exactly the one it is
+// showing.
+//
+// The credential goes on the query string and in the x-mch-token header, since
+// the relay's read routes accept either. A 401 reloads the credential file once
+// and retries once, as Post does. Any other non-2xx status comes back as the
+// status with a nil error, so a caller can tell a 404 from a dead relay.
+func (c *Client) Get(ctx context.Context, path string) ([]byte, int, error) {
+	if !c.tok.Present() {
+		return nil, 0, ErrNoToken
+	}
+	body, status, err := c.get1(ctx, path)
+	if status == http.StatusUnauthorized {
+		c.tok.Reload()
+		return c.get1(ctx, path)
+	}
+	return body, status, err
+}
+
+func (c *Client) get1(ctx context.Context, path string) ([]byte, int, error) {
+	u, err := url.Parse(c.base + path)
+	if err != nil {
+		return nil, 0, err
+	}
+	q := u.Query()
+	q.Set("token", c.tok.Value())
+	u.RawQuery = q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("x-mch-token", c.tok.Value())
+	resp, err := postClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, getBodyCap+1))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	if len(b) > getBodyCap {
+		return nil, resp.StatusCode, fmt.Errorf("read: body over %d bytes", getBodyCap)
+	}
+	return b, resp.StatusCode, nil
+}
 
 // Post performs an authed write. The credential goes in both the body and the
 // x-mch-token header, matching the relay's authed(). A 401 reloads the

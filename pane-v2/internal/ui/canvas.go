@@ -27,6 +27,10 @@ const (
 	gsPctMid
 	gsPctHigh
 	gsLink
+	// gsWire is a settled link between two cards. Dim, so the line that follows
+	// a drag -- which is live, and which the reader is steering -- is the one
+	// thing on the board in link colour.
+	gsWire
 
 	// The plain theme roles, added for the spinners. tintOf maps the engine's
 	// five spinner modes onto these; the band tints those with 24-bit hexes
@@ -53,6 +57,7 @@ var gridStyles = [...]lipgloss.Style{
 	gsPctMid:     theme.SWarn,
 	gsPctHigh:    theme.SErr,
 	gsLink:       theme.SLink,
+	gsWire:       theme.SDim,
 	gsAgent:      theme.SAgent,
 	gsValue:      theme.SValue,
 	gsWarn:       theme.SWarn,

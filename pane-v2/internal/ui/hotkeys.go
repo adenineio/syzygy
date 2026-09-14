@@ -1,9 +1,7 @@
 package ui
 
 import (
-	"fmt"
 	"strings"
-	"time"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
@@ -13,13 +11,6 @@ import (
 	"github.com/adenineio/syzygy/pane-v2/internal/hotkeys"
 	"github.com/adenineio/syzygy/pane-v2/internal/theme"
 )
-
-// hkArmed is how long an x press stays armed. It is a 3 s armed
-// window, and the two-press confirm stands in for the armed strip until that
-// strip ships: clearing a slot is destructive enough that a single blind
-// keystroke must not do it, and the confirmation stays KEYBOARD-ONLY -- see
-// mouse.go's note about why a destructive confirmation is never a hit region.
-const hkArmed = 3 * time.Second
 
 // hkField indexes the editor's three inputs.
 type hkField int
@@ -58,11 +49,6 @@ type hkState struct {
 
 	loaded bool
 	files  hotkeys.Loaded
-
-	// armed is the x confirm: which slot it is over and when it was pressed.
-	armed   bool
-	armedAt time.Time
-	armedOn string
 
 	// err is the last load or save failure, shown on the last row. A parse
 	// failure lands here and no save is attempted.
@@ -187,7 +173,6 @@ func (m Model) openHkEditor() (tea.Model, tea.Cmd) {
 		ed.in[i].CursorEnd()
 	}
 	m.hk.editor = ed
-	m.hk.armed = false
 	return m, m.hk.editor.in[hkTitle].Focus()
 }
 
@@ -247,7 +232,9 @@ func (m Model) hkClear(slot string) (tea.Model, tea.Cmd) {
 	e := m.hkEntry(m.hk.scope, slot)
 	e.Key, e.Prompt = slot, ""
 	scope := m.hk.scope
-	m.hk.armed = false
+	// The confirming press spends its own arm: x is the arming key, so the
+	// key path's cancel-on-any-other-key never clears it.
+	m.disarm()
 	m.hk.err = ""
 	return m, m.hkSaveCmd(scope, e)
 }
@@ -258,16 +245,16 @@ func (m Model) onHkKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	n := len(hotkeys.SlotKeys)
 	switch {
 	case key.Matches(msg, k.Down):
-		m.hk.row, m.hk.armed = clampInt(m.hk.row+1, 0, n-1), false
+		m.hk.row = clampInt(m.hk.row+1, 0, n-1)
 		return m, nil, true
 	case key.Matches(msg, k.Up):
-		m.hk.row, m.hk.armed = clampInt(m.hk.row-1, 0, n-1), false
+		m.hk.row = clampInt(m.hk.row-1, 0, n-1)
 		return m, nil, true
 	case key.Matches(msg, k.Edit):
 		md, cmd := m.openHkEditor()
 		return md, cmd, true
 	case key.Matches(msg, k.Scope):
-		m.hk.scope, m.hk.armed = m.hk.scope.Other(), false
+		m.hk.scope = m.hk.scope.Other()
 		m.hk.err = ""
 		return m, nil, true
 	case key.Matches(msg, k.Clear):
@@ -276,22 +263,20 @@ func (m Model) onHkKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 			return m, nil, true
 		}
 		slot := slots[m.hk.row].Key
-		if m.hkIsArmed(slot) {
+		if m.isArmed("x", slot) {
 			md, cmd := m.hkClear(slot)
 			return md, cmd, true
 		}
-		m.hk.armed, m.hk.armedAt, m.hk.armedOn = true, m.now, slot
-		return m, nil, true
+		return m, m.arm(Arm{
+			Mode: ModeHotkeys, Key: "x", Target: slot,
+			Label: "CLEAR " + slot + " in " + m.hk.scope.String(),
+			Short: "CLEAR " + slot + " ?",
+		}), true
 	case key.Matches(msg, k.Reload):
 		m.hk.err = ""
 		return m, m.hkLoadCmd(), true
 	}
 	return m, nil, false
-}
-
-// hkIsArmed reports whether an x press on this slot is still live.
-func (m Model) hkIsArmed(slot string) bool {
-	return m.hk.armed && m.hk.armedOn == slot && m.now.Sub(m.hk.armedAt) < hkArmed
 }
 
 // ------------------------------------------------------------------- view
@@ -433,22 +418,12 @@ func hkShortPath(p string) string {
 	return p
 }
 
-// hkLastRow is HOTKEYS' claim on the last row: the armed confirmation, then a
-// load or save failure, then the mode's own legend.
+// hkLastRow is HOTKEYS' claim on the last row: the editor's legend, then a
+// load or save failure.
 func (m Model) hkLastRow(f Frame) string {
 	if m.hk.editor.Open {
 		text := fitJoin(f.W, "enter save", "tab field", "esc cancel")
 		return NewRow(f.W).Add(theme.SLabel, fmtx.TruncRight(text, f.W)).String()
-	}
-	if m.hk.armed && m.hkIsArmed(m.hk.armedOn) {
-		text := fmt.Sprintf("CLEAR %s in %s ? · x again · esc", m.hk.armedOn, m.hk.scope)
-		if f.BP == BPS {
-			text = "CLEAR " + m.hk.armedOn + " ? · x · esc"
-		}
-		r := NewRow(f.W)
-		r.Add(theme.STick, theme.GTick)
-		r.Add(theme.SArmed, fmtx.TruncRight(text, r.Rest()))
-		return r.String()
 	}
 	if m.hk.err != "" {
 		r := NewRow(f.W)

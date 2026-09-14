@@ -27,9 +27,8 @@
   font-size: 12px; font-family: inherit; cursor: pointer;
   color: var(--dim); background: var(--surface); border: 1px solid var(--edge-hi);
   /* A button, not a fixed pill: it follows the corner-style token like every
-     other control (app.css), so it is square under sharp, gently rounded
-     under soft, and only a true circle -- 999px on a 22x22 box -- under
-     space, alongside the rest of that style's pill buttons. */
+     other control (app.css), so it is square under sharp and gently rounded
+     under soft, following --r-control like every other button. */
   border-radius: var(--r-control);
 }
 .mcv-mic:hover { color: var(--accent); border-color: var(--accent-deep); }

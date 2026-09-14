@@ -26,4 +26,28 @@ export {
   SphereGeometry,
   Mesh,
   MeshBasicMaterial,
+  // The stage's scene graph and its transforms.
+  Group,
+  Object3D,
+  MathUtils,
+  Matrix4,
+  Quaternion,
+  Euler,
+  // Line geometry: the only thing the WebGL layer behind the panels draws.
+  Float32BufferAttribute,
+  Line,
+  LineSegments,
+  LineBasicMaterial,
+  LineDashedMaterial,
 } from 'three'
+
+// Real DOM positioned by the same camera the WebGL layer uses, so a panel
+// keeps its text selectable, its click handling native and its corner tokens.
+export { CSS3DRenderer, CSS3DObject, CSS3DSprite } from 'three/addons/renderers/CSS3DRenderer.js'
+// Lines with a width the platform will honour. A plain LineBasicMaterial is
+// one pixel everywhere regardless of its linewidth.
+export { Line2 } from 'three/addons/lines/Line2.js'
+export { LineSegments2 } from 'three/addons/lines/LineSegments2.js'
+export { LineGeometry } from 'three/addons/lines/LineGeometry.js'
+export { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js'
+export { LineMaterial } from 'three/addons/lines/LineMaterial.js'

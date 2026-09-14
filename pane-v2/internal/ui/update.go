@@ -156,6 +156,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case armExpiredMsg:
+		if m.hasArm && msg.Seq == m.armed.Seq {
+			m.disarm()
+		}
+		return m, nil
+
 	case hkLoadedMsg:
 		m.hk.files = hotkeys.Loaded(msg)
 		m.hk.loaded = true
@@ -180,6 +186,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.hkLoadCmd(),
 			m.setToast("slot "+msg.Slot+" saved to "+msg.Scope.String(), ToneGood),
 		)
+
+	case chainDetailMsg:
+		return m.onChainDetail(msg)
 
 	case postMsg:
 		if msg.Err != nil {
@@ -293,6 +302,9 @@ func (m Model) onRelay(msg relay.Msg) (tea.Model, tea.Cmd) {
 			// a second press, rather than inviting one that cannot land.
 			m.linkFrom = ""
 		}
+		if v.State == relay.Down && m.hasArm && m.armed.NeedsRelay {
+			m.disarm()
+		}
 		if v.State == relay.Down && prev == relay.Live {
 			// The mirror stays on screen in grey: stale data is still data.
 			return m, tea.Batch(rearm, m.setToast("relay lost", ToneErr))
@@ -309,6 +321,9 @@ func (m Model) onRelay(msg relay.Msg) (tea.Model, tea.Cmd) {
 		m.events = capEvents(st.Events)
 		m.questions, m.approvals, m.links = st.Questions, st.Approvals, st.Links
 		m.projects = st.Projects
+		m.pasteboard = st.Pasteboard
+		m.chains = st.Chains
+		m.canvas = st.Canvas
 		m.viewers = st.Viewers
 		m.lastIdent = time.Time{}
 		cmds := []tea.Cmd{rearm, m.maybeIdentify()}
@@ -343,6 +358,32 @@ func (m Model) onRelay(msg relay.Msg) (tea.Model, tea.Cmd) {
 		// is built from m.projects, so without this the view froze at whatever
 		// was claimed when the pane connected.
 		m.projects = []relay.Project(v)
+		return m, rearm
+
+	case relay.PasteboardMsg:
+		// Same reason as ProjectsMsg above: the snapshot lands once per
+		// connection, so without this the board froze at whatever was stashed
+		// when the pane connected.
+		m.pasteboard = []relay.Paste(v)
+		return m, rearm
+
+	case relay.ChainMsg:
+		// Same reason as PasteboardMsg above, for one session at a time: the
+		// event replaces that session's entry and leaves every other one. The
+		// map is copied rather than written in place, so a Model copy held
+		// elsewhere never sees it change.
+		next := make(map[string]relay.Chain, len(m.chains)+1)
+		for id, ch := range m.chains {
+			next[id] = ch
+		}
+		next[v.SessionID] = v.Chain
+		m.chains = next
+		return m, rearm
+
+	case relay.CanvasMsg:
+		// Nothing draws this yet. It is read so the next rung does not have to
+		// re-open the stream contract to get it.
+		m.canvas = relay.Canvas(v)
 		return m, rearm
 
 	case relay.EventsMsg:
@@ -392,6 +433,30 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// This is ahead of the help overlay because the two are never open at
 		// once and the form is the more modal of the pair.
 		return m.onGridFormKey(msg)
+	}
+	if m.mode == ModeHotkeys && m.hk.editor.Open {
+		// The slot editor owns the keyboard the way the notes form does: every
+		// key is a character in a text field -- a space is a space, never the
+		// leader -- and this never falls through to the global bindings.
+		return m.onHkEditorKey(msg)
+	}
+	if m.showBank {
+		// The listing swallows the keyboard the way the help overlay does.
+		m.showBank = false
+		return m, nil
+	}
+	if m.leader && m.now.Before(m.leaderUntil) {
+		if md, cmd, handled := m.onLeaderKey(msg); handled {
+			return md, cmd
+		}
+	}
+	// Not handled, or expired: the leader is spent either way.
+	m.leader = false
+	// The armed family's rule: any key that is not the arming key cancels and
+	// then does whatever it does. A confirmation must never be something you
+	// walk into sideways.
+	if m.hasArm && !m.isArmedKey(msg) {
+		m.disarm()
 	}
 	if m.showHelp {
 		switch {
@@ -443,9 +508,14 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.feedScroll(n, budget, n) // past the far end, which clamps to the oldest
 			return m, nil
 		case key.Matches(msg, k.Feed.Follow):
-			m.feedFollow = !m.feedFollow
 			if m.feedFollow {
-				m.feedTop = 0
+				// Un-pinning freezes the viewport where the reader is looking.
+				// Without this the stored index is whatever it was last time and
+				// the clamp throws them a page away from what they were reading.
+				m.feedTop = m.feedTopIndex(n, budget)
+				m.feedFollow = false
+			} else {
+				m.feedFollow, m.feedTop = true, 0
 			}
 			return m, nil
 		}
@@ -457,10 +527,16 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, k.Board.Up):
 			m.boardMove(-1)
 			return m, nil
+		case key.Matches(msg, k.Board.Jump):
+			return m.boardJump()
 		case key.Matches(msg, k.Board.Focus):
 			return m.boardFocus()
 		case key.Matches(msg, k.Board.Link):
 			return m.boardLink()
+		case key.Matches(msg, k.Board.Kill):
+			return m.boardKill()
+		case key.Matches(msg, k.Board.KillAgents):
+			return m.boardKillAgents()
 		}
 	case ModeGrid:
 		lay := m.gridLayout()
@@ -487,14 +563,14 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, k.Grid.Notes):
 			return m.openGridForm()
+		case key.Matches(msg, k.Grid.Wires):
+			m.gridWires = !m.gridWires
+			return m, nil
+		case key.Matches(msg, k.Grid.WiresFocus):
+			m.gridWiresFocus = !m.gridWiresFocus
+			return m, nil
 		}
 	case ModeHotkeys:
-		if m.hk.editor.Open {
-			// The editor owns the keyboard the way the notes form does: every
-			// key is a character in a text field, and this never falls
-			// through to the global bindings.
-			return m.onHkEditorKey(msg)
-		}
 		if md, cmd, handled := m.onHkKey(msg); handled {
 			return md, cmd
 		}
@@ -509,9 +585,23 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+	case ModePaste:
+		if md, cmd, handled := m.onPbKey(msg); handled {
+			return md, cmd
+		}
+	case ModeChain:
+		// Ahead of the global set, which is what lets R rebuild here and
+		// reconnect everywhere else.
+		if md, cmd, handled := m.onChainKey(msg); handled {
+			return md, cmd
+		}
 	}
 
 	switch {
+	case key.Matches(msg, k.Global.Leader):
+		m.disarm()
+		m.leader, m.leaderUntil = true, m.now.Add(leaderWindow)
+		return m, nil
 	case key.Matches(msg, k.Global.Quit):
 		m.quitting = true
 		return m, tea.Quit
@@ -519,12 +609,13 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.showHelp = true
 		return m, nil
 	case key.Matches(msg, k.Global.Esc):
-		m.showHelp = false
+		m.showHelp, m.showBank = false, false
 		m.linkFrom = ""
 		m.dragFrom, m.gridDrag = "", gridDrag{}
 		// The armed family's rule: esc cancels anything
 		// waiting on a second press.
-		m.hk.armed = false
+		m.disarm()
+		m.leader = false
 		return m, nil
 	case key.Matches(msg, k.Global.Reconnect):
 		m.src.Reconnect()
@@ -535,8 +626,8 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.setMode(ModeVitals)
 	case key.Matches(msg, k.Global.Feed):
 		return m.setMode(ModeFeed)
-	case key.Matches(msg, k.Global.Console):
-		return m.setMode(ModeConsole)
+	case key.Matches(msg, k.Global.Paste):
+		return m.setMode(ModePaste)
 	case key.Matches(msg, k.Global.Board):
 		return m.setMode(ModeBoard)
 	case key.Matches(msg, k.Global.Grid):

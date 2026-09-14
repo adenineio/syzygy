@@ -260,8 +260,8 @@ func (m Model) viewVitals(f Frame, s relay.Session, stale bool, budget int) []st
 	}
 	rows = append(rows, Head(w, fmt.Sprintf("INBOX %d", n), right, theme.SDim))
 	for i := 0; i < n && i < 2; i++ {
-		// The inbox is rendered read-only in this pass; answering lives in
-		// CONSOLE, which is not built yet.
+		// The inbox is read-only here: the pane shows what is waiting and
+		// offers no way to answer it.
 		for _, q := range m.questions {
 			if q.SessionID != s.ID || q.Answer != nil {
 				continue

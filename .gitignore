@@ -2,6 +2,9 @@ node_modules/
 build/
 pane-v2/bin/
 
+# The macOS app's packaged bundle and generated icons (`just app-build`).
+syzygy-app/dist/
+
 # Generated from YOUR Claude Code build by the /plugin-types command, and
 # specific to that build's version. Not vendored: run /plugin-types to make
 # your own. See README.

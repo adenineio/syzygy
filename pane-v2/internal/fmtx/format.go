@@ -216,3 +216,26 @@ func Ms(ms int64) string {
 	}
 	return fmt.Sprintf("%.1fs", float64(ms)/1000)
 }
+
+// Plain replaces every control character with a space.
+//
+// A tool argument can carry anything -- a heredoc, a colour sequence a command
+// echoed, a stray bell. A control byte measures zero columns, so it slips past
+// every width calculation and either shears the row it lands in or paints it in
+// a colour nothing here chose. The fast path returns the string untouched,
+// because almost every string is.
+func Plain(s string) string {
+	if strings.IndexFunc(s, isControl) < 0 {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if isControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+func isControl(r rune) bool {
+	return r < 0x20 || (r >= 0x7f && r <= 0x9f)
+}
